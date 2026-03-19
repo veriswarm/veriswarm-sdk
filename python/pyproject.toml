@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veriswarm"
+version = "0.1.0"
+description = "Official Python SDK for the VeriSwarm AI Agent Trust Layer"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "VeriSwarm", email = "hello@veriswarm.ai"}
+]
+keywords = ["veriswarm", "ai", "trust", "agent", "moderation", "security"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://veriswarm.ai"
+Repository = "https://github.com/veriswarm/veriswarm-python-sdk"
+Documentation = "https://veriswarm.ai/docs"

@@ -1,0 +1,30 @@
+{
+  "name": "@veriswarm/sdk",
+  "version": "0.1.0",
+  "description": "Lightweight VeriSwarm provider integration client for Node.js",
+  "main": "veriswarm_client.mjs",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/veriswarm/veriswarm-node-sdk.git"
+  },
+  "keywords": [
+    "veriswarm",
+    "ai",
+    "trust",
+    "agent",
+    "moderation"
+  ],
+  "author": "VeriSwarm",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/veriswarm/veriswarm-node-sdk/issues"
+  },
+  "homepage": "https://github.com/veriswarm/veriswarm-node-sdk#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

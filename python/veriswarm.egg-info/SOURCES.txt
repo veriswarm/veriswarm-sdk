@@ -1,0 +1,7 @@
+README.md
+pyproject.toml
+veriswarm_client.py
+veriswarm.egg-info/PKG-INFO
+veriswarm.egg-info/SOURCES.txt
+veriswarm.egg-info/dependency_links.txt
+veriswarm.egg-info/top_level.txt
