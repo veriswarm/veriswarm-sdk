@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "veriswarm"
 version = "0.2.0"
-description = "Official Python SDK for the VeriSwarm AI Agent Trust Layer"
+description = "Official VeriSwarm Python SDK — trust scoring, event ingestion, and agent management for AI agents"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
     {name = "VeriSwarm", email = "hello@veriswarm.ai"}
 ]
-keywords = ["veriswarm", "ai", "trust", "agent", "moderation", "security"]
+keywords = ["veriswarm", "ai", "trust", "agent", "moderation", "security", "scoring", "mcp", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -22,11 +22,16 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "License :: OSI Approved :: MIT License",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Security",
 ]
 dependencies = []
 
 [project.urls]
 Homepage = "https://veriswarm.ai"
-Repository = "https://github.com/veriswarm/veriswarm-python-sdk"
+Repository = "https://github.com/JoshuaAFerguson/veriswarm-sdk"
 Documentation = "https://veriswarm.ai/docs"
+Issues = "https://github.com/JoshuaAFerguson/veriswarm-sdk/issues"
