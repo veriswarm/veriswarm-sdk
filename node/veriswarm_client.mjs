@@ -107,6 +107,46 @@ export class VeriSwarmClient {
     return this.#request(`/v1/public/agents/${agentId}/manifests`);
   }
 
+  // --- Credentials (Portable JWT) ---
+
+  /** Issue a signed JWT trust credential. Requires agent key auth. */
+  async issueCredential() {
+    return this.#request("/v1/credentials/issue", { method: "POST" });
+  }
+
+  /** Verify a JWT trust credential. No auth needed. */
+  async verifyCredential(credential) {
+    return this.#request("/v1/credentials/verify", { method: "POST", body: { credential } });
+  }
+
+  // --- Agent Self-Service ---
+
+  /** Get own trust scores with improvement guidance. Requires agent key auth. */
+  async getMyScores() {
+    return this.#request("/v1/agents/me/scores");
+  }
+
+  // --- Scoring Profiles ---
+
+  /** Get the current tenant's scoring profile. */
+  async getScoringProfile() {
+    return this.#request("/v1/suite/scoring/profile");
+  }
+
+  /** Set the tenant's scoring profile. Admin required. */
+  async setScoringProfile(profileCode, weightOverrides = null) {
+    const body = { profile_code: profileCode };
+    if (weightOverrides) body.weight_overrides = weightOverrides;
+    return this.#request("/v1/suite/scoring/profile", { method: "POST", body });
+  }
+
+  // --- Trust Badges ---
+
+  /** Get the URL for an agent's embeddable trust badge SVG. */
+  getBadgeUrl(agentSlug, { style = "compact", theme = "dark" } = {}) {
+    return `${this.baseUrl}/v1/badge/${agentSlug}.svg?style=${style}&theme=${theme}`;
+  }
+
   // --- Platform Status ---
 
   /** Check platform health and feature flags. */
