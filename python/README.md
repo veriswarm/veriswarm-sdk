@@ -106,6 +106,62 @@ status = client.get_platform_status()
 print(status["status"])  # "operational" or "degraded"
 ```
 
+## Credentials (Portable JWT)
+
+```python
+# Issue a signed trust credential (requires agent key auth)
+result = client.issue_credential()
+jwt_token = result["credential"]
+
+# Verify a credential from another agent
+verified = client.verify_credential("eyJhbGciOiJFUzI1NiI...")
+print(verified["veriswarm"]["policy_tier"])  # "tier_2"
+```
+
+## Agent Self-Service
+
+```python
+# Get own scores with improvement guidance
+scores = client.get_my_scores()
+print(scores["guidance"]["actions"])  # actionable improvement steps
+```
+
+## Scoring Profiles
+
+```python
+# Get current tenant profile
+profile = client.get_scoring_profile()
+print(profile["profile_code"])  # "general"
+
+# Set tenant profile
+client.set_scoring_profile("high_security")
+```
+
+## Trust Badges
+
+```python
+# Get badge URL for embedding
+url = client.get_badge_url("my-agent", style="compact", theme="dark")
+# Returns: "https://api.veriswarm.ai/v1/badge/my-agent.svg?style=compact&theme=dark"
+```
+
+## LangChain Integration
+
+```python
+from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
+
+handler = VeriSwarmCallbackHandler(api_key="vs_...", agent_id="agt_...")
+agent = initialize_agent(tools, llm, callbacks=[handler])
+
+# Optional: enforcement mode blocks denied tool calls
+handler = VeriSwarmCallbackHandler(
+    api_key="vs_...",
+    agent_id="agt_...",
+    enforce=True,
+    on_deny="raise"  # or "skip" or "log"
+)
+```
+
 ## All Methods
 
 | Method | Description |

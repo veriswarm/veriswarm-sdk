@@ -106,6 +106,16 @@ const status = await client.getPlatformStatus();
 console.log(status.status); // "operational" or "degraded"
 ```
 
+## Coming Soon
+
+The following methods are available in the Python SDK and will be added to the Node SDK in a future release:
+- `issueCredential()` — Issue portable JWT trust credentials
+- `verifyCredential(jwt)` — Verify a trust credential
+- `getMyScores()` — Get own scores with improvement guidance
+- `getScoringProfile()` — Get tenant scoring profile
+- `setScoringProfile(profileCode)` — Set tenant scoring profile
+- `getBadgeUrl(slug, options)` — Get embeddable badge URL
+
 ## All Methods
 
 | Method | Description |
