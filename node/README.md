@@ -106,15 +106,49 @@ const status = await client.getPlatformStatus();
 console.log(status.status); // "operational" or "degraded"
 ```
 
-## Coming Soon
+## Portable Credentials
 
-The following methods are available in the Python SDK and will be added to the Node SDK in a future release:
-- `issueCredential()` — Issue portable JWT trust credentials
-- `verifyCredential(jwt)` — Verify a trust credential
-- `getMyScores()` — Get own scores with improvement guidance
-- `getScoringProfile()` — Get tenant scoring profile
-- `setScoringProfile(profileCode)` — Set tenant scoring profile
-- `getBadgeUrl(slug, options)` — Get embeddable badge URL
+```javascript
+// Issue a signed JWT trust credential (requires agent key auth)
+const result = await client.issueCredential();
+console.log(result.credential); // "eyJhbGciOiJFUzI1NiI..."
+
+// Verify a credential from another agent
+const verified = await client.verifyCredential("eyJhbGciOiJFUzI1NiI...");
+console.log(verified.veriswarm.policy_tier); // "tier_2"
+```
+
+## Agent Self-Service
+
+```javascript
+// Get own scores with improvement guidance
+const myScores = await client.getMyScores();
+console.log(myScores.guidance.actions); // actionable steps to improve trust
+```
+
+## Scoring Profiles
+
+```javascript
+// Get current tenant profile
+const profile = await client.getScoringProfile();
+console.log(profile.profile_code); // "general"
+
+// Set tenant profile (admin required)
+await client.setScoringProfile("high_security");
+
+// Set with custom weight overrides (enterprise)
+await client.setScoringProfile("high_security", {
+  risk: { secret_hygiene_failures: 0.40 }
+});
+```
+
+## Trust Badges
+
+```javascript
+// Get embeddable badge URL (sync, no API call)
+const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
+// "https://api.veriswarm.ai/v1/badge/my-agent.svg?style=card&theme=dark"
+```
 
 ## All Methods
 
@@ -133,4 +167,10 @@ The following methods are available in the Python SDK and will be added to the N
 | `getAgentFlags(agentId)` | Active moderation flags |
 | `appealFlag(agentId, flagId)` | Appeal a moderation flag |
 | `getAgentManifests(agentId)` | Capability manifests |
+| `issueCredential()` | Issue portable JWT trust credential |
+| `verifyCredential(credential)` | Verify a JWT credential |
+| `getMyScores()` | Own scores with improvement guidance |
+| `getScoringProfile()` | Get tenant scoring profile |
+| `setScoringProfile(code, overrides?)` | Set tenant scoring profile |
+| `getBadgeUrl(slug, options?)` | Get embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |
