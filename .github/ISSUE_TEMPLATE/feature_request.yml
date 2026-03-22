@@ -1,0 +1,30 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package does this relate to?
+      options:
+        - Python SDK (veriswarm)
+        - Node.js SDK (@veriswarm/sdk)
+        - MCP Server (veriswarm-mcp)
+        - LangChain Adapter
+        - New adapter (CrewAI, Claude SDK, etc.)
+        - General / cross-package
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe what you're trying to do and why the current SDK doesn't support it.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work? Code examples welcome.
