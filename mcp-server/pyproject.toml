@@ -1,0 +1,16 @@
+[project]
+name = "veriswarm-mcp"
+version = "0.1.0"
+description = "VeriSwarm MCP Server — Trust infrastructure for AI agents via Model Context Protocol"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+veriswarm-mcp = "src.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

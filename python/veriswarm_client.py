@@ -137,7 +137,59 @@ class VeriSwarmClient:
         """Check platform health and feature flags."""
         return self._request("/v1/public/status")
 
+    # --- Credentials ---
+
+    def issue_credential(self) -> dict[str, Any]:
+        """Issue a signed JWT trust credential for the authenticated agent."""
+        return self._post("/v1/credentials/issue")
+
+    def verify_credential(self, credential: str) -> dict[str, Any]:
+        """Verify a JWT trust credential."""
+        return self._post("/v1/credentials/verify", {"credential": credential})
+
+    # --- Agent Self-Service ---
+
+    def get_my_scores(self) -> dict[str, Any]:
+        """Get own trust scores with improvement guidance. Requires agent key auth."""
+        return self._get("/v1/agents/me/scores")
+
+    # --- Scoring Profiles ---
+
+    def get_scoring_profile(self) -> dict[str, Any]:
+        """Get the current tenant's scoring profile."""
+        return self._get("/v1/suite/scoring/profile")
+
+    def set_scoring_profile(
+        self,
+        profile_code: str,
+        weight_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Set the tenant's scoring profile."""
+        body: dict[str, Any] = {"profile_code": profile_code}
+        if weight_overrides:
+            body["weight_overrides"] = weight_overrides
+        return self._post("/v1/suite/scoring/profile", body)
+
+    # --- Badges ---
+
+    def get_badge_url(
+        self,
+        agent_slug: str,
+        style: str = "compact",
+        theme: str = "dark",
+    ) -> str:
+        """Get the URL for an agent's embeddable trust badge."""
+        return f"{self.base_url}/v1/badge/{agent_slug}.svg?style={style}&theme={theme}"
+
     # --- Internal ---
+
+    def _get(self, path: str) -> Any:
+        """Convenience wrapper for GET requests."""
+        return self._request(path, method="GET")
+
+    def _post(self, path: str, body: Any = None) -> Any:
+        """Convenience wrapper for POST requests."""
+        return self._request(path, method="POST", body=body)
 
     def _request(self, path: str, *, method: str = "GET", body: Any = None) -> Any:
         encoded = None if body is None else json.dumps(body).encode("utf-8")

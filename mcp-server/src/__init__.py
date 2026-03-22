@@ -1,0 +1,1 @@
+"""VeriSwarm MCP Server package."""
