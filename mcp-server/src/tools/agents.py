@@ -48,6 +48,38 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             return json.dumps({"error": str(exc)})
 
     @server.tool()
+    async def get_agent_timeline(agent_id: str, limit: int = 50) -> str:
+        """Get an agent's event timeline.
+
+        agent_id: the agent's unique identifier
+        limit: maximum number of timeline entries (default 50)
+        """
+        try:
+            result = client.get(
+                f"/v1/public/agents/{agent_id}/timeline",
+                params={"limit": limit},
+            )
+            return json.dumps(result, indent=2)
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+    @server.tool()
+    async def get_agent_flags(agent_id: str) -> str:
+        """Get active moderation flags for an agent.
+
+        agent_id: the agent's unique identifier
+        """
+        try:
+            result = client.get(f"/v1/public/agents/{agent_id}/flags")
+            return json.dumps(result, indent=2)
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+    @server.tool()
     async def list_agents(
         query: str = "",
         tier: str = "",

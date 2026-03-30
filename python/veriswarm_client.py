@@ -137,6 +137,39 @@ class VeriSwarmClient:
         """Check platform health and feature flags."""
         return self._request("/v1/public/status")
 
+    # --- Guard (PII + Injection) ---
+
+    def tokenize_pii(
+        self,
+        *,
+        text: str,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Tokenize PII in text via Guard. Returns tokenized_text + session_id."""
+        body: dict[str, Any] = {"text": text}
+        if agent_id:
+            body["agent_id"] = agent_id
+        if session_id:
+            body["session_id"] = session_id
+        return self._post("/v1/suite/guard/pii/tokenize", body)
+
+    def rehydrate_pii(
+        self,
+        *,
+        text: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Restore original PII values from Guard tokens."""
+        return self._post("/v1/suite/guard/pii/rehydrate", {
+            "text": text,
+            "session_id": session_id,
+        })
+
+    def scan_injection(self, *, text: str) -> dict[str, Any]:
+        """Scan text for prompt injection patterns."""
+        return self._post("/v1/suite/guard/scan", {"text": text})
+
     # --- Credentials ---
 
     def issue_credential(self) -> dict[str, Any]:
@@ -169,6 +202,200 @@ class VeriSwarmClient:
         if weight_overrides:
             body["weight_overrides"] = weight_overrides
         return self._post("/v1/suite/scoring/profile", body)
+
+    # --- Agent Timeline ---
+
+    def get_agent_timeline(self, agent_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Get an agent's event timeline."""
+        return self._get(f"/v1/public/agents/{agent_id}/timeline?limit={limit}")
+
+    # --- Agent API Keys ---
+
+    def get_agent_api_keys(self, agent_id: str) -> list[dict[str, Any]]:
+        """List API keys for an agent."""
+        return self._get(f"/v1/public/agents/{agent_id}/api-keys")
+
+    def rotate_agent_api_key(self, agent_id: str) -> dict[str, Any]:
+        """Rotate (regenerate) an agent's API key."""
+        return self._post(f"/v1/public/agents/{agent_id}/api-keys/rotate")
+
+    def revoke_agent_api_key(self, agent_id: str, key_id: str) -> dict[str, Any]:
+        """Revoke a specific agent API key."""
+        return self._post(f"/v1/public/agents/{agent_id}/api-keys/{key_id}/revoke")
+
+    # --- Guard PII Sessions ---
+
+    def get_pii_session(self, session_id: str) -> dict[str, Any]:
+        """Get details of a PII tokenization session."""
+        return self._get(f"/v1/suite/guard/pii/sessions/{session_id}")
+
+    def revoke_pii_session(self, session_id: str) -> dict[str, Any]:
+        """Revoke (delete) a PII tokenization session and all its tokens."""
+        return self._request(f"/v1/suite/guard/pii/sessions/{session_id}", method="DELETE")
+
+    # --- Guard Policies ---
+
+    def list_guard_policies(self) -> list[dict[str, Any]]:
+        """List all Guard policies for the workspace."""
+        return self._get("/v1/suite/guard/policies")
+
+    def create_guard_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        """Create a new Guard policy rule."""
+        return self._post("/v1/suite/guard/policies", policy)
+
+    def update_guard_policy(self, policy_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+        """Update a Guard policy rule."""
+        return self._request(f"/v1/suite/guard/policies/{policy_id}", method="PATCH", body=updates)
+
+    def delete_guard_policy(self, policy_id: int) -> dict[str, Any]:
+        """Delete a Guard policy rule."""
+        return self._request(f"/v1/suite/guard/policies/{policy_id}", method="DELETE")
+
+    # --- Guard Kill Switch ---
+
+    def kill_agent(self, agent_id: str, *, reason: str) -> dict[str, Any]:
+        """Activate the kill switch for an agent, blocking all trust decisions."""
+        return self._post(f"/v1/suite/guard/kill/{agent_id}", {"reason": reason})
+
+    def unkill_agent(self, agent_id: str) -> dict[str, Any]:
+        """Deactivate the kill switch for an agent."""
+        return self._post(f"/v1/suite/guard/unkill/{agent_id}")
+
+    # --- Guard Findings ---
+
+    def list_guard_findings(self, *, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """List Guard security findings, optionally filtered by agent."""
+        path = "/v1/suite/guard/findings"
+        if agent_id:
+            path += f"?agent_id={agent_id}"
+        return self._get(path)
+
+    def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+        """Update a Guard finding (e.g. resolve, dismiss)."""
+        return self._request(f"/v1/suite/guard/findings/{finding_id}", method="PATCH", body=updates)
+
+    # --- Passport Delegations ---
+
+    def create_delegation(self, delegation: dict[str, Any]) -> dict[str, Any]:
+        """Create a new Passport delegation grant."""
+        return self._post("/v1/suite/passport/delegations", delegation)
+
+    def list_delegations(self) -> list[dict[str, Any]]:
+        """List active Passport delegations."""
+        return self._get("/v1/suite/passport/delegations")
+
+    def revoke_delegation(self, delegation_id: int) -> dict[str, Any]:
+        """Revoke a Passport delegation."""
+        return self._request(f"/v1/suite/passport/delegations/{delegation_id}", method="DELETE")
+
+    # --- Passport Verification ---
+
+    def verify_agent_identity(self, agent_id: str) -> dict[str, Any]:
+        """Mark an agent as identity-verified in Passport."""
+        return self._post(f"/v1/suite/passport/verify/{agent_id}")
+
+    # --- Passport Manifests ---
+
+    def create_manifest(self, agent_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
+        """Create or update an agent capability manifest."""
+        return self._post(f"/v1/suite/passport/manifests/{agent_id}", manifest)
+
+    def get_manifests(self, agent_id: str) -> list[dict[str, Any]]:
+        """Get agent capability manifests from Passport."""
+        return self._get(f"/v1/suite/passport/manifests/{agent_id}")
+
+    # --- Vault ---
+
+    def query_vault_ledger(self, *, agent_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Query the immutable Vault audit ledger."""
+        path = f"/v1/suite/vault/ledger?limit={limit}"
+        if agent_id:
+            path += f"&agent_id={agent_id}"
+        return self._get(path)
+
+    def verify_vault_chain(self, *, limit: int = 100) -> dict[str, Any]:
+        """Verify hash-chain integrity of the Vault ledger."""
+        return self._get(f"/v1/suite/vault/verify?limit={limit}")
+
+    def export_vault(self, *, export_type: str = "json") -> dict[str, Any]:
+        """Create a Vault export job."""
+        return self._post("/v1/suite/vault/export", {"export_type": export_type})
+
+    def get_vault_export_status(self, job_id: str) -> dict[str, Any]:
+        """Check the status of a Vault export job."""
+        return self._get(f"/v1/suite/vault/export/{job_id}")
+
+    # --- Notifications ---
+
+    def list_notifications(self) -> list[dict[str, Any]]:
+        """List notifications for the current workspace."""
+        return self._get("/v1/suite/notifications")
+
+    def mark_notification_read(self, notification_id: int) -> dict[str, Any]:
+        """Mark a single notification as read."""
+        return self._post(f"/v1/suite/notifications/{notification_id}/read")
+
+    def mark_all_notifications_read(self) -> dict[str, Any]:
+        """Mark all notifications as read."""
+        return self._post("/v1/suite/notifications/read-all")
+
+    # --- IP Allowlist ---
+
+    def get_ip_allowlist(self) -> dict[str, Any]:
+        """Get the current IP allowlist for the workspace."""
+        return self._get("/v1/public/providers/ip-allowlist")
+
+    def set_ip_allowlist(self, *, cidrs: list[str], enabled: bool = True) -> dict[str, Any]:
+        """Set the IP allowlist for the workspace."""
+        return self._post("/v1/public/providers/ip-allowlist", {"cidrs": cidrs, "enabled": enabled})
+
+    # --- Custom Domains ---
+
+    def get_custom_domain(self) -> dict[str, Any]:
+        """Get the custom domain configuration for the workspace."""
+        return self._get("/v1/public/providers/custom-domain")
+
+    def set_custom_domain(self, *, domain: str) -> dict[str, Any]:
+        """Set a custom domain for the workspace."""
+        return self._post("/v1/public/providers/custom-domain", {"domain": domain})
+
+    def verify_custom_domain(self) -> dict[str, Any]:
+        """Verify DNS configuration for the custom domain."""
+        return self._post("/v1/public/providers/custom-domain/verify")
+
+    def delete_custom_domain(self) -> dict[str, Any]:
+        """Remove the custom domain from the workspace."""
+        return self._request("/v1/public/providers/custom-domain", method="DELETE")
+
+    # --- Team Management ---
+
+    def list_team_members(self) -> list[dict[str, Any]]:
+        """List team members in the current workspace."""
+        return self._get("/v1/public/providers/team")
+
+    def invite_team_member(self, *, email: str, role: str = "member") -> dict[str, Any]:
+        """Invite a new team member to the workspace."""
+        return self._post("/v1/public/providers/team/invite", {"email": email, "role": role})
+
+    def remove_team_member(self, user_id: str) -> dict[str, Any]:
+        """Remove a team member from the workspace."""
+        return self._request(f"/v1/public/providers/team/{user_id}", method="DELETE")
+
+    # --- Workspaces ---
+
+    def list_workspaces(self) -> list[dict[str, Any]]:
+        """List workspaces the current user belongs to."""
+        return self._get("/v1/public/accounts/workspaces")
+
+    def switch_workspace(self, tenant_id: str) -> dict[str, Any]:
+        """Switch the user's active workspace."""
+        return self._post(f"/v1/public/accounts/workspaces/{tenant_id}/switch")
+
+    # --- Reputation Lookup ---
+
+    def reputation_lookup(self, *, slug: str) -> dict[str, Any]:
+        """Look up an agent's shared reputation by slug."""
+        return self._get(f"/v1/public/reputation/lookup?slug={slug}")
 
     # --- Badges ---
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veriswarm"
-version = "0.2.0"
+version = "0.3.0"
 description = "Official VeriSwarm Python SDK — trust scoring, event ingestion, and agent management for AI agents"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -35,6 +35,6 @@ langchain = ["langchain-core>=0.2"]
 
 [project.urls]
 Homepage = "https://veriswarm.ai"
-Repository = "https://github.com/JoshuaAFerguson/veriswarm-sdk"
+Repository = "https://github.com/veriswarm/veriswarm-sdk"
 Documentation = "https://veriswarm.ai/docs"
-Issues = "https://github.com/JoshuaAFerguson/veriswarm-sdk/issues"
+Issues = "https://github.com/veriswarm/veriswarm-sdk/issues"

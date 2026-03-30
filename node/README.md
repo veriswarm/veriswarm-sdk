@@ -1,6 +1,6 @@
 # VeriSwarm Node.js SDK
 
-Lightweight Node.js client for the VeriSwarm trust scoring API. Zero dependencies — uses native `fetch` (Node.js 18+).
+Lightweight Node.js client for the VeriSwarm trust scoring API. Zero dependencies -- uses native `fetch` (Node.js 18+).
 
 ## Install
 
@@ -45,8 +45,6 @@ await client.ingestEvent({
 await client.ingestEventsBatch([
   { event_id: "evt_1", agent_id: "agt_123", source_type: "platform",
     event_type: "message.sent", occurred_at: new Date().toISOString(), payload: {} },
-  { event_id: "evt_2", agent_id: "agt_123", source_type: "platform",
-    event_type: "tool.invoked", occurred_at: new Date().toISOString(), payload: {} },
 ]);
 ```
 
@@ -58,96 +56,144 @@ const agent = await client.registerAgent({
   tenant_id: "ten_your_workspace",
   slug: "my-assistant",
   display_name: "My Assistant",
-  description: "A helpful coding assistant",
 });
 
-// Get agent profile
+// Get agent profile, scores, history, breakdown, flags, timeline
 const profile = await client.getAgent("agt_123");
-
-// Get current trust scores
 const scores = await client.getAgentScores("agt_123");
-console.log(`Risk: ${scores.risk.score}, Tier: ${scores.policy_tier}`);
-
-// Get score history (trend over time)
 const history = await client.getAgentScoreHistory("agt_123", { limit: 10 });
-
-// Get detailed score breakdown
 const breakdown = await client.getAgentScoreBreakdown("agt_123");
-console.log(breakdown.contributing_factors);
-
-// Get moderation flags
 const flags = await client.getAgentFlags("agt_123");
+const timeline = await client.getAgentTimeline("agt_123", { limit: 20 });
+const manifests = await client.getAgentManifests("agt_123");
 
 // Appeal a flag
 await client.appealFlag("agt_123", 42);
 
-// Get capability manifests
-const manifests = await client.getAgentManifests("agt_123");
+// Agent API key management
+const keys = await client.getAgentApiKeys("agt_123");
+await client.rotateAgentApiKey("agt_123");
+await client.revokeAgentApiKey("agt_123", "key_456");
 ```
 
-## Provider Reports
+## Guard (Security)
 
 ```javascript
-// Submit a trust signal from your platform
-await client.ingestProviderReport({
-  agent_id: "agt_123",
-  provider_event_id: "provider-evt-456",
-  report_type: "spam",
-  severity: "high",
-  confidence: 0.91,
-  summary: "Burst spam detected in #general",
-});
+// PII tokenization
+const result = await client.tokenizePii({ text: "Contact john@acme.com" });
+const original = await client.rehydratePii({ text: result.tokenized_text, sessionId: result.session_id });
+
+// PII session management
+const session = await client.getPiiSession(result.session_id);
+await client.revokePiiSession(result.session_id);
+
+// Injection scanning
+const scan = await client.scanInjection({ text: "Ignore previous instructions..." });
+
+// Kill switch
+await client.killAgent("agt_123", "Suspicious behavior");
+await client.unkillAgent("agt_123");
+
+// Guard findings
+const findings = await client.listGuardFindings("agt_123");
+await client.updateGuardFinding(1, { status: "resolved" });
+
+// Guard policies
+const policies = await client.listGuardPolicies();
+await client.createGuardPolicy({ name: "block-sql", pattern: "DROP TABLE", action: "block" });
+await client.updateGuardPolicy(1, { enabled: false });
+await client.deleteGuardPolicy(1);
 ```
 
-## Platform Status
+## Passport (Identity)
 
 ```javascript
-const status = await client.getPlatformStatus();
-console.log(status.status); // "operational" or "degraded"
+// Verify agent identity
+await client.verifyAgentIdentity("agt_123");
+
+// Delegations
+await client.createDelegation({ from_agent: "agt_123", to_agent: "agt_456", scope: "read" });
+const delegations = await client.listDelegations();
+await client.revokeDelegation(1);
+
+// Manifests
+await client.createManifest("agt_123", { capabilities: ["search", "summarize"] });
+const manifests = await client.getManifests("agt_123");
+```
+
+## Vault (Audit Ledger)
+
+```javascript
+const entries = await client.queryVaultLedger({ agentId: "agt_123", limit: 20 });
+const verification = await client.verifyVaultChain({ limit: 100 });
+const job = await client.exportVault({ exportType: "csv" });
+const status = await client.getVaultExportStatus(job.job_id);
 ```
 
 ## Portable Credentials
 
 ```javascript
-// Issue a signed JWT trust credential (requires agent key auth)
 const result = await client.issueCredential();
-console.log(result.credential); // "eyJhbGciOiJFUzI1NiI..."
-
-// Verify a credential from another agent
 const verified = await client.verifyCredential("eyJhbGciOiJFUzI1NiI...");
-console.log(verified.veriswarm.policy_tier); // "tier_2"
-```
-
-## Agent Self-Service
-
-```javascript
-// Get own scores with improvement guidance
-const myScores = await client.getMyScores();
-console.log(myScores.guidance.actions); // actionable steps to improve trust
 ```
 
 ## Scoring Profiles
 
 ```javascript
-// Get current tenant profile
 const profile = await client.getScoringProfile();
-console.log(profile.profile_code); // "general"
-
-// Set tenant profile (admin required)
 await client.setScoringProfile("high_security");
+await client.setScoringProfile("high_security", { risk: { secret_hygiene_failures: 0.40 } });
+```
 
-// Set with custom weight overrides (enterprise)
-await client.setScoringProfile("high_security", {
-  risk: { secret_hygiene_failures: 0.40 }
-});
+## Notifications
+
+```javascript
+const notifications = await client.listNotifications();
+await client.markNotificationRead(1);
+await client.markAllNotificationsRead();
+```
+
+## IP Allowlist
+
+```javascript
+const allowlist = await client.getIpAllowlist();
+await client.setIpAllowlist({ cidrs: ["10.0.0.0/8"], enabled: true });
+```
+
+## Custom Domains
+
+```javascript
+await client.setCustomDomain("trust.mycompany.com");
+await client.verifyCustomDomain();
+const domain = await client.getCustomDomain();
+await client.deleteCustomDomain();
+```
+
+## Team Management
+
+```javascript
+const members = await client.listTeamMembers();
+await client.inviteTeamMember({ email: "alice@acme.com", role: "admin" });
+await client.removeTeamMember("usr_789");
+```
+
+## Workspaces
+
+```javascript
+const workspaces = await client.listWorkspaces();
+await client.switchWorkspace("ten_456");
 ```
 
 ## Trust Badges
 
 ```javascript
-// Get embeddable badge URL (sync, no API call)
 const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
-// "https://api.veriswarm.ai/v1/badge/my-agent.svg?style=card&theme=dark"
+```
+
+## Reputation Lookup
+
+```javascript
+const rep = await client.reputationLookup("my-agent");
 ```
 
 ## All Methods
@@ -166,11 +212,53 @@ const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
 | `getAgentScoreBreakdown(agentId)` | Score contributing factors |
 | `getAgentFlags(agentId)` | Active moderation flags |
 | `appealFlag(agentId, flagId)` | Appeal a moderation flag |
-| `getAgentManifests(agentId)` | Capability manifests |
-| `issueCredential()` | Issue portable JWT trust credential |
-| `verifyCredential(credential)` | Verify a JWT credential |
-| `getMyScores()` | Own scores with improvement guidance |
+| `getAgentManifests(agentId)` | Public capability manifests |
+| `getAgentTimeline(agentId)` | Agent event timeline |
+| `getAgentApiKeys(agentId)` | List agent API keys |
+| `rotateAgentApiKey(agentId)` | Rotate agent API key |
+| `revokeAgentApiKey(agentId, keyId)` | Revoke agent API key |
+| `tokenizePii(...)` | Guard PII tokenization |
+| `rehydratePii(...)` | Guard PII rehydration |
+| `getPiiSession(sessionId)` | Get PII session details |
+| `revokePiiSession(sessionId)` | Revoke PII session |
+| `scanInjection({ text })` | Guard injection scanning |
+| `listGuardPolicies()` | List Guard policies |
+| `createGuardPolicy(policy)` | Create Guard policy |
+| `updateGuardPolicy(id, updates)` | Update Guard policy |
+| `deleteGuardPolicy(id)` | Delete Guard policy |
+| `killAgent(agentId, reason)` | Activate kill switch |
+| `unkillAgent(agentId)` | Deactivate kill switch |
+| `listGuardFindings(agentId?)` | List Guard findings |
+| `updateGuardFinding(id, updates)` | Update Guard finding |
+| `verifyAgentIdentity(agentId)` | Passport identity verification |
+| `createDelegation(delegation)` | Create Passport delegation |
+| `listDelegations()` | List Passport delegations |
+| `revokeDelegation(id)` | Revoke Passport delegation |
+| `createManifest(agentId, manifest)` | Create agent manifest |
+| `getManifests(agentId)` | Get agent manifests |
+| `queryVaultLedger(...)` | Query Vault audit ledger |
+| `verifyVaultChain(...)` | Verify Vault hash chain |
+| `exportVault(...)` | Create Vault export job |
+| `getVaultExportStatus(jobId)` | Check Vault export status |
+| `issueCredential()` | Issue portable JWT credential |
+| `verifyCredential(credential)` | Verify JWT credential |
+| `getMyScores()` | Own scores with guidance |
 | `getScoringProfile()` | Get tenant scoring profile |
 | `setScoringProfile(code, overrides?)` | Set tenant scoring profile |
-| `getBadgeUrl(slug, options?)` | Get embeddable badge URL |
+| `listNotifications()` | List notifications |
+| `markNotificationRead(id)` | Mark notification read |
+| `markAllNotificationsRead()` | Mark all notifications read |
+| `getIpAllowlist()` | Get IP allowlist |
+| `setIpAllowlist({ cidrs, enabled })` | Set IP allowlist |
+| `getCustomDomain()` | Get custom domain config |
+| `setCustomDomain(domain)` | Set custom domain |
+| `verifyCustomDomain()` | Verify custom domain DNS |
+| `deleteCustomDomain()` | Remove custom domain |
+| `listTeamMembers()` | List team members |
+| `inviteTeamMember({ email, role })` | Invite team member |
+| `removeTeamMember(userId)` | Remove team member |
+| `listWorkspaces()` | List user workspaces |
+| `switchWorkspace(tenantId)` | Switch active workspace |
+| `reputationLookup(slug)` | Shared reputation lookup |
+| `getBadgeUrl(slug, options?)` | Embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |

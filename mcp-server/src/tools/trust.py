@@ -55,9 +55,20 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         """Get score history over time for an agent."""
         try:
             result = client.get(
-                f"/v1/public/agents/{agent_id}/scores",
+                f"/v1/public/agents/{agent_id}/scores/history",
                 params={"limit": limit},
             )
+            return json.dumps(result, indent=2)
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+    @server.tool()
+    async def get_score_breakdown(agent_id: str) -> str:
+        """Get detailed score breakdown with contributing factors for an agent."""
+        try:
+            result = client.get(f"/v1/public/agents/{agent_id}/scores/breakdown")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})

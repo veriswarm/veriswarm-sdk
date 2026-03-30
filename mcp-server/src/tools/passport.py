@@ -14,7 +14,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_credentials() -> str:
         """Issue a signed JWT Passport credential for the authenticated agent. Requires VERISWARM_AGENT_KEY."""
         try:
-            result = client.post("/v1/passport/credentials/issue", use_agent_key=True)
+            result = client.post("/v1/credentials/issue", use_agent_key=True)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
@@ -28,7 +28,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         credential: the JWT string issued by VeriSwarm Passport
         """
         try:
-            result = client.post("/v1/passport/credentials/verify", json={"credential": credential})
+            result = client.post("/v1/credentials/verify", json={"credential": credential})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
@@ -42,7 +42,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         agent_id: the agent to mark as verified
         """
         try:
-            result = client.post(f"/v1/passport/verify/{agent_id}")
+            result = client.post(f"/v1/suite/passport/verify/{agent_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
@@ -57,12 +57,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         scope: optional scope filter, e.g. read, write, admin
         """
         try:
-            params = {}
+            params = {"agent_id": agent_id}
             if scope:
                 params["scope"] = scope
             result = client.get(
-                f"/v1/passport/delegations/{agent_id}",
-                params=params if params else None,
+                "/v1/suite/passport/delegations",
+                params=params,
             )
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:

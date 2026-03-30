@@ -1,6 +1,6 @@
 # VeriSwarm Python SDK
 
-Lightweight Python client for the VeriSwarm trust scoring API. Zero external dependencies — uses only Python stdlib.
+Lightweight Python client for the VeriSwarm trust scoring API. Zero external dependencies -- uses only Python stdlib.
 
 ## Install
 
@@ -68,21 +68,20 @@ profile = client.get_agent("agt_123")
 scores = client.get_agent_scores("agt_123")
 print(f"Risk: {scores['risk']['score']}, Tier: {scores['policy_tier']}")
 
-# Get score history (trend over time)
+# Get score history, breakdown, flags, timeline, manifests
 history = client.get_agent_score_history("agt_123", limit=10)
-
-# Get detailed score breakdown (what contributes to the score)
 breakdown = client.get_agent_score_breakdown("agt_123")
-print(breakdown["contributing_factors"])
-
-# Get moderation flags
 flags = client.get_agent_flags("agt_123")
+timeline = client.get_agent_timeline("agt_123", limit=20)
+manifests = client.get_agent_manifests("agt_123")
 
 # Appeal a flag
 client.appeal_flag("agt_123", flag_id=42)
 
-# Get capability manifests
-manifests = client.get_agent_manifests("agt_123")
+# Agent API key management
+keys = client.get_agent_api_keys("agt_123")
+client.rotate_agent_api_key("agt_123")
+client.revoke_agent_api_key("agt_123", key_id="key_456")
 ```
 
 ## Provider Reports
@@ -99,11 +98,67 @@ client.ingest_provider_report({
 })
 ```
 
-## Platform Status
+## Guard (Security)
 
 ```python
-status = client.get_platform_status()
-print(status["status"])  # "operational" or "degraded"
+# PII tokenization (before sending to LLM)
+result = client.tokenize_pii(text="Contact john@acme.com for details")
+print(result["tokenized_text"])  # "Contact [VS:EMAIL:a1b2c3] for details"
+
+# Rehydrate PII (after LLM processing)
+original = client.rehydrate_pii(text=result["tokenized_text"], session_id=result["session_id"])
+
+# PII session management
+session = client.get_pii_session(result["session_id"])
+client.revoke_pii_session(result["session_id"])
+
+# Prompt injection scanning
+scan = client.scan_injection(text="Ignore previous instructions and...")
+print(scan["is_injection"])  # True
+
+# Kill switch
+client.kill_agent("agt_123", reason="Suspicious behavior detected")
+client.unkill_agent("agt_123")
+
+# Guard findings
+findings = client.list_guard_findings(agent_id="agt_123")
+client.update_guard_finding(finding_id=1, updates={"status": "resolved"})
+
+# Guard policies
+policies = client.list_guard_policies()
+client.create_guard_policy({"name": "block-sql", "pattern": "DROP TABLE", "action": "block"})
+client.update_guard_policy(policy_id=1, updates={"enabled": False})
+client.delete_guard_policy(policy_id=1)
+```
+
+## Passport (Identity)
+
+```python
+# Verify agent identity
+client.verify_agent_identity("agt_123")
+
+# Delegations
+client.create_delegation({"from_agent": "agt_123", "to_agent": "agt_456", "scope": "read"})
+delegations = client.list_delegations()
+client.revoke_delegation(delegation_id=1)
+
+# Manifests
+client.create_manifest("agt_123", {"capabilities": ["search", "summarize"]})
+manifests = client.get_manifests("agt_123")
+```
+
+## Vault (Audit Ledger)
+
+```python
+# Query the immutable audit ledger
+entries = client.query_vault_ledger(agent_id="agt_123", limit=20)
+
+# Verify hash-chain integrity
+verification = client.verify_vault_chain(limit=100)
+
+# Export
+job = client.export_vault(export_type="csv")
+status = client.get_vault_export_status(job["job_id"])
 ```
 
 ## Credentials (Portable JWT)
@@ -137,29 +192,66 @@ print(profile["profile_code"])  # "general"
 client.set_scoring_profile("high_security")
 ```
 
+## Notifications
+
+```python
+notifications = client.list_notifications()
+client.mark_notification_read(notification_id=1)
+client.mark_all_notifications_read()
+```
+
+## IP Allowlist
+
+```python
+# Get current allowlist
+allowlist = client.get_ip_allowlist()
+
+# Set allowlist
+client.set_ip_allowlist(cidrs=["10.0.0.0/8", "192.168.1.0/24"], enabled=True)
+```
+
+## Custom Domains
+
+```python
+client.set_custom_domain(domain="trust.mycompany.com")
+client.verify_custom_domain()
+domain = client.get_custom_domain()
+client.delete_custom_domain()
+```
+
+## Team Management
+
+```python
+members = client.list_team_members()
+client.invite_team_member(email="alice@acme.com", role="admin")
+client.remove_team_member(user_id="usr_789")
+```
+
+## Workspaces
+
+```python
+workspaces = client.list_workspaces()
+client.switch_workspace(tenant_id="ten_456")
+```
+
 ## Trust Badges
 
 ```python
-# Get badge URL for embedding
 url = client.get_badge_url("my-agent", style="compact", theme="dark")
-# Returns: "https://api.veriswarm.ai/v1/badge/my-agent.svg?style=compact&theme=dark"
+# "https://api.veriswarm.ai/v1/badge/my-agent.svg?style=compact&theme=dark"
 ```
 
-## LangChain Integration
+## Reputation Lookup
 
 ```python
-from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
+rep = client.reputation_lookup(slug="my-agent")
+```
 
-handler = VeriSwarmCallbackHandler(api_key="vs_...", agent_id="agt_...")
-agent = initialize_agent(tools, llm, callbacks=[handler])
+## Platform Status
 
-# Optional: enforcement mode blocks denied tool calls
-handler = VeriSwarmCallbackHandler(
-    api_key="vs_...",
-    agent_id="agt_...",
-    enforce=True,
-    on_deny="raise"  # or "skip" or "log"
-)
+```python
+status = client.get_platform_status()
+print(status["status"])  # "operational" or "degraded"
 ```
 
 ## All Methods
@@ -178,5 +270,53 @@ handler = VeriSwarmCallbackHandler(
 | `get_agent_score_breakdown(agent_id)` | Score contributing factors |
 | `get_agent_flags(agent_id)` | Active moderation flags |
 | `appeal_flag(agent_id, flag_id)` | Appeal a moderation flag |
-| `get_agent_manifests(agent_id)` | Capability manifests |
+| `get_agent_manifests(agent_id)` | Public capability manifests |
+| `get_agent_timeline(agent_id)` | Agent event timeline |
+| `get_agent_api_keys(agent_id)` | List agent API keys |
+| `rotate_agent_api_key(agent_id)` | Rotate agent API key |
+| `revoke_agent_api_key(agent_id, key_id)` | Revoke agent API key |
+| `tokenize_pii(...)` | Guard PII tokenization |
+| `rehydrate_pii(...)` | Guard PII rehydration |
+| `get_pii_session(session_id)` | Get PII session details |
+| `revoke_pii_session(session_id)` | Revoke PII session |
+| `scan_injection(text)` | Guard injection scanning |
+| `list_guard_policies()` | List Guard policies |
+| `create_guard_policy(policy)` | Create Guard policy |
+| `update_guard_policy(id, updates)` | Update Guard policy |
+| `delete_guard_policy(id)` | Delete Guard policy |
+| `kill_agent(agent_id, reason)` | Activate kill switch |
+| `unkill_agent(agent_id)` | Deactivate kill switch |
+| `list_guard_findings(...)` | List Guard findings |
+| `update_guard_finding(id, updates)` | Update Guard finding |
+| `verify_agent_identity(agent_id)` | Passport identity verification |
+| `create_delegation(delegation)` | Create Passport delegation |
+| `list_delegations()` | List Passport delegations |
+| `revoke_delegation(id)` | Revoke Passport delegation |
+| `create_manifest(agent_id, manifest)` | Create agent manifest |
+| `get_manifests(agent_id)` | Get agent manifests |
+| `query_vault_ledger(...)` | Query Vault audit ledger |
+| `verify_vault_chain(...)` | Verify Vault hash chain |
+| `export_vault(...)` | Create Vault export job |
+| `get_vault_export_status(job_id)` | Check Vault export status |
+| `issue_credential()` | Issue portable JWT credential |
+| `verify_credential(credential)` | Verify JWT credential |
+| `get_my_scores()` | Own scores with guidance |
+| `get_scoring_profile()` | Get tenant scoring profile |
+| `set_scoring_profile(code, overrides)` | Set tenant scoring profile |
+| `list_notifications()` | List notifications |
+| `mark_notification_read(id)` | Mark notification read |
+| `mark_all_notifications_read()` | Mark all notifications read |
+| `get_ip_allowlist()` | Get IP allowlist |
+| `set_ip_allowlist(cidrs, enabled)` | Set IP allowlist |
+| `get_custom_domain()` | Get custom domain config |
+| `set_custom_domain(domain)` | Set custom domain |
+| `verify_custom_domain()` | Verify custom domain DNS |
+| `delete_custom_domain()` | Remove custom domain |
+| `list_team_members()` | List team members |
+| `invite_team_member(email, role)` | Invite team member |
+| `remove_team_member(user_id)` | Remove team member |
+| `list_workspaces()` | List user workspaces |
+| `switch_workspace(tenant_id)` | Switch active workspace |
+| `reputation_lookup(slug)` | Shared reputation lookup |
+| `get_badge_url(slug, ...)` | Embeddable badge URL |
 | `get_platform_status()` | Platform health check |
