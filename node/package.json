@@ -1,6 +1,6 @@
 {
   "name": "@veriswarm/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Official VeriSwarm Node.js SDK — trust scoring, event ingestion, and agent management for AI agents",
   "main": "veriswarm_client.mjs",
   "type": "module",
@@ -12,11 +12,15 @@
     "README.md"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/JoshuaAFerguson/veriswarm-sdk.git",
+    "url": "git+https://github.com/veriswarm/veriswarm-sdk.git",
     "directory": "node"
   },
   "keywords": [
@@ -33,7 +37,7 @@
   "author": "VeriSwarm <hello@veriswarm.ai>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/JoshuaAFerguson/veriswarm-sdk/issues"
+    "url": "https://github.com/veriswarm/veriswarm-sdk/issues"
   },
   "homepage": "https://veriswarm.ai",
   "engines": {
