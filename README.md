@@ -109,7 +109,6 @@ Get started with no credit card:
 - Up to 10 agents
 - Unlimited event ingestion
 - Unlimited portable credentials
-- 1 active Cortex Workflow
 
 Sign up at [veriswarm.ai](https://veriswarm.ai/auth?mode=register).
 
