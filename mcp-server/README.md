@@ -6,9 +6,26 @@ Trust infrastructure for AI agents via Model Context Protocol.
 
 ```bash
 pip install veriswarm-mcp
+veriswarm-setup
 ```
 
-Add to your MCP client config (Claude Desktop, Cursor, etc.):
+The setup wizard configures everything for your platform (Claude Code, Gemini CLI, or Codex):
+
+1. **MCP Server** — 67 tools for trust scoring, Guard security, Passport identity, Vault audit
+2. **Guard Hooks** — Automatic PII protection for prompts and tool calls
+3. **Guard Proxy** — Transparent MCP interception for any tool server (optional)
+
+### What the hooks do
+
+| Hook | Event | Action |
+|------|-------|--------|
+| Prompt Guard | `UserPromptSubmit` | Blocks prompts containing PII (emails, SSNs, etc.) |
+| Tool Input Guard | `PreToolUse` | Tokenizes PII in tool arguments before execution |
+| Tool Output Guard | `PostToolUse` | Tokenizes PII in tool responses before the LLM sees them |
+
+### Manual setup
+
+If you prefer manual configuration:
 
 ```json
 {
@@ -33,7 +50,9 @@ Add to your MCP client config (Claude Desktop, Cursor, etc.):
 | `VERISWARM_API_KEY` | Yes (or `AGENT_KEY`) | Platform API key for workspace operations |
 | `VERISWARM_AGENT_KEY` | Yes (or `API_KEY`) | Agent-scoped key for self-reporting tools |
 
-## Tools (55 total)
+## Tools (67 total)
+
+> **Auth note:** Tools marked with (session) require `x-account-access-token` and are not available with API key only. All other tools work with `x-api-key`.
 
 ### Trust Scoring (6)
 | Tool | Description |

@@ -12,20 +12,16 @@ from ..client import VeriSwarmAPIClient
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     @server.tool()
     async def scan_tool(tool_name: str, tool_config: str = "") -> str:
-        """Request a Guard security scan for a tool or MCP server.
+        """Scan text/tool content for security threats (injection and moderation).
 
         tool_name: name of the tool or MCP server to scan
         tool_config: optional JSON string with tool configuration/schema details
         """
         try:
-            body: dict = {"tool_name": tool_name}
+            text = f"Tool: {tool_name}"
             if tool_config:
-                try:
-                    body["tool_config"] = json.loads(tool_config)
-                except json.JSONDecodeError:
-                    body["tool_config"] = tool_config
-            # Note: scan endpoint submits to guard findings pipeline
-            result = client.post("/v1/suite/guard/findings", json=body)
+                text += f"\nConfig: {tool_config}"
+            result = client.post("/v1/suite/guard/scan", json={"text": text})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
@@ -34,7 +30,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def check_tool_allowed(tool_name: str) -> str:
-        """Check whether a tool is permitted under active Guard policies for this workspace."""
+        """Check whether a tool is permitted under active Guard policies for this workspace.
+
+        Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             result = client.get("/v1/suite/guard/policies", params={"tool_name": tool_name})
             return json.dumps(result, indent=2)
@@ -61,6 +59,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def kill_agent(agent_id: str, reason: str) -> str:
         """Activate the kill switch for an agent, immediately blocking all trust decisions.
 
+        Requires session auth (x-account-access-token). Not available with API key only.
+
         agent_id: the agent to kill-switch
         reason: human-readable reason for the kill switch activation
         """
@@ -77,7 +77,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def unkill_agent(agent_id: str) -> str:
-        """Deactivate the kill switch for an agent, restoring normal trust decision processing."""
+        """Deactivate the kill switch for an agent, restoring normal trust decision processing.
+
+        Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             result = client.post(f"/v1/suite/guard/unkill/{agent_id}")
             return json.dumps(result, indent=2)
@@ -138,7 +140,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def revoke_pii_session(session_id: str) -> str:
-        """Revoke a PII tokenization session, deleting all stored tokens."""
+        """Revoke a PII tokenization session, deleting all stored tokens.
+
+        Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             result = client.delete(f"/v1/suite/guard/pii/sessions/{session_id}")
             return json.dumps(result, indent=2)
@@ -149,7 +153,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def list_guard_policies() -> str:
-        """List all active Guard policies for the workspace."""
+        """List all active Guard policies for the workspace.
+
+        Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             result = client.get("/v1/suite/guard/policies")
             return json.dumps(result, indent=2)

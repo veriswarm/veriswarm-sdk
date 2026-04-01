@@ -408,6 +408,99 @@ export class VeriSwarmClient {
     return this.#request("/v1/public/status");
   }
 
+  // --- Cortex Workflows ---
+
+  /** List all workflows for the current tenant. */
+  async listWorkflows({ isActive = null } = {}) {
+    const params = isActive != null ? `?is_active=${isActive}` : "";
+    return this.#request(`/v1/workflows${params}`);
+  }
+
+  /** Get a workflow's details and recent executions. */
+  async getWorkflow(workflowId) {
+    return this.#request(`/v1/workflows/${workflowId}`);
+  }
+
+  /** Create a new workflow from a definition object. */
+  async createWorkflow({ name, slug, definition, description = "" }) {
+    return this.#request("/v1/workflows", {
+      method: "POST",
+      body: { name, slug, description, definition },
+    });
+  }
+
+  /** Update a workflow's name, description, or definition. */
+  async updateWorkflow(workflowId, updates) {
+    return this.#request(`/v1/workflows/${workflowId}`, {
+      method: "PUT",
+      body: updates,
+    });
+  }
+
+  /** Delete a workflow. */
+  async deleteWorkflow(workflowId) {
+    return this.#request(`/v1/workflows/${workflowId}`, { method: "DELETE" });
+  }
+
+  /** Activate a workflow's triggers. */
+  async activateWorkflow(workflowId) {
+    return this.#request(`/v1/workflows/${workflowId}/activate`, { method: "POST" });
+  }
+
+  /** Deactivate a workflow's triggers. */
+  async deactivateWorkflow(workflowId) {
+    return this.#request(`/v1/workflows/${workflowId}/deactivate`, { method: "POST" });
+  }
+
+  /** Manually trigger a workflow execution. */
+  async runWorkflow(workflowId, { inputs = {} } = {}) {
+    return this.#request(`/v1/workflows/${workflowId}/run`, {
+      method: "POST",
+      body: { inputs },
+    });
+  }
+
+  /** Get execution details including step-by-step results. */
+  async getExecution(executionId) {
+    return this.#request(`/v1/workflows/executions/${executionId}`);
+  }
+
+  /** List executions for a workflow. */
+  async listExecutions(workflowId, { status = null } = {}) {
+    const params = status ? `?status=${status}` : "";
+    return this.#request(`/v1/workflows/${workflowId}/executions${params}`);
+  }
+
+  /** Cancel a running execution. */
+  async cancelExecution(executionId) {
+    return this.#request(`/v1/workflows/executions/${executionId}/cancel`, { method: "POST" });
+  }
+
+  /** Retry a failed execution. */
+  async retryExecution(executionId) {
+    return this.#request(`/v1/workflows/executions/${executionId}/retry`, { method: "POST" });
+  }
+
+  /** Approve, reject, or edit a human review step. */
+  async approveStep(executionId, stepId, { action = "approve", editedOutput = null } = {}) {
+    const body = { action };
+    if (editedOutput) body.edited_output = editedOutput;
+    return this.#request(`/v1/workflows/executions/${executionId}/steps/${stepId}/approve`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  /** List available workflow templates. */
+  async listWorkflowTemplates() {
+    return this.#request("/v1/workflows/templates");
+  }
+
+  /** Deploy a workflow template as a new workflow. */
+  async deployTemplate(templateId) {
+    return this.#request(`/v1/workflows/templates/${templateId}/deploy`, { method: "POST" });
+  }
+
   // --- Internal ---
 
   async #request(path, { method = "GET", body = null } = {}) {
@@ -415,7 +508,8 @@ export class VeriSwarmClient {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const headers = {
-        "content-type": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "veriswarm-node-sdk/0.1.0",
       };
       if (this.apiKey) headers["x-api-key"] = this.apiKey;
       if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;

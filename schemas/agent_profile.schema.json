@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veriswarm.ai/schemas/agent_profile.schema.json",
+  "title": "AgentProfile",
+  "type": "object",
+  "required": ["slug", "display_name"],
+  "properties": {
+    "slug": { "type": "string", "minLength": 1 },
+    "display_name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "owner_name": { "type": "string" },
+    "owner_type": {
+      "type": "string",
+      "enum": ["individual", "organization", "unknown"]
+    },
+    "sponsor_domain": { "type": "string" },
+    "public_key": { "type": "string" },
+    "runtime_name": { "type": "string" },
+    "runtime_version": { "type": "string" },
+    "model_name": { "type": "string" },
+    "homepage_url": { "type": "string" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,81 @@
+name: "VeriSwarm Trust Check"
+description: "Run trust score checks, PII scans, injection scans, and security tests against your AI agents in CI."
+author: "VeriSwarm"
+branding:
+  icon: "shield"
+  color: "orange"
+
+inputs:
+  api-key:
+    description: "VeriSwarm API key (store as a GitHub secret)"
+    required: true
+  api-url:
+    description: "VeriSwarm API URL"
+    required: false
+    default: "https://api.veriswarm.ai"
+  agent-id:
+    description: "Agent ID to check (required for score/test/decision)"
+    required: false
+  mode:
+    description: "Check mode: score, test, scan, decision, or all"
+    required: false
+    default: "all"
+  scan-paths:
+    description: "Glob pattern for files to scan for PII (e.g., '**/*.py')"
+    required: false
+    default: ""
+  action-type:
+    description: "Action type for decision check (e.g., 'deploy', 'release')"
+    required: false
+    default: "deploy"
+  fail-on-deny:
+    description: "Fail the check if trust decision is 'deny'"
+    required: false
+    default: "true"
+  fail-on-injection:
+    description: "Fail the check if prompt injection is detected"
+    required: false
+    default: "true"
+  fail-on-low-score:
+    description: "Fail if security readiness score is below this threshold (0-100)"
+    required: false
+    default: "0"
+  min-trust-score:
+    description: "Minimum composite trust score to pass (0-100)"
+    required: false
+    default: "0"
+
+outputs:
+  trust-score:
+    description: "Agent's composite trust score"
+  policy-tier:
+    description: "Agent's policy tier (allow/review/deny)"
+  decision:
+    description: "Trust decision for the action"
+  readiness-score:
+    description: "Security test readiness score (0-100)"
+  pii-found:
+    description: "Whether PII was detected in scanned files"
+  injection-found:
+    description: "Whether prompt injection was detected"
+  summary:
+    description: "Human-readable summary of all checks"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run VeriSwarm checks
+      shell: bash
+      env:
+        VERISWARM_API_KEY: ${{ inputs.api-key }}
+        VERISWARM_API_URL: ${{ inputs.api-url }}
+        VERISWARM_AGENT_ID: ${{ inputs.agent-id }}
+        VERISWARM_MODE: ${{ inputs.mode }}
+        VERISWARM_SCAN_PATHS: ${{ inputs.scan-paths }}
+        VERISWARM_ACTION_TYPE: ${{ inputs.action-type }}
+        VERISWARM_FAIL_ON_DENY: ${{ inputs.fail-on-deny }}
+        VERISWARM_FAIL_ON_INJECTION: ${{ inputs.fail-on-injection }}
+        VERISWARM_FAIL_ON_LOW_SCORE: ${{ inputs.fail-on-low-score }}
+        VERISWARM_MIN_TRUST_SCORE: ${{ inputs.min-trust-score }}
+      run: |
+        python3 ${{ github.action_path }}/check.py

@@ -320,3 +320,19 @@ print(status["status"])  # "operational" or "degraded"
 | `reputation_lookup(slug)` | Shared reputation lookup |
 | `get_badge_url(slug, ...)` | Embeddable badge URL |
 | `get_platform_status()` | Platform health check |
+| **Cortex Workflows** | |
+| `list_workflows(is_active=)` | List workflows |
+| `get_workflow(workflow_id)` | Get workflow + recent executions |
+| `create_workflow(name, slug, definition)` | Create from definition dict |
+| `update_workflow(id, name=, definition=)` | Update workflow |
+| `delete_workflow(workflow_id)` | Delete workflow |
+| `activate_workflow(workflow_id)` | Enable triggers |
+| `deactivate_workflow(workflow_id)` | Disable triggers |
+| `run_workflow(workflow_id, inputs=)` | Manual trigger |
+| `get_execution(execution_id)` | Execution detail + steps |
+| `list_executions(workflow_id, status=)` | List executions |
+| `cancel_execution(execution_id)` | Cancel running |
+| `retry_execution(execution_id)` | Retry failed |
+| `approve_step(exec_id, step_id, action=)` | Human review action |
+| `list_workflow_templates()` | Available templates |
+| `deploy_template(template_id)` | Deploy template |
