@@ -1,0 +1,17 @@
+{
+  "name": "@veriswarm/schemas",
+  "version": "0.1.0",
+  "description": "JSON Schema definitions for VeriSwarm agent events, profiles, scores, and workflows",
+  "main": "index.js",
+  "files": [
+    "*.json",
+    "README.md"
+  ],
+  "keywords": ["veriswarm", "json-schema", "agent", "trust", "ai"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veriswarm/veriswarm-sdk",
+    "directory": "schemas"
+  }
+}
