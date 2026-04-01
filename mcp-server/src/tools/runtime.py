@@ -110,6 +110,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def forget_contact(contact_identifier: str, contact_type: str = "email", dry_run: bool = True) -> str:
         """GDPR: Delete all data associated with a contact.
 
+        Requires session auth (x-account-access-token). Not available with API key only.
+
         contact_identifier: email, phone, or contact ID to purge
         contact_type: 'email', 'phone', or 'contact_id'
         dry_run: if True, shows what would be deleted without deleting
@@ -129,7 +131,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def list_deletion_records() -> str:
-        """List GDPR deletion records with verification hashes."""
+        """List GDPR deletion records with verification hashes.
+
+        Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             result = client.get("/v1/suite/compliance/deletion-records")
             return json.dumps(result, indent=2)

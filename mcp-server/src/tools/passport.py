@@ -12,7 +12,10 @@ from ..client import VeriSwarmAPIClient
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     @server.tool()
     async def get_credentials() -> str:
-        """Issue a signed JWT Passport credential for the authenticated agent. Requires VERISWARM_AGENT_KEY."""
+        """Issue a signed JWT Passport credential for the authenticated agent.
+
+        Requires agent key auth (VERISWARM_AGENT_KEY). Not available with API key only.
+        Also requires the platform signing key to be configured."""
         try:
             result = client.post("/v1/credentials/issue", use_agent_key=True)
             return json.dumps(result, indent=2)
@@ -39,6 +42,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def verify_identity(agent_id: str) -> str:
         """Mark an agent as identity-verified in VeriSwarm Passport (admin action).
 
+        Requires session auth (x-account-access-token). Not available with API key only.
+
         agent_id: the agent to mark as verified
         """
         try:
@@ -52,6 +57,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     @server.tool()
     async def check_delegation(agent_id: str, scope: str = "") -> str:
         """Check active delegation grants for an agent.
+
+        Requires session auth (x-account-access-token). Not available with API key only.
 
         agent_id: the agent whose delegations to check
         scope: optional scope filter, e.g. read, write, admin

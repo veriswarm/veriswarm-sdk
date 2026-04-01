@@ -97,7 +97,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 params["q"] = query
             if tier:
                 params["tier"] = tier
-            result = client.get("/v1/agents", params=params)
+            result = client.get("/v1/agents/overview", params=params)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})

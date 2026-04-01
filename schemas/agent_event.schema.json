@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veriswarm.ai/schemas/agent_event.schema.json",
+  "title": "AgentEvent",
+  "type": "object",
+  "required": [
+    "event_id",
+    "agent_id",
+    "source_type",
+    "event_type",
+    "occurred_at",
+    "payload"
+  ],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "source_type": {
+      "type": "string",
+      "enum": ["agent", "platform", "system", "moderator"]
+    },
+    "event_type": { "type": "string", "minLength": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "signature": { "type": ["string", "null"] },
+    "payload": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": false
+}

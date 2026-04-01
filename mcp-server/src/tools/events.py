@@ -19,25 +19,24 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     @server.tool()
     async def report_action(
         event_type: str,
-        agent_id: str = "",
+        agent_id: str,
         payload: str = "",
     ) -> str:
         """Report a generic agent behavioral event to VeriSwarm for scoring.
 
         event_type: dot-separated event type, e.g. tool.call.success
-        agent_id: the agent performing the action (optional if using agent key)
+        agent_id: the agent performing the action (required)
         payload: JSON string of additional event metadata (optional)
         """
         try:
             body: dict = {
                 "event_id": str(uuid.uuid4()),
                 "event_type": event_type,
+                "agent_id": agent_id,
                 "source_type": "mcp",
                 "occurred_at": _now_iso(),
                 "payload": json.loads(payload) if payload else {},
             }
-            if agent_id:
-                body["agent_id"] = agent_id
             result = client.post("/v1/events", json=body)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -48,12 +47,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     @server.tool()
     async def report_tool_call(
         tool_name: str,
+        agent_id: str,
         success: bool = True,
         duration_ms: int = None,
         error_type: str = "",
-        agent_id: str = "",
     ) -> str:
-        """Report a tool call event. Shorthand for tool.call.success / tool.call.failure events."""
+        """Report a tool call event. Shorthand for tool.call.success / tool.call.failure events.
+
+        agent_id is required by the event ingestion API.
+        """
         try:
             event_type = "tool.call.success" if success else "tool.call.failure"
             payload: dict = {"tool_name": tool_name}
@@ -65,12 +67,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body: dict = {
                 "event_id": str(uuid.uuid4()),
                 "event_type": event_type,
+                "agent_id": agent_id,
                 "source_type": "mcp",
                 "occurred_at": _now_iso(),
                 "payload": payload,
             }
-            if agent_id:
-                body["agent_id"] = agent_id
             result = client.post("/v1/events", json=body)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -83,19 +84,20 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         other_agent_id: str,
         interaction_type: str,
         outcome: str,
-        agent_id: str = "",
+        agent_id: str,
     ) -> str:
         """Report an agent-to-agent interaction event.
 
         other_agent_id: the agent being interacted with
         interaction_type: type of interaction, e.g. delegate, collaborate, query
         outcome: outcome of the interaction, e.g. success, failure, refused
-        agent_id: the acting agent (optional if using agent key)
+        agent_id: the acting agent (required)
         """
         try:
             body: dict = {
                 "event_id": str(uuid.uuid4()),
                 "event_type": "agent.interaction",
+                "agent_id": agent_id,
                 "source_type": "mcp",
                 "occurred_at": _now_iso(),
                 "payload": {
@@ -104,8 +106,6 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                     "outcome": outcome,
                 },
             }
-            if agent_id:
-                body["agent_id"] = agent_id
             result = client.post("/v1/events", json=body)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -117,15 +117,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def report_incident(
         severity: str,
         description: str,
+        agent_id: str,
         pattern_type: str = "",
-        agent_id: str = "",
     ) -> str:
         """Report a security incident or anomalous behavior for Guard review.
 
         severity: critical, high, medium, or low
         description: human-readable description of the incident
+        agent_id: the agent involved (required)
         pattern_type: optional classification, e.g. prompt_injection, data_exfil, abuse
-        agent_id: the agent involved (optional if using agent key)
         """
         try:
             payload: dict = {
@@ -138,12 +138,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body: dict = {
                 "event_id": str(uuid.uuid4()),
                 "event_type": "security.incident",
+                "agent_id": agent_id,
                 "source_type": "mcp",
                 "occurred_at": _now_iso(),
                 "payload": payload,
             }
-            if agent_id:
-                body["agent_id"] = agent_id
             result = client.post("/v1/events", json=body)
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:

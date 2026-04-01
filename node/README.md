@@ -262,3 +262,19 @@ const rep = await client.reputationLookup("my-agent");
 | `reputationLookup(slug)` | Shared reputation lookup |
 | `getBadgeUrl(slug, options?)` | Embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |
+| **Cortex Workflows** | |
+| `listWorkflows({ isActive? })` | List workflows |
+| `getWorkflow(workflowId)` | Get workflow + recent executions |
+| `createWorkflow({ name, slug, definition })` | Create from definition |
+| `updateWorkflow(workflowId, updates)` | Update workflow |
+| `deleteWorkflow(workflowId)` | Delete workflow |
+| `activateWorkflow(workflowId)` | Enable triggers |
+| `deactivateWorkflow(workflowId)` | Disable triggers |
+| `runWorkflow(workflowId, { inputs? })` | Manual trigger |
+| `getExecution(executionId)` | Execution detail + steps |
+| `listExecutions(workflowId, { status? })` | List executions |
+| `cancelExecution(executionId)` | Cancel running |
+| `retryExecution(executionId)` | Retry failed |
+| `approveStep(execId, stepId, { action })` | Human review action |
+| `listWorkflowTemplates()` | Available templates |
+| `deployTemplate(templateId)` | Deploy template |

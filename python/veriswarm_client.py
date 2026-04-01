@@ -408,6 +408,123 @@ class VeriSwarmClient:
         """Get the URL for an agent's embeddable trust badge."""
         return f"{self.base_url}/v1/badge/{agent_slug}.svg?style={style}&theme={theme}"
 
+    # --- Cortex Workflows ---
+
+    def list_workflows(self, *, is_active: bool | None = None) -> dict[str, Any]:
+        """List all Cortex Workflows for the current tenant."""
+        params = ""
+        if is_active is not None:
+            params = f"?is_active={'true' if is_active else 'false'}"
+        return self._get(f"/v1/workflows{params}")
+
+    def get_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Get a workflow's details and recent executions."""
+        return self._get(f"/v1/workflows/{workflow_id}")
+
+    def create_workflow(
+        self,
+        *,
+        name: str,
+        slug: str,
+        definition: dict[str, Any],
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create a new workflow from a definition dict."""
+        return self._post("/v1/workflows", body={
+            "name": name,
+            "slug": slug,
+            "description": description,
+            "definition": definition,
+        })
+
+    def update_workflow(
+        self,
+        workflow_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        definition: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update a workflow's name, description, or definition."""
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
+        if definition is not None:
+            body["definition"] = definition
+        return self._request(f"/v1/workflows/{workflow_id}", method="PUT", body=body)
+
+    def delete_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Delete a workflow."""
+        return self._request(f"/v1/workflows/{workflow_id}", method="DELETE")
+
+    def activate_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Activate a workflow's triggers."""
+        return self._post(f"/v1/workflows/{workflow_id}/activate")
+
+    def deactivate_workflow(self, workflow_id: str) -> dict[str, Any]:
+        """Deactivate a workflow's triggers."""
+        return self._post(f"/v1/workflows/{workflow_id}/deactivate")
+
+    def run_workflow(
+        self,
+        workflow_id: str,
+        *,
+        inputs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Manually trigger a workflow execution."""
+        return self._post(f"/v1/workflows/{workflow_id}/run", body={"inputs": inputs or {}})
+
+    def get_execution(self, execution_id: str) -> dict[str, Any]:
+        """Get execution details including step-by-step results."""
+        return self._get(f"/v1/workflows/executions/{execution_id}")
+
+    def list_executions(
+        self,
+        workflow_id: str,
+        *,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """List executions for a workflow."""
+        params = ""
+        if status:
+            params = f"?status={status}"
+        return self._get(f"/v1/workflows/{workflow_id}/executions{params}")
+
+    def cancel_execution(self, execution_id: str) -> dict[str, Any]:
+        """Cancel a running execution."""
+        return self._post(f"/v1/workflows/executions/{execution_id}/cancel")
+
+    def retry_execution(self, execution_id: str) -> dict[str, Any]:
+        """Retry a failed execution."""
+        return self._post(f"/v1/workflows/executions/{execution_id}/retry")
+
+    def approve_step(
+        self,
+        execution_id: str,
+        step_id: str,
+        *,
+        action: str = "approve",
+        edited_output: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Approve, reject, or edit a human review step."""
+        body: dict[str, Any] = {"action": action}
+        if edited_output:
+            body["edited_output"] = edited_output
+        return self._post(
+            f"/v1/workflows/executions/{execution_id}/steps/{step_id}/approve",
+            body=body,
+        )
+
+    def list_workflow_templates(self) -> dict[str, Any]:
+        """List available workflow templates."""
+        return self._get("/v1/workflows/templates")
+
+    def deploy_template(self, template_id: str) -> dict[str, Any]:
+        """Deploy a workflow template as a new workflow."""
+        return self._post(f"/v1/workflows/templates/{template_id}/deploy")
+
     # --- Internal ---
 
     def _get(self, path: str) -> Any:
@@ -425,7 +542,8 @@ class VeriSwarmClient:
             data=encoded,
             method=method,
             headers={
-                "content-type": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "veriswarm-python-sdk/0.1.0",
                 "x-api-key": self.api_key,
             },
         )

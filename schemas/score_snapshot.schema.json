@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veriswarm.ai/schemas/score_snapshot.schema.json",
+  "title": "ScoreSnapshot",
+  "type": "object",
+  "required": [
+    "agent_id",
+    "identity",
+    "risk",
+    "reliability",
+    "autonomy",
+    "policy_tier",
+    "created_at"
+  ],
+  "properties": {
+    "agent_id": { "type": "string" },
+    "identity": {
+      "type": "object",
+      "required": ["score", "confidence"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "required": ["score", "confidence"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "reliability": {
+      "type": "object",
+      "required": ["score", "confidence"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "autonomy": {
+      "type": "object",
+      "required": ["score", "confidence", "label"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "label": {
+          "type": "string",
+          "enum": ["agent-operated", "human-assisted", "unclear"]
+        }
+      }
+    },
+    "policy_tier": {
+      "type": "string",
+      "enum": ["tier_0", "tier_1", "tier_2", "tier_3", "tier_x"]
+    },
+    "created_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

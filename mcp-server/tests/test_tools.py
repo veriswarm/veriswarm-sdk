@@ -131,7 +131,7 @@ TOOL_MODULES = [
     "src.tools.events",
     "src.tools.guard",
     "src.tools.passport",
-    "src.tools.evidence",
+    "src.tools.vault",
     "src.tools.agents",
     "src.tools.platform",
 ]

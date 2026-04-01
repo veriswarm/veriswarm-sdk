@@ -27,7 +27,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         action_type: str,
         resource_type: str = "",
     ) -> str:
-        """Check if an agent is allowed to perform an action. Returns allow, review, or deny."""
+        """Check if an agent is allowed to perform an action. Returns allow, review, or deny.
+
+        Uses x-api-key auth. The agent must belong to the tenant that owns the API key."""
         try:
             body: dict = {"agent_id": agent_id, "action_type": action_type}
             if resource_type:
@@ -41,7 +43,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
     @server.tool()
     async def get_my_score() -> str:
-        """Get your own trust scores with improvement guidance. Requires VERISWARM_AGENT_KEY."""
+        """Get your own trust scores with improvement guidance.
+
+        Requires agent key auth (VERISWARM_AGENT_KEY). Not available with API key only."""
         try:
             result = client.get("/v1/agents/me/scores", use_agent_key=True)
             return json.dumps(result, indent=2)

@@ -7,7 +7,7 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 from .client import VeriSwarmAPIClient
-from .tools import agents, events, guard, passport, platform, trust, vault, runtime
+from .tools import agents, events, guard, passport, platform, trust, vault, runtime, workflows
 
 
 def create_server() -> tuple[FastMCP, VeriSwarmAPIClient]:
@@ -30,6 +30,7 @@ def create_server() -> tuple[FastMCP, VeriSwarmAPIClient]:
     agents.register(server, client)
     platform.register(server, client)
     runtime.register(server, client)
+    workflows.register(server, client)
 
     return server, client
 
