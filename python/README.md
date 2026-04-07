@@ -336,3 +336,32 @@ print(status["status"])  # "operational" or "degraded"
 | `approve_step(exec_id, step_id, action=)` | Human review action |
 | `list_workflow_templates()` | Available templates |
 | `deploy_template(template_id)` | Deploy template |
+| **Compliance** | |
+| `get_owasp_attestation()` | OWASP Agentic AI Top 10 (2026) per-tenant coverage report |
+| `list_compliance_frameworks()` | List supported frameworks |
+| `get_compliance_report(framework_id)` | EU AI Act / NIST AI RMF / ISO 42001 reports |
+| **Cedar Policies** | |
+| `list_cedar_policies()` | List active Cedar policies |
+| `create_cedar_policy(name, policy_text)` | Create policy (Max+) |
+| `get_cedar_policy(policy_id)` | Get policy with full text |
+| `update_cedar_policy(policy_id, ...)` | Update policy (versions bumped) |
+| `delete_cedar_policy(policy_id)` | Soft-delete policy |
+| `validate_cedar_policy(policy_text)` | Validate Cedar syntax |
+| `test_cedar_policy(policy_text, ...)` | Dry-run policy against test input |
+| **SRE: Circuit Breakers + SLOs** | |
+| `get_sre_dashboard()` | Combined SRE dashboard |
+| `get_circuit_breakers()` | Provider circuit breaker states |
+| `reset_circuit_breaker(provider, model)` | Manually close a breaker |
+| `get_error_budget()` | SLO error budget status |
+| `get_slo_config()` | Get SLO targets |
+| `update_slo_config(...)` | Update availability/latency targets |
+| **Context Governance** | |
+| `get_context_dashboard(days=)` | Topics + quality + gaps |
+| `get_context_topics(days=, limit=)` | Event topic distribution |
+| `get_context_quality()` | KB coverage + per-agent health |
+| `get_context_gaps(days=)` | Detect knowledge-gap agents |
+| **Guard Extensions** | |
+| `scan_mcp_tools(tools)` | Pre-deploy MCP tool scanner (6 checks) |
+| `verify_response(prompt, response)` | Cross-model verification (ASI06 defense) |
+| **A2A Transport** | |
+| `provision_a2a_keys(agent_id)` | Provision Ed25519 keys for inter-agent signing |

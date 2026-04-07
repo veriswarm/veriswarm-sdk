@@ -525,6 +525,202 @@ class VeriSwarmClient:
         """Deploy a workflow template as a new workflow."""
         return self._post(f"/v1/workflows/templates/{template_id}/deploy")
 
+    # --- Compliance ---
+
+    def get_owasp_attestation(self) -> dict[str, Any]:
+        """Get a per-tenant OWASP Agentic AI Top 10 (2026) coverage report.
+
+        Returns covered/partial/gap status for each of the 10 risks,
+        evidence counts from Guard/Vault, and an overall coverage score.
+        """
+        return self._get("/v1/compliance/owasp-attestation")
+
+    def list_compliance_frameworks(self) -> dict[str, Any]:
+        """List all supported compliance frameworks (eu-ai-act, nist-ai-rmf, iso-42001)."""
+        return self._get("/v1/compliance/frameworks")
+
+    def get_compliance_report(self, framework_id: str) -> dict[str, Any]:
+        """Get a per-tenant compliance report for a specific framework.
+
+        framework_id: 'eu-ai-act' | 'nist-ai-rmf' | 'iso-42001'
+        Returns pass/warn/fail per control with evidence counts and recommendations.
+        """
+        return self._get(f"/v1/compliance/{framework_id}")
+
+    # --- Cedar Policies ---
+
+    def list_cedar_policies(self) -> dict[str, Any]:
+        """List active Cedar policies for the tenant."""
+        return self._get("/v1/policies")
+
+    def create_cedar_policy(
+        self,
+        *,
+        name: str,
+        policy_text: str,
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create a Cedar policy. Requires Max or Enterprise plan."""
+        return self._post(
+            "/v1/policies",
+            body={"name": name, "description": description, "policy_text": policy_text},
+        )
+
+    def get_cedar_policy(self, policy_id: str) -> dict[str, Any]:
+        """Get a Cedar policy by id (includes full policy text)."""
+        return self._get(f"/v1/policies/{policy_id}")
+
+    def update_cedar_policy(
+        self,
+        policy_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        policy_text: str | None = None,
+        is_active: bool | None = None,
+    ) -> dict[str, Any]:
+        """Update a Cedar policy. Increments version if policy_text changes."""
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
+        if policy_text is not None:
+            body["policy_text"] = policy_text
+        if is_active is not None:
+            body["is_active"] = is_active
+        return self._request(f"/v1/policies/{policy_id}", method="PUT", body=body)
+
+    def delete_cedar_policy(self, policy_id: str) -> dict[str, Any]:
+        """Soft-delete a Cedar policy (sets is_active=False)."""
+        return self._request(f"/v1/policies/{policy_id}", method="DELETE")
+
+    def validate_cedar_policy(self, policy_text: str) -> dict[str, Any]:
+        """Validate Cedar syntax without persisting."""
+        return self._post("/v1/policies/validate", body={"policy_text": policy_text})
+
+    def test_cedar_policy(
+        self,
+        *,
+        policy_text: str,
+        agent_id: str = "test_agent",
+        action_type: str = "tool_call",
+        policy_tier: str = "tier_1",
+        risk_score: int = 50,
+        is_verified: bool = False,
+    ) -> dict[str, Any]:
+        """Dry-run a Cedar policy against test input. Returns the decision."""
+        return self._post(
+            "/v1/policies/test",
+            body={
+                "policy_text": policy_text,
+                "agent_id": agent_id,
+                "action_type": action_type,
+                "policy_tier": policy_tier,
+                "risk_score": risk_score,
+                "is_verified": is_verified,
+            },
+        )
+
+    # --- SRE: Circuit Breakers, SLOs, Error Budgets ---
+
+    def get_sre_dashboard(self) -> dict[str, Any]:
+        """Combined SRE dashboard — circuit breakers + SLO + error budget + provider health."""
+        return self._get("/v1/analytics/sre/dashboard")
+
+    def get_circuit_breakers(self) -> dict[str, Any]:
+        """Get current state of all LLM provider circuit breakers."""
+        return self._get("/v1/analytics/sre/circuit-breakers")
+
+    def reset_circuit_breaker(self, provider: str, model: str) -> dict[str, Any]:
+        """Manually reset a circuit breaker to closed state."""
+        return self._post(f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
+
+    def get_error_budget(self) -> dict[str, Any]:
+        """Get error budget status based on SLO targets and recent LLM usage."""
+        return self._get("/v1/analytics/sre/error-budget")
+
+    def get_slo_config(self) -> dict[str, Any]:
+        """Get the tenant's current SLO configuration."""
+        return self._get("/v1/analytics/sre/slo-config")
+
+    def update_slo_config(
+        self,
+        *,
+        availability_target: float | None = None,
+        latency_p95_target_ms: float | None = None,
+        error_budget_window_hours: int | None = None,
+        budget_exhausted_action: str | None = None,
+    ) -> dict[str, Any]:
+        """Update tenant SLO targets. Stored in tenant.llm_config.slo."""
+        body: dict[str, Any] = {}
+        if availability_target is not None:
+            body["availability_target"] = availability_target
+        if latency_p95_target_ms is not None:
+            body["latency_p95_target_ms"] = latency_p95_target_ms
+        if error_budget_window_hours is not None:
+            body["error_budget_window_hours"] = error_budget_window_hours
+        if budget_exhausted_action is not None:
+            body["budget_exhausted_action"] = budget_exhausted_action
+        return self._request("/v1/analytics/sre/slo-config", method="PUT", body=body)
+
+    # --- Context Governance ---
+
+    def get_context_dashboard(self, *, days: int = 30) -> dict[str, Any]:
+        """Combined context governance dashboard — topics + quality + gaps."""
+        return self._get(f"/v1/analytics/context/dashboard?days={days}")
+
+    def get_context_topics(self, *, days: int = 30, limit: int = 20) -> dict[str, Any]:
+        """Event topic distribution and trending categories."""
+        return self._get(f"/v1/analytics/context/topics?days={days}&limit={limit}")
+
+    def get_context_quality(self) -> dict[str, Any]:
+        """Knowledge base coverage, event health, per-agent breakdown."""
+        return self._get("/v1/analytics/context/quality")
+
+    def get_context_gaps(self, *, days: int = 30) -> dict[str, Any]:
+        """Detect agents with high failure rates and low knowledge base coverage."""
+        return self._get(f"/v1/analytics/context/gaps?days={days}")
+
+    # --- Guard Extensions: MCP Scanner + Cross-Model Verification ---
+
+    def scan_mcp_tools(self, tools: list[dict[str, Any]]) -> dict[str, Any]:
+        """Scan MCP tool definitions for security risks (pre-deploy audit).
+
+        Checks for tool poisoning, typosquatting, schema manipulation,
+        rug-pull patterns, prompt injection, and excessive permissions.
+        Returns a structured report with verdict (pass/warn/fail).
+        """
+        return self._post("/v1/suite/guard/scan-mcp", body={"tools": tools})
+
+    def verify_response(
+        self,
+        *,
+        prompt: str,
+        response: str,
+        models: list[dict[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        """Cross-model verification — check a response with multiple LLMs.
+
+        Defends against memory poisoning (OWASP ASI06) by routing the
+        response through 2-3 verifiers and computing majority consensus.
+        Results are logged to Vault for audit.
+        """
+        body: dict[str, Any] = {"prompt": prompt, "response": response}
+        if models:
+            body["models"] = models
+        return self._post("/v1/suite/guard/verify", body=body)
+
+    # --- A2A Transport (Ed25519 signing) ---
+
+    def provision_a2a_keys(self, agent_id: str) -> dict[str, Any]:
+        """Provision Ed25519 transport keys for an agent. Returns the public key.
+
+        After provisioning, the agent's public_key appears in agent cards under
+        x-veriswarm-transport. Inter-agent messages can then be signed.
+        """
+        return self._post(f"/v1/a2a/{agent_id}/keys")
+
     # --- Internal ---
 
     def _get(self, path: str) -> Any:
