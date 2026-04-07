@@ -17,7 +17,7 @@ inputs:
     description: "Agent ID to check (required for score/test/decision)"
     required: false
   mode:
-    description: "Check mode: score, test, scan, decision, or all"
+    description: "Check mode: score, test, scan, decision, owasp, or all"
     required: false
     default: "all"
   scan-paths:
@@ -44,6 +44,10 @@ inputs:
     description: "Minimum composite trust score to pass (0-100)"
     required: false
     default: "0"
+  min-owasp-coverage:
+    description: "Minimum OWASP Agentic Top 10 coverage score to pass (0.0-1.0). 0 = no enforcement."
+    required: false
+    default: "0"
 
 outputs:
   trust-score:
@@ -58,6 +62,10 @@ outputs:
     description: "Whether PII was detected in scanned files"
   injection-found:
     description: "Whether prompt injection was detected"
+  owasp-coverage:
+    description: "OWASP Agentic Top 10 coverage (e.g., '10/10')"
+  owasp-score:
+    description: "OWASP coverage score (0.0-1.0)"
   summary:
     description: "Human-readable summary of all checks"
 
@@ -77,5 +85,6 @@ runs:
         VERISWARM_FAIL_ON_INJECTION: ${{ inputs.fail-on-injection }}
         VERISWARM_FAIL_ON_LOW_SCORE: ${{ inputs.fail-on-low-score }}
         VERISWARM_MIN_TRUST_SCORE: ${{ inputs.min-trust-score }}
+        VERISWARM_MIN_OWASP_COVERAGE: ${{ inputs.min-owasp-coverage }}
       run: |
         python3 ${{ github.action_path }}/check.py
