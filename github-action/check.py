@@ -25,6 +25,7 @@ FAIL_ON_DENY = os.environ.get("VERISWARM_FAIL_ON_DENY", "true").lower() == "true
 FAIL_ON_INJECTION = os.environ.get("VERISWARM_FAIL_ON_INJECTION", "true").lower() == "true"
 FAIL_ON_LOW_SCORE = int(os.environ.get("VERISWARM_FAIL_ON_LOW_SCORE", "0"))
 MIN_TRUST_SCORE = int(os.environ.get("VERISWARM_MIN_TRUST_SCORE", "0"))
+MIN_OWASP_COVERAGE = float(os.environ.get("VERISWARM_MIN_OWASP_COVERAGE", "0"))
 
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 GITHUB_STEP_SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
@@ -210,6 +211,34 @@ def check_scan():
         summary_lines.append(f"Injection Scan: ✅ Clean")
 
 
+def check_owasp():
+    """Check OWASP Agentic AI Top 10 (2026) compliance coverage."""
+    print("Checking OWASP Agentic AI Top 10 attestation...")
+    result = api_request("/v1/compliance/owasp-attestation")
+
+    if "error" in result:
+        return
+
+    summary = result.get("summary", {})
+    covered = summary.get("covered", 0)
+    partial = summary.get("partial", 0)
+    gaps = summary.get("gaps", 0)
+    total = summary.get("total_risks", 10)
+    score = summary.get("coverage_score", 0.0)
+
+    set_output("owasp-coverage", f"{covered}/{total}")
+    set_output("owasp-score", f"{score:.2f}")
+
+    line = f"OWASP Coverage: **{covered}/{total}** covered, {partial} partial, {gaps} gaps (score: {score:.2f})"
+    summary_lines.append(line)
+    print(f"  Coverage: {covered}/{total} ({score:.0%})")
+
+    if MIN_OWASP_COVERAGE > 0 and score < MIN_OWASP_COVERAGE:
+        msg = f"OWASP coverage score {score:.2f} below minimum {MIN_OWASP_COVERAGE:.2f}"
+        failures.append(msg)
+        print(f"::error::{msg}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -223,7 +252,7 @@ def main():
     print(f"   Mode: {MODE}")
     print()
 
-    modes = [MODE] if MODE != "all" else ["score", "decision", "test", "scan"]
+    modes = [MODE] if MODE != "all" else ["score", "decision", "test", "scan", "owasp"]
 
     for mode in modes:
         if mode == "score":
@@ -234,6 +263,8 @@ def main():
             check_test()
         elif mode == "scan":
             check_scan()
+        elif mode == "owasp":
+            check_owasp()
 
     # Write summary
     summary_md = "## 🐝 VeriSwarm Trust Check\n\n"
