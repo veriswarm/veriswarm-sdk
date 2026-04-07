@@ -278,3 +278,32 @@ const rep = await client.reputationLookup("my-agent");
 | `approveStep(execId, stepId, { action })` | Human review action |
 | `listWorkflowTemplates()` | Available templates |
 | `deployTemplate(templateId)` | Deploy template |
+| **Compliance** | |
+| `getOwaspAttestation()` | OWASP Agentic AI Top 10 (2026) per-tenant coverage report |
+| `listComplianceFrameworks()` | List supported frameworks |
+| `getComplianceReport(frameworkId)` | EU AI Act / NIST AI RMF / ISO 42001 reports |
+| **Cedar Policies** | |
+| `listCedarPolicies()` | List active Cedar policies |
+| `createCedarPolicy({ name, policyText })` | Create policy (Max+) |
+| `getCedarPolicy(policyId)` | Get policy with full text |
+| `updateCedarPolicy(policyId, updates)` | Update policy (versions bumped) |
+| `deleteCedarPolicy(policyId)` | Soft-delete policy |
+| `validateCedarPolicy(policyText)` | Validate Cedar syntax |
+| `testCedarPolicy({ policyText, ... })` | Dry-run policy against test input |
+| **SRE: Circuit Breakers + SLOs** | |
+| `getSreDashboard()` | Combined SRE dashboard |
+| `getCircuitBreakers()` | Provider circuit breaker states |
+| `resetCircuitBreaker(provider, model)` | Manually close a breaker |
+| `getErrorBudget()` | SLO error budget status |
+| `getSloConfig()` | Get SLO targets |
+| `updateSloConfig({ ... })` | Update availability/latency targets |
+| **Context Governance** | |
+| `getContextDashboard({ days })` | Topics + quality + gaps |
+| `getContextTopics({ days, limit })` | Event topic distribution |
+| `getContextQuality()` | KB coverage + per-agent health |
+| `getContextGaps({ days })` | Detect knowledge-gap agents |
+| **Guard Extensions** | |
+| `scanMcpTools(tools)` | Pre-deploy MCP tool scanner (6 checks) |
+| `verifyResponse({ prompt, response })` | Cross-model verification (ASI06 defense) |
+| **A2A Transport** | |
+| `provisionA2aKeys(agentId)` | Provision Ed25519 keys for inter-agent signing |

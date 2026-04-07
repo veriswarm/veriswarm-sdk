@@ -501,6 +501,188 @@ export class VeriSwarmClient {
     return this.#request(`/v1/workflows/templates/${templateId}/deploy`, { method: "POST" });
   }
 
+  // --- Compliance ---
+
+  /** Per-tenant OWASP Agentic AI Top 10 (2026) coverage report. */
+  async getOwaspAttestation() {
+    return this.#request("/v1/compliance/owasp-attestation");
+  }
+
+  /** List supported compliance frameworks (eu-ai-act, nist-ai-rmf, iso-42001). */
+  async listComplianceFrameworks() {
+    return this.#request("/v1/compliance/frameworks");
+  }
+
+  /**
+   * Per-tenant compliance report for a specific framework.
+   * @param {string} frameworkId - 'eu-ai-act' | 'nist-ai-rmf' | 'iso-42001'
+   */
+  async getComplianceReport(frameworkId) {
+    return this.#request(`/v1/compliance/${frameworkId}`);
+  }
+
+  // --- Cedar Policies ---
+
+  /** List active Cedar policies for the tenant. */
+  async listCedarPolicies() {
+    return this.#request("/v1/policies");
+  }
+
+  /** Create a Cedar policy. Requires Max or Enterprise plan. */
+  async createCedarPolicy({ name, policyText, description = "" }) {
+    return this.#request("/v1/policies", {
+      method: "POST",
+      body: { name, description, policy_text: policyText },
+    });
+  }
+
+  /** Get a Cedar policy by id (includes full policy text). */
+  async getCedarPolicy(policyId) {
+    return this.#request(`/v1/policies/${policyId}`);
+  }
+
+  /** Update a Cedar policy. Increments version if policy_text changes. */
+  async updateCedarPolicy(policyId, { name, description, policyText, isActive } = {}) {
+    const body = {};
+    if (name !== undefined) body.name = name;
+    if (description !== undefined) body.description = description;
+    if (policyText !== undefined) body.policy_text = policyText;
+    if (isActive !== undefined) body.is_active = isActive;
+    return this.#request(`/v1/policies/${policyId}`, { method: "PUT", body });
+  }
+
+  /** Soft-delete a Cedar policy. */
+  async deleteCedarPolicy(policyId) {
+    return this.#request(`/v1/policies/${policyId}`, { method: "DELETE" });
+  }
+
+  /** Validate Cedar policy syntax without persisting. */
+  async validateCedarPolicy(policyText) {
+    return this.#request("/v1/policies/validate", {
+      method: "POST",
+      body: { policy_text: policyText },
+    });
+  }
+
+  /** Dry-run a Cedar policy against test input. Returns the decision. */
+  async testCedarPolicy({
+    policyText,
+    agentId = "test_agent",
+    actionType = "tool_call",
+    policyTier = "tier_1",
+    riskScore = 50,
+    isVerified = false,
+  }) {
+    return this.#request("/v1/policies/test", {
+      method: "POST",
+      body: {
+        policy_text: policyText,
+        agent_id: agentId,
+        action_type: actionType,
+        policy_tier: policyTier,
+        risk_score: riskScore,
+        is_verified: isVerified,
+      },
+    });
+  }
+
+  // --- SRE: Circuit Breakers, SLOs, Error Budgets ---
+
+  /** Combined SRE dashboard — circuit breakers + SLO + error budget + provider health. */
+  async getSreDashboard() {
+    return this.#request("/v1/analytics/sre/dashboard");
+  }
+
+  /** Get current state of all LLM provider circuit breakers. */
+  async getCircuitBreakers() {
+    return this.#request("/v1/analytics/sre/circuit-breakers");
+  }
+
+  /** Manually reset a circuit breaker to closed state. */
+  async resetCircuitBreaker(provider, model) {
+    return this.#request(`/v1/analytics/sre/circuit-breakers/${provider}/${model}/reset`, {
+      method: "POST",
+    });
+  }
+
+  /** Get error budget status based on SLO targets and recent LLM usage. */
+  async getErrorBudget() {
+    return this.#request("/v1/analytics/sre/error-budget");
+  }
+
+  /** Get the tenant's current SLO configuration. */
+  async getSloConfig() {
+    return this.#request("/v1/analytics/sre/slo-config");
+  }
+
+  /** Update tenant SLO targets. Stored in tenant.llm_config.slo. */
+  async updateSloConfig({
+    availabilityTarget,
+    latencyP95TargetMs,
+    errorBudgetWindowHours,
+    budgetExhaustedAction,
+  } = {}) {
+    const body = {};
+    if (availabilityTarget !== undefined) body.availability_target = availabilityTarget;
+    if (latencyP95TargetMs !== undefined) body.latency_p95_target_ms = latencyP95TargetMs;
+    if (errorBudgetWindowHours !== undefined) body.error_budget_window_hours = errorBudgetWindowHours;
+    if (budgetExhaustedAction !== undefined) body.budget_exhausted_action = budgetExhaustedAction;
+    return this.#request("/v1/analytics/sre/slo-config", { method: "PUT", body });
+  }
+
+  // --- Context Governance ---
+
+  /** Combined context governance dashboard — topics + quality + gaps. */
+  async getContextDashboard({ days = 30 } = {}) {
+    return this.#request(`/v1/analytics/context/dashboard?days=${days}`);
+  }
+
+  /** Event topic distribution and trending categories. */
+  async getContextTopics({ days = 30, limit = 20 } = {}) {
+    return this.#request(`/v1/analytics/context/topics?days=${days}&limit=${limit}`);
+  }
+
+  /** Knowledge base coverage, event health, per-agent breakdown. */
+  async getContextQuality() {
+    return this.#request("/v1/analytics/context/quality");
+  }
+
+  /** Detect agents with high failure rates and low knowledge base coverage. */
+  async getContextGaps({ days = 30 } = {}) {
+    return this.#request(`/v1/analytics/context/gaps?days=${days}`);
+  }
+
+  // --- Guard Extensions: MCP Scanner + Cross-Model Verification ---
+
+  /**
+   * Scan MCP tool definitions for security risks (pre-deploy audit).
+   * Checks for tool poisoning, typosquatting, schema manipulation,
+   * rug-pull patterns, prompt injection, and excessive permissions.
+   */
+  async scanMcpTools(tools) {
+    return this.#request("/v1/suite/guard/scan-mcp", {
+      method: "POST",
+      body: { tools },
+    });
+  }
+
+  /**
+   * Cross-model verification — check a response with multiple LLMs.
+   * Defends against memory poisoning (OWASP ASI06).
+   */
+  async verifyResponse({ prompt, response, models = null }) {
+    const body = { prompt, response };
+    if (models) body.models = models;
+    return this.#request("/v1/suite/guard/verify", { method: "POST", body });
+  }
+
+  // --- A2A Transport (Ed25519 signing) ---
+
+  /** Provision Ed25519 transport keys for an agent. Returns the public key. */
+  async provisionA2aKeys(agentId) {
+    return this.#request(`/v1/a2a/${agentId}/keys`, { method: "POST" });
+  }
+
   // --- Internal ---
 
   async #request(path, { method = "GET", body = null } = {}) {
