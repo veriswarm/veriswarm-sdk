@@ -365,3 +365,19 @@ print(status["status"])  # "operational" or "degraded"
 | `verify_response(prompt, response)` | Cross-model verification (ASI06 defense) |
 | **A2A Transport** | |
 | `provision_a2a_keys(agent_id)` | Provision Ed25519 keys for inter-agent signing |
+| **Content Provenance (EU AI Act Art. 50)** | |
+| `label_content(content, agent_id=, model=)` | Generate signed manifest for AI-generated content |
+| `get_content_provenance(content_hash)` | Public lookup by SHA-256 content hash |
+| `verify_content(manifest, content=)` | Verify signature + optional content match |
+| **ABAC: Agent Attributes** | |
+| `get_agent_attributes(agent_id)` | Read tenant-defined Cedar attributes |
+| `set_agent_attributes(agent_id, attrs)` | Replace agent attributes (Cedar-compatible types) |
+| **Passport JIT (Just-in-Time Access)** | |
+| `request_jit_grant(agent_id, action_type, ...)` | Request ephemeral access grant (auto-approves trusted agents) |
+| `approve_jit_grant(grant_id)` | Approve pending grant (session auth) |
+| `deny_jit_grant(grant_id, reason=)` | Deny pending grant |
+| `revoke_jit_grant(grant_id, reason=)` | Revoke approved grant immediately |
+| `issue_jit_token(grant_id)` | Issue ES256 JIT token (one-time) |
+| `verify_jit_token(token, expected_action=, expected_resource_id=)` | Verify JIT token at use-time (public) |
+| `list_jit_grants(agent_id=, status=)` | List grants for the tenant |
+| `get_jit_grant(grant_id)` | Get a single grant by id |

@@ -307,3 +307,19 @@ const rep = await client.reputationLookup("my-agent");
 | `verifyResponse({ prompt, response })` | Cross-model verification (ASI06 defense) |
 | **A2A Transport** | |
 | `provisionA2aKeys(agentId)` | Provision Ed25519 keys for inter-agent signing |
+| **Content Provenance (EU AI Act Art. 50)** | |
+| `labelContent({ content, agentId?, model? })` | Generate signed manifest for AI-generated content |
+| `getContentProvenance(contentHash)` | Public lookup by SHA-256 content hash |
+| `verifyContent({ manifest, content? })` | Verify signature + optional content match |
+| **ABAC: Agent Attributes** | |
+| `getAgentAttributes(agentId)` | Read tenant-defined Cedar attributes |
+| `setAgentAttributes(agentId, attributes)` | Replace agent attributes (Cedar-compatible types) |
+| **Passport JIT (Just-in-Time Access)** | |
+| `requestJitGrant({ agentId, actionType, ... })` | Request ephemeral access grant |
+| `approveJitGrant(grantId)` | Approve pending grant (session auth) |
+| `denyJitGrant(grantId, { reason? })` | Deny pending grant |
+| `revokeJitGrant(grantId, { reason? })` | Revoke approved grant immediately |
+| `issueJitToken(grantId)` | Issue ES256 JIT token (one-time) |
+| `verifyJitToken({ token, expectedAction?, expectedResourceId? })` | Verify JIT token at use-time (public) |
+| `listJitGrants({ agentId?, status? })` | List grants for the tenant |
+| `getJitGrant(grantId)` | Get a single grant by id |

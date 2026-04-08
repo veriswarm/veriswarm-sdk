@@ -46,6 +46,15 @@ class VeriSwarmAPIClient:
         r.raise_for_status()
         return r.json()
 
+    def put(self, path: str, json: dict = None, use_agent_key: bool = False) -> dict:
+        r = self._http.put(
+            f"{self.base_url}{path}",
+            json=json,
+            headers=self._headers(use_agent_key),
+        )
+        r.raise_for_status()
+        return r.json()
+
     def delete(self, path: str, use_agent_key: bool = False) -> dict:
         r = self._http.delete(
             f"{self.base_url}{path}",

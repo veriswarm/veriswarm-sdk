@@ -11,7 +11,7 @@ veriswarm-setup
 
 The setup wizard configures everything for your platform (Claude Code, Gemini CLI, or Codex):
 
-1. **MCP Server** — 80+ tools spanning trust scoring, Guard security, Passport identity, Vault audit, compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies, SRE (circuit breakers + SLOs), context governance, cross-model verification, and A2A transport keys
+1. **MCP Server** — 90+ tools spanning trust scoring, Guard security, Passport identity (including JIT access grants), Vault audit, compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies, ABAC agent attributes, SRE (circuit breakers + SLOs), context governance, cross-model verification, content provenance (EU AI Act Art. 50), and A2A transport keys
 2. **Guard Hooks** — Automatic PII protection for prompts and tool calls
 3. **Guard Proxy** — Transparent MCP interception for any tool server (optional)
 
