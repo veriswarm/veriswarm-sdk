@@ -721,6 +721,177 @@ class VeriSwarmClient:
         """
         return self._post(f"/v1/a2a/{agent_id}/keys")
 
+    # --- Content Provenance (EU AI Act Article 50) ---
+
+    def label_content(
+        self,
+        *,
+        content: str,
+        agent_id: str | None = None,
+        model: str | None = None,
+        content_type: str = "text/plain",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate an Ed25519-signed provenance manifest for AI-generated content.
+
+        Returns the manifest (including signature, content hash, tenant/agent
+        metadata). Machine-readable format compatible with EU AI Act Article 50
+        transparency requirements.
+        """
+        body: dict[str, Any] = {"content": content, "content_type": content_type}
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        if model is not None:
+            body["model"] = model
+        if metadata is not None:
+            body["metadata"] = metadata
+        return self._post("/v1/content/label", body=body)
+
+    def get_content_provenance(self, content_hash: str) -> dict[str, Any]:
+        """Public lookup of a provenance manifest by SHA-256 content hash.
+
+        No authentication required on the server side — third parties can
+        verify AI-generated content labels without a VeriSwarm account.
+        """
+        return self._get(f"/v1/content/provenance/{content_hash}")
+
+    def verify_content(
+        self,
+        *,
+        manifest: dict[str, Any],
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify a provenance manifest's Ed25519 signature.
+
+        If ``content`` is supplied, also verifies the content hash matches.
+        Public endpoint — no auth required on the server side.
+        """
+        body: dict[str, Any] = {"manifest": manifest}
+        if content is not None:
+            body["content"] = content
+        return self._post("/v1/content/verify", body=body)
+
+    # --- ABAC: Agent Attributes (Cedar policy context) ---
+
+    def get_agent_attributes(self, agent_id: str) -> dict[str, Any]:
+        """Read tenant-defined ABAC attributes for an agent.
+
+        These attributes are merged into the Cedar entity at decision time
+        and can be referenced in custom policies as ``principal.<key>``.
+        """
+        return self._get(f"/v1/agents/{agent_id}/attributes")
+
+    def set_agent_attributes(
+        self,
+        agent_id: str,
+        attributes: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace an agent's ABAC attributes.
+
+        Values must be Cedar-compatible types (strings, ints, bools, or lists
+        of those). Reserved keys (``policy_tier``, ``risk_score``, ``is_verified``)
+        are silently rejected.
+        """
+        return self._request(
+            f"/v1/agents/{agent_id}/attributes",
+            method="PUT",
+            body={"attributes": attributes},
+        )
+
+    # --- Passport JIT (Just-in-Time Access Grants) ---
+
+    def request_jit_grant(
+        self,
+        *,
+        agent_id: str,
+        action_type: str,
+        resource_type: str | None = None,
+        resource_id: str | None = None,
+        reason: str | None = None,
+        ttl_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Request a just-in-time access grant for an agent.
+
+        Trusted agents (composite_trust >= 75, risk_score <= 30, verified,
+        ttl <= 10min) are auto-approved. Others go to pending state for human
+        review via ``approve_jit_grant``.
+        """
+        body: dict[str, Any] = {
+            "agent_id": agent_id,
+            "action_type": action_type,
+            "ttl_seconds": ttl_seconds,
+        }
+        if resource_type is not None:
+            body["resource_type"] = resource_type
+        if resource_id is not None:
+            body["resource_id"] = resource_id
+        if reason is not None:
+            body["reason"] = reason
+        return self._post("/v1/passport/jit/request", body=body)
+
+    def approve_jit_grant(self, grant_id: str) -> dict[str, Any]:
+        """Approve a pending JIT grant (requires account session token)."""
+        return self._post(f"/v1/passport/jit/{grant_id}/approve")
+
+    def deny_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Deny a pending JIT grant."""
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        return self._post(f"/v1/passport/jit/{grant_id}/deny", body=body)
+
+    def revoke_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
+        """Revoke an approved JIT grant immediately."""
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        return self._post(f"/v1/passport/jit/{grant_id}/revoke", body=body)
+
+    def issue_jit_token(self, grant_id: str) -> dict[str, Any]:
+        """Issue the ES256 JIT token for an approved grant.
+
+        Only callable once per grant — subsequent calls fail. Returns a dict
+        containing ``token`` (the signed JWT) and ``expires_at``.
+        """
+        return self._post(f"/v1/passport/jit/{grant_id}/token")
+
+    def verify_jit_token(
+        self,
+        *,
+        token: str,
+        expected_action: str | None = None,
+        expected_resource_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify a JIT token at use-time. Public endpoint — no auth required.
+
+        Checks signature, revocation state, expiry, and optional scope match.
+        """
+        body: dict[str, Any] = {"token": token}
+        if expected_action is not None:
+            body["expected_action"] = expected_action
+        if expected_resource_id is not None:
+            body["expected_resource_id"] = expected_resource_id
+        return self._post("/v1/passport/jit/verify", body=body)
+
+    def list_jit_grants(
+        self,
+        *,
+        agent_id: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List JIT grants for the tenant, optionally filtered by agent or status."""
+        params = [f"limit={limit}"]
+        if agent_id:
+            params.append(f"agent_id={agent_id}")
+        if status:
+            params.append(f"status={status}")
+        return self._get(f"/v1/passport/jit/grants?{'&'.join(params)}")
+
+    def get_jit_grant(self, grant_id: str) -> dict[str, Any]:
+        """Get a single JIT grant by id."""
+        return self._get(f"/v1/passport/jit/grants/{grant_id}")
+
     # --- Internal ---
 
     def _get(self, path: str) -> Any:

@@ -8,7 +8,7 @@ Official client libraries, MCP server, and plugins for [VeriSwarm](https://veris
 |---------|----------|---------|-------------|
 | [**Python SDK**](./python/) | Python | `pip install veriswarm` | REST client with Workflows, credential issuance, scoring profiles, LangChain adapter |
 | [**Node.js SDK**](./node/) | JavaScript | `npm install @veriswarm/sdk` | ESM client for decisions, events, Workflows, agent management |
-| [**MCP Server**](./mcp-server/) | Python | `pip install veriswarm-mcp` | 80+ MCP tools for trust scoring, Guard, Passport, Vault, Workflows, Compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies, SRE, and context governance. Works with Claude Desktop, Cursor, and any MCP client. |
+| [**MCP Server**](./mcp-server/) | Python | `pip install veriswarm-mcp` | 90+ MCP tools for trust scoring, Guard, Passport (incl. JIT access), Vault, Workflows, Compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies + ABAC attributes, SRE, context governance, and content provenance (EU AI Act Art. 50). Works with Claude Desktop, Cursor, and any MCP client. |
 | [**OpenClaw Plugin**](./openclaw-plugin/) | TypeScript | `openclaw plugins install veriswarm` | 11 tools + 3 hooks for OpenClaw agents. PII tokenization, policy enforcement, audit. Per-feature enable/disable. |
 | [**GitHub Action**](./github-action/) | Python | GitHub Marketplace | CI/CD trust gate — check agent trust scores in your pipeline |
 | [**JSON Schemas**](./schemas/) | JSON | `npm install @veriswarm/schemas` | Schema definitions for events, profiles, scores, and workflows |

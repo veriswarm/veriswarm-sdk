@@ -683,6 +683,126 @@ export class VeriSwarmClient {
     return this.#request(`/v1/a2a/${agentId}/keys`, { method: "POST" });
   }
 
+  // --- Content Provenance (EU AI Act Article 50) ---
+
+  /**
+   * Generate an Ed25519-signed provenance manifest for AI-generated content.
+   * Returns the manifest (including signature, content hash, tenant/agent metadata).
+   */
+  async labelContent({ content, agentId = null, model = null, contentType = "text/plain", metadata = null }) {
+    const body = { content, content_type: contentType };
+    if (agentId !== null) body.agent_id = agentId;
+    if (model !== null) body.model = model;
+    if (metadata !== null) body.metadata = metadata;
+    return this.#request("/v1/content/label", { method: "POST", body });
+  }
+
+  /** Public lookup of a provenance manifest by SHA-256 content hash. */
+  async getContentProvenance(contentHash) {
+    return this.#request(`/v1/content/provenance/${contentHash}`);
+  }
+
+  /**
+   * Verify a provenance manifest's Ed25519 signature.
+   * If content is supplied, also verifies the content hash matches.
+   */
+  async verifyContent({ manifest, content = null }) {
+    const body = { manifest };
+    if (content !== null) body.content = content;
+    return this.#request("/v1/content/verify", { method: "POST", body });
+  }
+
+  // --- ABAC: Agent Attributes (Cedar policy context) ---
+
+  /**
+   * Read tenant-defined ABAC attributes for an agent.
+   * These flow into Cedar policies as principal.<key> at decision time.
+   */
+  async getAgentAttributes(agentId) {
+    return this.#request(`/v1/agents/${agentId}/attributes`);
+  }
+
+  /**
+   * Replace an agent's ABAC attributes. Values must be Cedar-compatible types
+   * (strings, ints, bools, or lists of those). Reserved keys are rejected.
+   */
+  async setAgentAttributes(agentId, attributes) {
+    return this.#request(`/v1/agents/${agentId}/attributes`, {
+      method: "PUT",
+      body: { attributes },
+    });
+  }
+
+  // --- Passport JIT (Just-in-Time Access Grants) ---
+
+  /**
+   * Request a just-in-time access grant for an agent.
+   * Trusted agents (composite_trust >= 75, risk_score <= 30, verified,
+   * ttl <= 10min) are auto-approved. Others go pending.
+   */
+  async requestJitGrant({ agentId, actionType, resourceType = null, resourceId = null, reason = null, ttlSeconds = 300 }) {
+    const body = {
+      agent_id: agentId,
+      action_type: actionType,
+      ttl_seconds: ttlSeconds,
+    };
+    if (resourceType !== null) body.resource_type = resourceType;
+    if (resourceId !== null) body.resource_id = resourceId;
+    if (reason !== null) body.reason = reason;
+    return this.#request("/v1/passport/jit/request", { method: "POST", body });
+  }
+
+  /** Approve a pending JIT grant (requires account session token). */
+  async approveJitGrant(grantId) {
+    return this.#request(`/v1/passport/jit/${grantId}/approve`, { method: "POST" });
+  }
+
+  /** Deny a pending JIT grant. */
+  async denyJitGrant(grantId, { reason = null } = {}) {
+    const body = {};
+    if (reason !== null) body.reason = reason;
+    return this.#request(`/v1/passport/jit/${grantId}/deny`, { method: "POST", body });
+  }
+
+  /** Revoke an approved JIT grant immediately. */
+  async revokeJitGrant(grantId, { reason = null } = {}) {
+    const body = {};
+    if (reason !== null) body.reason = reason;
+    return this.#request(`/v1/passport/jit/${grantId}/revoke`, { method: "POST", body });
+  }
+
+  /**
+   * Issue the ES256 JIT token for an approved grant.
+   * Only callable once per grant — subsequent calls fail.
+   */
+  async issueJitToken(grantId) {
+    return this.#request(`/v1/passport/jit/${grantId}/token`, { method: "POST" });
+  }
+
+  /**
+   * Verify a JIT token at use-time. Public endpoint — no auth required.
+   * Checks signature, revocation state, expiry, and optional scope match.
+   */
+  async verifyJitToken({ token, expectedAction = null, expectedResourceId = null }) {
+    const body = { token };
+    if (expectedAction !== null) body.expected_action = expectedAction;
+    if (expectedResourceId !== null) body.expected_resource_id = expectedResourceId;
+    return this.#request("/v1/passport/jit/verify", { method: "POST", body });
+  }
+
+  /** List JIT grants for the tenant, optionally filtered by agent or status. */
+  async listJitGrants({ agentId = null, status = null, limit = 50 } = {}) {
+    const params = [`limit=${limit}`];
+    if (agentId) params.push(`agent_id=${agentId}`);
+    if (status) params.push(`status=${status}`);
+    return this.#request(`/v1/passport/jit/grants?${params.join("&")}`);
+  }
+
+  /** Get a single JIT grant by id. */
+  async getJitGrant(grantId) {
+    return this.#request(`/v1/passport/jit/grants/${grantId}`);
+  }
+
   // --- Internal ---
 
   async #request(path, { method = "GET", body = null } = {}) {
