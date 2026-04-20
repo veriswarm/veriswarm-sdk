@@ -803,6 +803,102 @@ export class VeriSwarmClient {
     return this.#request(`/v1/passport/jit/grants/${grantId}`);
   }
 
+  // --- Governance: Anomalies, Discovery, Credential Vault, Compliance Scheduling, Reputation ---
+
+  /** List behavioral anomalies detected for the tenant. */
+  async listAnomalies({ agentId = null, limit = 50 } = {}) {
+    const params = [`limit=${limit}`];
+    if (agentId) params.push(`agent_id=${agentId}`);
+    return this.#request(`/v1/governance/anomalies?${params.join("&")}`);
+  }
+
+  /** Trigger a shadow-agent discovery scan. */
+  async runShadowDiscovery() {
+    return this.#request("/v1/governance/discovery/scan", { method: "POST" });
+  }
+
+  /** List discovered shadow agents, optionally filtered by status. */
+  async listDiscoveredAgents({ status = null } = {}) {
+    const path = status
+      ? `/v1/governance/discovery?status=${encodeURIComponent(status)}`
+      : "/v1/governance/discovery";
+    return this.#request(path);
+  }
+
+  /** Dismiss a discovered shadow agent. */
+  async dismissDiscoveredAgent(discoveryId) {
+    return this.#request(`/v1/governance/discovery/${discoveryId}/dismiss`, { method: "POST" });
+  }
+
+  /** Store an encrypted credential in the governance vault. */
+  async storeCredential({ name, credentialType, value, agentId = null, minTrustScore = 0, rotationIntervalHours = null }) {
+    return this.#request("/v1/governance/credentials", {
+      method: "POST",
+      body: {
+        name,
+        credential_type: credentialType,
+        value,
+        agent_id: agentId,
+        min_trust_score: minTrustScore,
+        rotation_interval_hours: rotationIntervalHours,
+      },
+    });
+  }
+
+  /** Check out a credential for an agent (trust-score gated, audit-logged). */
+  async checkoutCredential({ credentialName, agentId }) {
+    return this.#request("/v1/governance/credentials/checkout", {
+      method: "POST",
+      body: { credential_name: credentialName, agent_id: agentId },
+    });
+  }
+
+  /** List stored credentials (names/metadata only — never values). */
+  async listCredentials() {
+    return this.#request("/v1/governance/credentials");
+  }
+
+  /** Revoke a stored credential by id. */
+  async revokeCredential(credentialId) {
+    return this.#request(`/v1/governance/credentials/${credentialId}`, { method: "DELETE" });
+  }
+
+  /** Get credential checkout audit history. */
+  async getCredentialCheckoutHistory({ credentialId = null, agentId = null, limit = 50 } = {}) {
+    const params = [`limit=${limit}`];
+    if (credentialId != null) params.push(`credential_id=${credentialId}`);
+    if (agentId) params.push(`agent_id=${agentId}`);
+    return this.#request(`/v1/governance/credentials/history?${params.join("&")}`);
+  }
+
+  /** Get the scheduled compliance report delivery config. */
+  async getComplianceSchedule() {
+    return this.#request("/v1/governance/compliance/schedule");
+  }
+
+  /** Configure scheduled compliance report delivery (eu-ai-act, soc2, iso42001, hipaa). */
+  async setComplianceSchedule({ framework, email, frequency = "monthly" }) {
+    return this.#request("/v1/governance/compliance/schedule", {
+      method: "POST",
+      body: { framework, frequency, email },
+    });
+  }
+
+  /** Remove the scheduled compliance report delivery. */
+  async deleteComplianceSchedule() {
+    return this.#request("/v1/governance/compliance/schedule", { method: "DELETE" });
+  }
+
+  /** Issue a signed Reputation Passport (W3C VC) for an agent. */
+  async issueReputationPassport(agentId) {
+    return this.#request(`/v1/governance/passport/${agentId}`, { method: "POST" });
+  }
+
+  /** Get decay-weighted cross-provider reputation for an agent. */
+  async getAgentReputation(agentId) {
+    return this.#request(`/v1/governance/reputation/${agentId}`);
+  }
+
   // --- Internal ---
 
   async #request(path, { method = "GET", body = null } = {}) {

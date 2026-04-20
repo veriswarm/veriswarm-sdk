@@ -892,6 +892,112 @@ class VeriSwarmClient:
         """Get a single JIT grant by id."""
         return self._get(f"/v1/passport/jit/grants/{grant_id}")
 
+    # --- Governance: Anomalies, Discovery, Credential Vault, Compliance Scheduling, Reputation ---
+
+    def list_anomalies(self, *, agent_id: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """List behavioral anomalies detected for the tenant."""
+        params = [f"limit={limit}"]
+        if agent_id:
+            params.append(f"agent_id={agent_id}")
+        return self._get(f"/v1/governance/anomalies?{'&'.join(params)}")
+
+    def run_shadow_discovery(self) -> dict[str, Any]:
+        """Trigger a shadow-agent discovery scan."""
+        return self._post("/v1/governance/discovery/scan")
+
+    def list_discovered_agents(self, *, status: str | None = None) -> dict[str, Any]:
+        """List discovered shadow agents, optionally filtered by status."""
+        path = "/v1/governance/discovery"
+        if status:
+            path += f"?status={status}"
+        return self._get(path)
+
+    def dismiss_discovered_agent(self, discovery_id: int) -> dict[str, Any]:
+        """Dismiss a discovered shadow agent."""
+        return self._post(f"/v1/governance/discovery/{discovery_id}/dismiss")
+
+    def store_credential(
+        self,
+        *,
+        name: str,
+        credential_type: str,
+        value: str,
+        agent_id: str | None = None,
+        min_trust_score: int = 0,
+        rotation_interval_hours: int | None = None,
+    ) -> dict[str, Any]:
+        """Store an encrypted credential in the governance vault."""
+        return self._post(
+            "/v1/governance/credentials",
+            {
+                "name": name,
+                "credential_type": credential_type,
+                "value": value,
+                "agent_id": agent_id,
+                "min_trust_score": min_trust_score,
+                "rotation_interval_hours": rotation_interval_hours,
+            },
+        )
+
+    def checkout_credential(self, *, credential_name: str, agent_id: str) -> dict[str, Any]:
+        """Check out a credential for an agent (trust-score gated, audit-logged)."""
+        return self._post(
+            "/v1/governance/credentials/checkout",
+            {"credential_name": credential_name, "agent_id": agent_id},
+        )
+
+    def list_credentials(self) -> dict[str, Any]:
+        """List stored credentials (names/metadata only — never values)."""
+        return self._get("/v1/governance/credentials")
+
+    def revoke_credential(self, credential_id: int) -> dict[str, Any]:
+        """Revoke a stored credential by id."""
+        return self._request(f"/v1/governance/credentials/{credential_id}", method="DELETE")
+
+    def get_credential_checkout_history(
+        self,
+        *,
+        credential_id: int | None = None,
+        agent_id: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Get credential checkout audit history."""
+        params = [f"limit={limit}"]
+        if credential_id is not None:
+            params.append(f"credential_id={credential_id}")
+        if agent_id:
+            params.append(f"agent_id={agent_id}")
+        return self._get(f"/v1/governance/credentials/history?{'&'.join(params)}")
+
+    def get_compliance_schedule(self) -> dict[str, Any]:
+        """Get the scheduled compliance report delivery config."""
+        return self._get("/v1/governance/compliance/schedule")
+
+    def set_compliance_schedule(
+        self,
+        *,
+        framework: str,
+        email: str,
+        frequency: str = "monthly",
+    ) -> dict[str, Any]:
+        """Configure scheduled compliance report delivery (eu-ai-act, soc2, iso42001, hipaa)."""
+        return self._post(
+            "/v1/governance/compliance/schedule",
+            {"framework": framework, "frequency": frequency, "email": email},
+        )
+
+    def delete_compliance_schedule(self) -> dict[str, Any]:
+        """Remove the scheduled compliance report delivery."""
+        return self._request("/v1/governance/compliance/schedule", method="DELETE")
+
+    def issue_reputation_passport(self, agent_id: str) -> dict[str, Any]:
+        """Issue a signed Reputation Passport (W3C VC) for an agent."""
+        return self._post(f"/v1/governance/passport/{agent_id}")
+
+    def get_agent_reputation(self, agent_id: str) -> dict[str, Any]:
+        """Get decay-weighted cross-provider reputation for an agent."""
+        return self._get(f"/v1/governance/reputation/{agent_id}")
+
     # --- Internal ---
 
     def _get(self, path: str) -> Any:
