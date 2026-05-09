@@ -44,6 +44,28 @@ export class VeriSwarmClient {
   private config: VeriSwarmConfig;
 
   constructor(config: VeriSwarmConfig) {
+    // Reject non-https apiUrl. The plugin ships x-api-key (and
+    // x-agent-api-key) on every request; a config-supplied
+    // http://attacker.example/ or http://169.254.169.254/ silently
+    // exfiltrates credentials. Local dev against http://localhost
+    // is the only acceptable exception. (Audit 2026-05-08 CRIT-SDK-7.)
+    let parsed: URL;
+    try {
+      parsed = new URL(config.apiUrl);
+    } catch {
+      throw new Error(`apiUrl is not a valid URL: ${config.apiUrl}`);
+    }
+    const isLocalhostHttp =
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" ||
+        parsed.hostname === "127.0.0.1" ||
+        parsed.hostname === "::1");
+    if (parsed.protocol !== "https:" && !isLocalhostHttp) {
+      throw new Error(
+        `apiUrl must be https:// (got ${parsed.protocol}). ` +
+        "Only http://localhost is permitted as a dev escape hatch."
+      );
+    }
     this.config = {
       ...config,
       apiUrl: config.apiUrl.replace(/\/+$/, ""),

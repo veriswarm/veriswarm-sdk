@@ -49,7 +49,18 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
         if self.enforce:
             tool_name = serialized.get("name", "unknown")
             try:
-                result = self._client.check_decision(self.agent_id, "tool_call", tool_name)
+                # check_decision is keyword-only on the VeriSwarmClient.
+                # Calling it positionally raises TypeError, which the
+                # except branch below was silently turning into "allow"
+                # — meaning enforce=True was effectively dead code on
+                # every customer that wired this adapter. Pass keyword
+                # args to actually exercise the gate.
+                # (Audit 2026-05-08 HIGH-SDK-2.)
+                result = self._client.check_decision(
+                    agent_id=self.agent_id,
+                    action_type="tool_call",
+                    resource_type=tool_name,
+                )
                 decision = result.get("decision", "review")
                 if decision == "deny":
                     if self.on_deny == "raise":
@@ -63,7 +74,11 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
             except PermissionError:
                 raise
             except Exception as e:
-                logger.debug(f"VeriSwarm decision check failed, allowing: {e}")
+                logger.warning(
+                    "VeriSwarm decision check failed for tool '%s'; "
+                    "fail-open per current config: %s",
+                    tool_name, e,
+                )
 
     def on_tool_end(self, output: str, *, run_id: uuid.UUID, **kwargs: Any) -> None:
         """Report successful tool call."""

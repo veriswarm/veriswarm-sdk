@@ -53,6 +53,23 @@ class VeriSwarmClient:
         if not self.api_key:
             raise ValueError("api_key is required")
         self.base_url = self.base_url.rstrip("/")
+        # Reject non-https base_url. The SDK ships x-api-key on every
+        # request; an http base_url would transmit it in plaintext where
+        # any MITM (or compromised local proxy) can harvest it. Local
+        # development against http://localhost is the only acceptable
+        # exception; explicit and narrow. (Audit 2026-05-08 CRIT-SDK-1.)
+        from urllib.parse import urlparse
+        parsed = urlparse(self.base_url)
+        if parsed.scheme != "https":
+            allow_http_dev = (
+                parsed.scheme == "http"
+                and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+            )
+            if not allow_http_dev:
+                raise ValueError(
+                    f"base_url must be https:// (got {parsed.scheme!r}). "
+                    "Only http://localhost is permitted as a dev escape hatch."
+                )
 
     # --- Decisions ---
 
@@ -1046,7 +1063,20 @@ class VeriSwarmClient:
         )
         try:
             with _OPENER.open(request, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
+                # Cap the read at 10 MiB. A compromised or MITM'd
+                # endpoint returning a multi-hundred-MB body would
+                # otherwise OOM the customer's process. Real API
+                # responses are well under this cap; if a legitimate
+                # response ever exceeds it, the API has a different
+                # bug we'd want surfaced anyway. (Audit 2026-05-08
+                # CRIT-SDK-2.)
+                _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+                raw_bytes = response.read(_MAX_RESPONSE_BYTES + 1)
+                if len(raw_bytes) > _MAX_RESPONSE_BYTES:
+                    raise VeriSwarmClientError(
+                        f"VeriSwarm response exceeded {_MAX_RESPONSE_BYTES} bytes"
+                    )
+                raw = raw_bytes.decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:
             details = ""

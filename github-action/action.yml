@@ -72,6 +72,21 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Mask VeriSwarm API key
+      shell: bash
+      # Defence-in-depth: explicit ::add-mask:: in case the caller
+      # forgot to declare the value as a repo secret. GitHub's
+      # default masking only applies to declared secrets; an
+      # api-key passed as a literal `with:` value would otherwise
+      # appear unmasked in workflow logs. (Audit 2026-05-08
+      # MASKING-GAP.)
+      env:
+        VERISWARM_API_KEY: ${{ inputs.api-key }}
+      run: |
+        if [ -n "${VERISWARM_API_KEY}" ]; then
+          echo "::add-mask::${VERISWARM_API_KEY}"
+        fi
+
     - name: Run VeriSwarm checks
       shell: bash
       env:
@@ -86,5 +101,8 @@ runs:
         VERISWARM_FAIL_ON_LOW_SCORE: ${{ inputs.fail-on-low-score }}
         VERISWARM_MIN_TRUST_SCORE: ${{ inputs.min-trust-score }}
         VERISWARM_MIN_OWASP_COVERAGE: ${{ inputs.min-owasp-coverage }}
+      # Quote github.action_path defence-in-depth against shell
+      # word-splitting if the path ever contains spaces. (Audit
+      # 2026-05-08 HIGH-SDK-8.)
       run: |
-        python3 ${{ github.action_path }}/check.py
+        python3 "${{ github.action_path }}/check.py"

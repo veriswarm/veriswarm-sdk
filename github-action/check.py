@@ -108,9 +108,21 @@ def api_request(path: str, method: str = "GET", body: dict | None = None) -> dic
 
 
 def set_output(name: str, value: str):
-    if GITHUB_OUTPUT:
-        with open(GITHUB_OUTPUT, "a") as f:
-            f.write(f"{name}={value}\n")
+    """Write a single name=value pair to GITHUB_OUTPUT.
+
+    Sanitises CR/LF/NUL from the value. The GITHUB_OUTPUT file is
+    parsed line-by-line by the runner; an attacker-controlled API
+    response value containing a newline could otherwise inject
+    arbitrary additional output keys into the customer's workflow,
+    potentially overwriting sensitive downstream variables. Same
+    class as CVE-2024-47875 in the SARIF upload action.
+    (Audit 2026-05-08 CRIT-SDK-5.)
+    """
+    if not GITHUB_OUTPUT:
+        return
+    safe_value = str(value).replace("\r", "").replace("\n", " ").replace("\x00", "")
+    with open(GITHUB_OUTPUT, "a") as f:
+        f.write(f"{name}={safe_value}\n")
 
 
 def append_summary(md: str):
@@ -213,12 +225,80 @@ def check_test():
             print(f"::warning::Security test failed: {r['name']} — expected: {r.get('expected', '?')[:80]}")
 
 
+def _is_under_workspace(filepath: str) -> bool:
+    """Reject paths outside the workflow's GITHUB_WORKSPACE root.
+
+    Glob patterns in scan-paths could otherwise traverse via
+    `../../../etc/passwd`-style relative segments and exfiltrate
+    files outside the customer's repo to api.veriswarm.ai. Resolve
+    realpath (symlinks too) and require workspace containment.
+    (Audit 2026-05-08 CRIT-SDK-6.)
+    """
+    workspace_root = os.path.realpath(
+        os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    )
+    real = os.path.realpath(filepath)
+    try:
+        return os.path.commonpath([real, workspace_root]) == workspace_root
+    except ValueError:
+        return False  # different drives on Windows
+
+
+# Filenames whose contents are typically secret-bearing. Even with
+# workspace containment, glob like `**/*` or `**/*.env` would scoop
+# these up and POST 5 KB of each to the API. Hard exclude.
+_SENSITIVE_FILE_DENYLIST = (
+    ".env", ".env.local", ".env.production", ".env.development",
+    ".env.test", ".env.staging",
+    ".npmrc", ".pypirc",
+    "id_rsa", "id_dsa", "id_ed25519", "id_ecdsa",
+)
+_SENSITIVE_SUFFIX_DENYLIST = (
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".kdbx",
+)
+_SENSITIVE_DIR_DENYLIST = (".git", ".ssh", ".gnupg")
+
+
+def _is_sensitive_filename(filepath: str) -> bool:
+    name = os.path.basename(filepath).lower()
+    if name in _SENSITIVE_FILE_DENYLIST:
+        return True
+    if any(name.endswith(s) for s in _SENSITIVE_SUFFIX_DENYLIST):
+        return True
+    parts = os.path.normpath(filepath).split(os.sep)
+    if any(p in _SENSITIVE_DIR_DENYLIST for p in parts):
+        return True
+    return False
+
+
 def check_scan():
     files_to_scan = []
 
     if SCAN_PATHS:
         for pattern in SCAN_PATHS.split(","):
             files_to_scan.extend(glob.glob(pattern.strip(), recursive=True))
+
+    # Workspace-containment + sensitive-filename denylist filter. Both
+    # required: an attacker workflow input could contain '..'-style
+    # patterns that match files outside GITHUB_WORKSPACE, and a
+    # legitimately-broad pattern like '**/*' could accidentally scoop
+    # secrets even within the workspace.
+    rejected_traversal = 0
+    rejected_sensitive = 0
+    filtered: list[str] = []
+    for fp in files_to_scan:
+        if not _is_under_workspace(fp):
+            rejected_traversal += 1
+            continue
+        if _is_sensitive_filename(fp):
+            rejected_sensitive += 1
+            continue
+        filtered.append(fp)
+    files_to_scan = filtered
+    if rejected_traversal:
+        print(f"::warning::Skipped {rejected_traversal} file(s) outside GITHUB_WORKSPACE")
+    if rejected_sensitive:
+        print(f"::warning::Skipped {rejected_sensitive} sensitive file(s) (.env / *.pem / .git / .ssh / etc.)")
 
     if not files_to_scan:
         print("::notice::No files to scan (set scan-paths to enable PII/injection scanning)")

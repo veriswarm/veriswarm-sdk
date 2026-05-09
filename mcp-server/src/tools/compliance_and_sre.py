@@ -349,16 +349,21 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except Exception as exc:
             return json.dumps({"error": str(exc)})
 
-    @server.tool()
-    async def approve_jit_grant(grant_id: str) -> str:
-        """Approve a pending JIT grant (requires account session — use session auth)."""
-        try:
-            result = client.post(f"/v1/passport/jit/{grant_id}/approve")
-            return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
-        except Exception as exc:
-            return json.dumps({"error": str(exc)})
+    # NOTE: approve_jit_grant and issue_jit_token are deliberately NOT
+    # registered as MCP tools.
+    #
+    # JIT grants exist as a human-in-the-loop control: a user/admin
+    # reviews and approves a high-privilege action before the agent
+    # uses it. Surfacing the *approval* tool to the LLM with the same
+    # API key the LLM already holds collapses the entire control —
+    # any prompt injection (or LLM reasoning slip) self-approves the
+    # pending grant.
+    #
+    # These actions are accessible from the authenticated VeriSwarm web
+    # UI and from a separate human-controlled API surface that requires
+    # an account session token, not the platform x-api-key. The MCP
+    # server is the wrong layer.
+    # (Audit 2026-05-08 CRIT-SDK-8.)
 
     @server.tool()
     async def revoke_jit_grant(grant_id: str, reason: str = "") -> str:
@@ -366,21 +371,6 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         try:
             body = {"reason": reason} if reason else {}
             result = client.post(f"/v1/passport/jit/{grant_id}/revoke", json=body)
-            return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
-        except Exception as exc:
-            return json.dumps({"error": str(exc)})
-
-    @server.tool()
-    async def issue_jit_token(grant_id: str) -> str:
-        """Issue the ES256 JIT token for an approved grant.
-
-        Only callable once per grant — subsequent calls fail. Returns a dict
-        with 'token' (the signed JWT) and 'expires_at'.
-        """
-        try:
-            result = client.post(f"/v1/passport/jit/{grant_id}/token")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})

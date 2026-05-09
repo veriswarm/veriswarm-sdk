@@ -18,6 +18,26 @@ export class VeriSwarmClient {
   constructor({ baseUrl, apiKey = null, agentKey = null, timeoutMs = 15000 }) {
     if (!baseUrl) throw new Error("baseUrl is required");
     if (!apiKey && !agentKey) throw new Error("either apiKey or agentKey is required");
+    // Reject non-https baseUrl. The SDK ships x-api-key on every
+    // request; an http baseUrl transmits it in plaintext where any
+    // MITM can harvest it. Local development against http://localhost
+    // is the only acceptable exception. (Audit 2026-05-08 CRIT-SDK-4.)
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(baseUrl);
+    } catch {
+      throw new Error(`baseUrl is not a valid URL: ${baseUrl}`);
+    }
+    const isLocalhostHttp = parsedUrl.protocol === "http:"
+      && (parsedUrl.hostname === "localhost"
+          || parsedUrl.hostname === "127.0.0.1"
+          || parsedUrl.hostname === "::1");
+    if (parsedUrl.protocol !== "https:" && !isLocalhostHttp) {
+      throw new Error(
+        `baseUrl must be https:// (got ${parsedUrl.protocol}). ` +
+        "Only http://localhost is permitted as a dev escape hatch."
+      );
+    }
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.agentKey = agentKey;
@@ -930,8 +950,17 @@ export class VeriSwarmClient {
         ? await response.json()
         : await response.text();
       if (!response.ok) {
-        const details = typeof payload === "string" ? payload : JSON.stringify(payload);
-        throw new Error(`VeriSwarm API ${response.status}: ${details}`);
+        // Do NOT embed the raw response payload in the thrown error.
+        // The error rides up through unhandled-rejection logs, Sentry,
+        // Datadog, etc. — anything the API echoes back (request
+        // context, reflected auth state) ends up in customer logs.
+        // Throw with a sanitised summary; surface the payload via
+        // a separate property so callers that explicitly want it can
+        // opt in. (Audit 2026-05-08 CRIT-SDK-3.)
+        const err = new Error(`VeriSwarm API ${response.status}`);
+        err.status = response.status;
+        err.payload = payload;
+        throw err;
       }
       return payload;
     } finally {
