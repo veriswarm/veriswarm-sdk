@@ -16,12 +16,27 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+
+# Reap fork()-ed children automatically rather than letting them
+# accumulate as zombies between flushes. Set once at module load —
+# safe because this hook runs in the MCP server's main process.
+# (Audit 2026-05-08 MED-SDK-10.)
+try:
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+except (AttributeError, ValueError):
+    # SIGCHLD doesn't exist on Windows (AttributeError) and signal
+    # handlers can only be set in the main thread (ValueError when
+    # imported from a thread). Silently fall through; the fork path
+    # below stays available either way.
+    pass
 
 BUFFER_FILE = Path.home() / ".veriswarm" / "activity.jsonl"
 FLUSH_THRESHOLD = 50

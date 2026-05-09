@@ -46,7 +46,17 @@ cd mcp-server && pip install -e ".[dev]" && python3 -m pytest tests/ -v
 
 # Node SDK
 cd node && node --test test/
+
+# OpenClaw plugin (TypeScript)
+cd openclaw-plugin && npm install && npm run build && npm test
+
+# JSON Schemas (validation only)
+cd schemas && npm install && npx ajv compile -s agent_event.schema.json -s agent_profile.schema.json -s score_snapshot.schema.json -s workflow-schema.json
 ```
+
+### Security Review
+
+Any change touching authentication, credential handling, URL composition, redirect handling, response parsing, or schema validation MUST get an explicit security review before merge. Tag a maintainer with `@security-review` in the PR description. The audit doc at [`CODEBASE-AUDIT-2026-05-08-SDK.md`](./CODEBASE-AUDIT-2026-05-08-SDK.md) lists the patterns we deliberately enforce (HTTPS-only, URL encoding on path components, response size caps, sanitised error messages).
 
 ## Code of Conduct
 

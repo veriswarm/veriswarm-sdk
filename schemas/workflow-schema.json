@@ -201,7 +201,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -266,7 +267,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -280,7 +282,8 @@
             {
               "items": {
                 "additionalProperties": true,
-                "type": "object"
+                "type": "object",
+                "maxProperties": 50
               },
               "type": "array"
             },
@@ -331,7 +334,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -344,7 +348,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -527,7 +532,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -722,7 +728,8 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object"
+              "type": "object",
+              "maxProperties": 50
             },
             {
               "type": "null"
@@ -814,7 +821,8 @@
       "anyOf": [
         {
           "additionalProperties": true,
-          "type": "object"
+          "type": "object",
+          "maxProperties": 50
         },
         {
           "type": "null"

@@ -60,3 +60,15 @@ We provide security updates for the latest minor version of each package. Older 
 ## Disclosure
 
 We follow coordinated disclosure. We will credit reporters in release notes unless they prefer anonymity. We do not currently offer a bug bounty program.
+
+## Advisory Process
+
+Security advisories are published via [GitHub Security Advisories (GHSA)](https://github.com/veriswarm/veriswarm-sdk/security/advisories) on this repository. We will request a CVE through GitHub's CNA for vulnerabilities with a CVSS v3 score of 7.0 or higher (HIGH/CRITICAL). Advisories include:
+
+- Affected package versions and fixed version
+- CVSS v3 score and vector string
+- Description of the vulnerability and impact
+- Workarounds where applicable
+- Credit to the reporter (with their permission)
+
+Subscribe to GitHub Security Advisories on this repo to receive notifications.

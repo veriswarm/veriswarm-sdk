@@ -42,7 +42,20 @@
 
 import { VeriSwarmClient, type TokenizeResult } from "./client.js";
 
-// ── Injection Patterns ──────────────────────────────────────────────────
+// ── Injection Patterns (BASIC HEURISTIC ONLY) ──────────────────────────
+//
+// IMPORTANT: This is a basic pattern-matching hint, NOT a security
+// guarantee. The list below is trivially bypassed by Unicode lookalikes,
+// zero-width characters between tokens, base64 encoding, splitting the
+// phrase across two tool calls, or paraphrase. It exists to surface the
+// most obvious literal payloads to the agent's runtime; do not treat
+// detection-misses as evidence the input is safe.
+//
+// For real prompt-injection defence, route content through VeriSwarm's
+// API endpoint at /v1/suite/guard/scan which uses a DeBERTa ML
+// classifier with broader coverage. See guard_scan_content tool below.
+// (Audit 2026-05-08 HIGH-SDK-12: explicit downgrade in docs/comments
+// rather than removing — useful as a fast pre-filter.)
 
 const INJECTION_PATTERNS = [
   "ignore previous instructions",
@@ -60,6 +73,16 @@ const INJECTION_PATTERNS = [
 function scanForInjection(text: string): string[] {
   const lower = text.toLowerCase();
   return INJECTION_PATTERNS.filter((p) => lower.includes(p.toLowerCase()));
+}
+
+// Build the per-session PII map key from the conversation context.
+// Keying by tool name alone collides across concurrent agent
+// conversations using the same tool — leaking PII tokens *across
+// user sessions* in shared deployments. Pass conversationId from
+// the OpenClaw event context. (Audit 2026-05-08 HIGH-SDK-13.)
+function piiSessionKey(toolName: string, conversationId?: string | null): string {
+  const conv = conversationId || "_no_conv";
+  return `${conv}:${toolName}`;
 }
 
 // ── Plugin State ────────────────────────────────────────────────────────
@@ -238,14 +261,22 @@ export const pluginEntry: PluginEntry = {
 
       // PII tokenize tool input
       if (state.piiEnabled && event.input && typeof event.input === "string") {
+        const convId = event.conversation_id || event.conversationId || event.session_id;
+        const key = piiSessionKey(toolName, convId);
         try {
           const result = await state.client.tokenizePii(event.input);
           if (result.tokens_created > 0) {
-            state.piiSessions.set(toolName, result.session_id);
+            state.piiSessions.set(key, result.session_id);
             return { input: result.tokenized_text };
           }
         } catch (e) {
-          // Fail open — don't block tool calls if PII service is down
+          // Fail open — but observable, not silent. The customer's
+          // log aggregator can alert on this.
+          // (Audit 2026-05-08 HIGH-SDK-11.)
+          console.warn(
+            `[VeriSwarm] PII tokenization (input) failed for tool=${toolName}; ` +
+            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+          );
         }
       }
 
@@ -262,15 +293,21 @@ export const pluginEntry: PluginEntry = {
 
       // PII tokenize output
       if (state.piiEnabled && output.length > 3) {
+        const convId = event.conversation_id || event.conversationId || event.session_id;
+        const key = piiSessionKey(toolName, convId);
         try {
-          const sessionId = state.piiSessions.get(toolName);
+          const sessionId = state.piiSessions.get(key);
           const result = await state.client.tokenizePii(output, sessionId);
           if (result.tokens_created > 0) {
-            state.piiSessions.set(toolName, result.session_id);
+            state.piiSessions.set(key, result.session_id);
             output = result.tokenized_text;
           }
         } catch (e) {
-          // Fail open
+          // Fail open — but observable. (HIGH-SDK-11.)
+          console.warn(
+            `[VeriSwarm] PII tokenization (output) failed for tool=${toolName}; ` +
+            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+          );
         }
       }
 
@@ -305,14 +342,20 @@ export const pluginEntry: PluginEntry = {
       const content = event.content || event.text || "";
       if (typeof content !== "string" || content.length < 4) return {};
 
+      const convId = event.conversation_id || event.conversationId || event.session_id;
+      const key = piiSessionKey("__message__", convId);
       try {
         const result = await state.client.tokenizePii(content);
         if (result.tokens_created > 0) {
-          state.piiSessions.set("__message__", result.session_id);
+          state.piiSessions.set(key, result.session_id);
           return { content: result.tokenized_text };
         }
       } catch (e) {
-        // Fail open
+        // Fail open — but observable. (HIGH-SDK-11.)
+        console.warn(
+          `[VeriSwarm] PII tokenization (outbound message) failed; ` +
+          `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+        );
       }
       return {};
     });

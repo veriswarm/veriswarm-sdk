@@ -19,7 +19,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_scoring_profile() -> str:
@@ -32,7 +32,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def set_scoring_profile(profile_code: str, weight_overrides: str = "") -> str:
@@ -52,7 +52,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def list_notifications(limit: int = 20) -> str:
@@ -65,7 +65,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_ip_allowlist() -> str:
@@ -78,7 +78,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def set_ip_allowlist(cidrs: str, enabled: bool = True) -> str:
@@ -100,7 +100,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_custom_domain() -> str:
@@ -113,7 +113,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def set_custom_domain(domain: str) -> str:
@@ -129,7 +129,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def list_team_members() -> str:
@@ -142,7 +142,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def invite_team_member(email: str, role: str = "member") -> str:
@@ -162,4 +162,4 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})

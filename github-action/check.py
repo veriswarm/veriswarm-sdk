@@ -99,8 +99,15 @@ def api_request(path: str, method: str = "GET", body: dict | None = None) -> dic
         with _OPENER.open(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:200]
-        print(f"::warning::VeriSwarm API error {exc.code}: {detail}")
+        # Print the status code only — the response body can echo back
+        # request content (including bytes from scanned files), and
+        # ::warning:: lines land in public workflow logs. (Audit
+        # 2026-05-08 HIGH-SDK-9.)
+        try:
+            exc.read()  # drain the body so the connection cleans up
+        except Exception:
+            pass
+        print(f"::warning::VeriSwarm API error {exc.code} (response body suppressed in logs)")
         return {"error": f"API {exc.code}"}
     except URLError as exc:
         print(f"::warning::VeriSwarm connection failed: {exc.reason}")

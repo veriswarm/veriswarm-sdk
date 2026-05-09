@@ -12,16 +12,21 @@
     "payload"
   ],
   "properties": {
-    "event_id": { "type": "string", "minLength": 1 },
-    "agent_id": { "type": "string", "minLength": 1 },
+    "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
     "source_type": {
       "type": "string",
       "enum": ["agent", "platform", "system", "moderator"]
     },
-    "event_type": { "type": "string", "minLength": 1 },
+    "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
     "occurred_at": { "type": "string", "format": "date-time" },
-    "signature": { "type": ["string", "null"] },
-    "payload": { "type": "object", "additionalProperties": true }
+    "signature": { "type": ["string", "null"], "maxLength": 4096 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": true,
+      "maxProperties": 50,
+      "description": "Event-specific data. additionalProperties:true is intentional but capped at 50 keys to prevent unbounded payloads from clients trusting the published contract."
+    }
   },
   "additionalProperties": false
 }

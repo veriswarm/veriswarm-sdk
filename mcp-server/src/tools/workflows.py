@@ -25,7 +25,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_workflow(workflow_id: str) -> str:
@@ -39,7 +39,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def create_workflow(name: str, slug: str, definition: str, description: str = "") -> str:
@@ -64,7 +64,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def run_workflow(workflow_id: str) -> str:
@@ -78,7 +78,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_execution(execution_id: str) -> str:
@@ -92,7 +92,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def activate_workflow(workflow_id: str) -> str:
@@ -106,7 +106,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def deactivate_workflow(workflow_id: str) -> str:
@@ -120,7 +120,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def list_workflow_templates() -> str:
@@ -131,7 +131,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def deploy_template(template_id: str) -> str:
@@ -145,7 +145,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def workflow_stats(days: int = 30) -> str:
@@ -159,7 +159,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def cancel_workflow_execution(execution_id: str) -> str:
@@ -173,7 +173,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def retry_workflow_execution(execution_id: str) -> str:
@@ -187,4 +187,4 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})

@@ -4,7 +4,18 @@ import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote as _q, urlencode as _qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+# Path-component encoder. quote(..., safe="") percent-encodes every
+# character that's not in the unreserved set (A-Za-z0-9-_.~), so a
+# value like "../admin" becomes "..%2Fadmin" and cannot escape the
+# intended path segment. Used at every f-string path-interpolation
+# call site. (Audit 2026-05-08 HIGH-SDK-1, HIGH-SDK-3, HIGH-SDK-4.)
+def _path(value: Any) -> str:
+    """Quote an ID for safe use as a URL path component."""
+    return _q(str(value), safe="")
 
 
 class _StripAuthRedirectHandler(HTTPRedirectHandler):
@@ -143,34 +154,34 @@ class VeriSwarmClient:
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         """Get public agent profile."""
-        return self._request(f"/v1/public/agents/{agent_id}")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}")
 
     def get_agent_scores(self, agent_id: str) -> dict[str, Any]:
         """Get an agent's current trust scores."""
-        return self._request(f"/v1/public/agents/{agent_id}/scores/current")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}/scores/current")
 
     def get_agent_score_history(self, agent_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         """Get an agent's score history (last N snapshots)."""
-        return self._request(f"/v1/public/agents/{agent_id}/scores/history?limit={limit}")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}/scores/history?limit={limit}")
 
     def get_agent_score_breakdown(self, agent_id: str) -> dict[str, Any]:
         """Get detailed score breakdown with contributing factors."""
-        return self._request(f"/v1/public/agents/{agent_id}/scores/breakdown")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}/scores/breakdown")
 
     def get_agent_flags(self, agent_id: str) -> list[dict[str, Any]]:
         """Get active moderation flags for an agent."""
-        return self._request(f"/v1/public/agents/{agent_id}/flags")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}/flags")
 
     def appeal_flag(self, agent_id: str, flag_id: int) -> dict[str, Any]:
         """Appeal a moderation flag for review."""
         return self._request(
-            f"/v1/public/agents/{agent_id}/flags/{flag_id}/appeal",
+            f"/v1/public/agents/{_path(agent_id)}/flags/{_path(flag_id)}/appeal",
             method="POST",
         )
 
     def get_agent_manifests(self, agent_id: str) -> list[dict[str, Any]]:
         """Get agent capability manifests (public)."""
-        return self._request(f"/v1/public/agents/{agent_id}/manifests")
+        return self._request(f"/v1/public/agents/{_path(agent_id)}/manifests")
 
     # --- Platform Status ---
 
@@ -248,31 +259,31 @@ class VeriSwarmClient:
 
     def get_agent_timeline(self, agent_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Get an agent's event timeline."""
-        return self._get(f"/v1/public/agents/{agent_id}/timeline?limit={limit}")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/timeline?limit={limit}")
 
     # --- Agent API Keys ---
 
     def get_agent_api_keys(self, agent_id: str) -> list[dict[str, Any]]:
         """List API keys for an agent."""
-        return self._get(f"/v1/public/agents/{agent_id}/api-keys")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/api-keys")
 
     def rotate_agent_api_key(self, agent_id: str) -> dict[str, Any]:
         """Rotate (regenerate) an agent's API key."""
-        return self._post(f"/v1/public/agents/{agent_id}/api-keys/rotate")
+        return self._post(f"/v1/public/agents/{_path(agent_id)}/api-keys/rotate")
 
     def revoke_agent_api_key(self, agent_id: str, key_id: str) -> dict[str, Any]:
         """Revoke a specific agent API key."""
-        return self._post(f"/v1/public/agents/{agent_id}/api-keys/{key_id}/revoke")
+        return self._post(f"/v1/public/agents/{_path(agent_id)}/api-keys/{_path(key_id)}/revoke")
 
     # --- Guard PII Sessions ---
 
     def get_pii_session(self, session_id: str) -> dict[str, Any]:
         """Get details of a PII tokenization session."""
-        return self._get(f"/v1/suite/guard/pii/sessions/{session_id}")
+        return self._get(f"/v1/suite/guard/pii/sessions/{_path(session_id)}")
 
     def revoke_pii_session(self, session_id: str) -> dict[str, Any]:
         """Revoke (delete) a PII tokenization session and all its tokens."""
-        return self._request(f"/v1/suite/guard/pii/sessions/{session_id}", method="DELETE")
+        return self._request(f"/v1/suite/guard/pii/sessions/{_path(session_id)}", method="DELETE")
 
     # --- Guard Policies ---
 
@@ -286,21 +297,21 @@ class VeriSwarmClient:
 
     def update_guard_policy(self, policy_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         """Update a Guard policy rule."""
-        return self._request(f"/v1/suite/guard/policies/{policy_id}", method="PATCH", body=updates)
+        return self._request(f"/v1/suite/guard/policies/{_path(policy_id)}", method="PATCH", body=updates)
 
     def delete_guard_policy(self, policy_id: int) -> dict[str, Any]:
         """Delete a Guard policy rule."""
-        return self._request(f"/v1/suite/guard/policies/{policy_id}", method="DELETE")
+        return self._request(f"/v1/suite/guard/policies/{_path(policy_id)}", method="DELETE")
 
     # --- Guard Kill Switch ---
 
     def kill_agent(self, agent_id: str, *, reason: str) -> dict[str, Any]:
         """Activate the kill switch for an agent, blocking all trust decisions."""
-        return self._post(f"/v1/suite/guard/kill/{agent_id}", {"reason": reason})
+        return self._post(f"/v1/suite/guard/kill/{_path(agent_id)}", {"reason": reason})
 
     def unkill_agent(self, agent_id: str) -> dict[str, Any]:
         """Deactivate the kill switch for an agent."""
-        return self._post(f"/v1/suite/guard/unkill/{agent_id}")
+        return self._post(f"/v1/suite/guard/unkill/{_path(agent_id)}")
 
     # --- Guard Findings ---
 
@@ -308,12 +319,12 @@ class VeriSwarmClient:
         """List Guard security findings, optionally filtered by agent."""
         path = "/v1/suite/guard/findings"
         if agent_id:
-            path += f"?agent_id={agent_id}"
+            path += f"?agent_id={_path(agent_id)}"
         return self._get(path)
 
     def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         """Update a Guard finding (e.g. resolve, dismiss)."""
-        return self._request(f"/v1/suite/guard/findings/{finding_id}", method="PATCH", body=updates)
+        return self._request(f"/v1/suite/guard/findings/{_path(finding_id)}", method="PATCH", body=updates)
 
     # --- Passport Delegations ---
 
@@ -327,23 +338,23 @@ class VeriSwarmClient:
 
     def revoke_delegation(self, delegation_id: int) -> dict[str, Any]:
         """Revoke a Passport delegation."""
-        return self._request(f"/v1/suite/passport/delegations/{delegation_id}", method="DELETE")
+        return self._request(f"/v1/suite/passport/delegations/{_path(delegation_id)}", method="DELETE")
 
     # --- Passport Verification ---
 
     def verify_agent_identity(self, agent_id: str) -> dict[str, Any]:
         """Mark an agent as identity-verified in Passport."""
-        return self._post(f"/v1/suite/passport/verify/{agent_id}")
+        return self._post(f"/v1/suite/passport/verify/{_path(agent_id)}")
 
     # --- Passport Manifests ---
 
     def create_manifest(self, agent_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         """Create or update an agent capability manifest."""
-        return self._post(f"/v1/suite/passport/manifests/{agent_id}", manifest)
+        return self._post(f"/v1/suite/passport/manifests/{_path(agent_id)}", manifest)
 
     def get_manifests(self, agent_id: str) -> list[dict[str, Any]]:
         """Get agent capability manifests from Passport."""
-        return self._get(f"/v1/suite/passport/manifests/{agent_id}")
+        return self._get(f"/v1/suite/passport/manifests/{_path(agent_id)}")
 
     # --- Vault ---
 
@@ -351,7 +362,7 @@ class VeriSwarmClient:
         """Query the immutable Vault audit ledger."""
         path = f"/v1/suite/vault/ledger?limit={limit}"
         if agent_id:
-            path += f"&agent_id={agent_id}"
+            path += f"&agent_id={_path(agent_id)}"
         return self._get(path)
 
     def verify_vault_chain(self, *, limit: int = 100) -> dict[str, Any]:
@@ -364,7 +375,7 @@ class VeriSwarmClient:
 
     def get_vault_export_status(self, job_id: str) -> dict[str, Any]:
         """Check the status of a Vault export job."""
-        return self._get(f"/v1/suite/vault/export/{job_id}")
+        return self._get(f"/v1/suite/vault/export/{_path(job_id)}")
 
     # --- Notifications ---
 
@@ -374,7 +385,7 @@ class VeriSwarmClient:
 
     def mark_notification_read(self, notification_id: int) -> dict[str, Any]:
         """Mark a single notification as read."""
-        return self._post(f"/v1/suite/notifications/{notification_id}/read")
+        return self._post(f"/v1/suite/notifications/{_path(notification_id)}/read")
 
     def mark_all_notifications_read(self) -> dict[str, Any]:
         """Mark all notifications as read."""
@@ -420,7 +431,7 @@ class VeriSwarmClient:
 
     def remove_team_member(self, user_id: str) -> dict[str, Any]:
         """Remove a team member from the workspace."""
-        return self._request(f"/v1/public/providers/team/{user_id}", method="DELETE")
+        return self._request(f"/v1/public/providers/team/{_path(user_id)}", method="DELETE")
 
     # --- Workspaces ---
 
@@ -430,13 +441,13 @@ class VeriSwarmClient:
 
     def switch_workspace(self, tenant_id: str) -> dict[str, Any]:
         """Switch the user's active workspace."""
-        return self._post(f"/v1/public/accounts/workspaces/{tenant_id}/switch")
+        return self._post(f"/v1/public/accounts/workspaces/{_path(tenant_id)}/switch")
 
     # --- Reputation Lookup ---
 
     def reputation_lookup(self, *, slug: str) -> dict[str, Any]:
         """Look up an agent's shared reputation by slug."""
-        return self._get(f"/v1/public/reputation/lookup?slug={slug}")
+        return self._get(f"/v1/public/reputation/lookup?slug={_path(slug)}")
 
     # --- Badges ---
 
@@ -460,7 +471,7 @@ class VeriSwarmClient:
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Get a workflow's details and recent executions."""
-        return self._get(f"/v1/workflows/{workflow_id}")
+        return self._get(f"/v1/workflows/{_path(workflow_id)}")
 
     def create_workflow(
         self,
@@ -494,19 +505,19 @@ class VeriSwarmClient:
             body["description"] = description
         if definition is not None:
             body["definition"] = definition
-        return self._request(f"/v1/workflows/{workflow_id}", method="PUT", body=body)
+        return self._request(f"/v1/workflows/{_path(workflow_id)}", method="PUT", body=body)
 
     def delete_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Delete a workflow."""
-        return self._request(f"/v1/workflows/{workflow_id}", method="DELETE")
+        return self._request(f"/v1/workflows/{_path(workflow_id)}", method="DELETE")
 
     def activate_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Activate a workflow's triggers."""
-        return self._post(f"/v1/workflows/{workflow_id}/activate")
+        return self._post(f"/v1/workflows/{_path(workflow_id)}/activate")
 
     def deactivate_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Deactivate a workflow's triggers."""
-        return self._post(f"/v1/workflows/{workflow_id}/deactivate")
+        return self._post(f"/v1/workflows/{_path(workflow_id)}/deactivate")
 
     def run_workflow(
         self,
@@ -515,11 +526,11 @@ class VeriSwarmClient:
         inputs: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Manually trigger a workflow execution."""
-        return self._post(f"/v1/workflows/{workflow_id}/run", body={"inputs": inputs or {}})
+        return self._post(f"/v1/workflows/{_path(workflow_id)}/run", body={"inputs": inputs or {}})
 
     def get_execution(self, execution_id: str) -> dict[str, Any]:
         """Get execution details including step-by-step results."""
-        return self._get(f"/v1/workflows/executions/{execution_id}")
+        return self._get(f"/v1/workflows/executions/{_path(execution_id)}")
 
     def list_executions(
         self,
@@ -531,15 +542,15 @@ class VeriSwarmClient:
         params = ""
         if status:
             params = f"?status={status}"
-        return self._get(f"/v1/workflows/{workflow_id}/executions{params}")
+        return self._get(f"/v1/workflows/{_path(workflow_id)}/executions{params}")
 
     def cancel_execution(self, execution_id: str) -> dict[str, Any]:
         """Cancel a running execution."""
-        return self._post(f"/v1/workflows/executions/{execution_id}/cancel")
+        return self._post(f"/v1/workflows/executions/{_path(execution_id)}/cancel")
 
     def retry_execution(self, execution_id: str) -> dict[str, Any]:
         """Retry a failed execution."""
-        return self._post(f"/v1/workflows/executions/{execution_id}/retry")
+        return self._post(f"/v1/workflows/executions/{_path(execution_id)}/retry")
 
     def approve_step(
         self,
@@ -554,7 +565,7 @@ class VeriSwarmClient:
         if edited_output:
             body["edited_output"] = edited_output
         return self._post(
-            f"/v1/workflows/executions/{execution_id}/steps/{step_id}/approve",
+            f"/v1/workflows/executions/{_path(execution_id)}/steps/{step_id}/approve",
             body=body,
         )
 
@@ -564,7 +575,7 @@ class VeriSwarmClient:
 
     def deploy_template(self, template_id: str) -> dict[str, Any]:
         """Deploy a workflow template as a new workflow."""
-        return self._post(f"/v1/workflows/templates/{template_id}/deploy")
+        return self._post(f"/v1/workflows/templates/{_path(template_id)}/deploy")
 
     # --- Compliance ---
 
@@ -586,7 +597,7 @@ class VeriSwarmClient:
         framework_id: 'eu-ai-act' | 'nist-ai-rmf' | 'iso-42001'
         Returns pass/warn/fail per control with evidence counts and recommendations.
         """
-        return self._get(f"/v1/compliance/{framework_id}")
+        return self._get(f"/v1/compliance/{_path(framework_id)}")
 
     # --- Cedar Policies ---
 
@@ -609,7 +620,7 @@ class VeriSwarmClient:
 
     def get_cedar_policy(self, policy_id: str) -> dict[str, Any]:
         """Get a Cedar policy by id (includes full policy text)."""
-        return self._get(f"/v1/policies/{policy_id}")
+        return self._get(f"/v1/policies/{_path(policy_id)}")
 
     def update_cedar_policy(
         self,
@@ -630,11 +641,11 @@ class VeriSwarmClient:
             body["policy_text"] = policy_text
         if is_active is not None:
             body["is_active"] = is_active
-        return self._request(f"/v1/policies/{policy_id}", method="PUT", body=body)
+        return self._request(f"/v1/policies/{_path(policy_id)}", method="PUT", body=body)
 
     def delete_cedar_policy(self, policy_id: str) -> dict[str, Any]:
         """Soft-delete a Cedar policy (sets is_active=False)."""
-        return self._request(f"/v1/policies/{policy_id}", method="DELETE")
+        return self._request(f"/v1/policies/{_path(policy_id)}", method="DELETE")
 
     def validate_cedar_policy(self, policy_text: str) -> dict[str, Any]:
         """Validate Cedar syntax without persisting."""
@@ -760,7 +771,7 @@ class VeriSwarmClient:
         After provisioning, the agent's public_key appears in agent cards under
         x-veriswarm-transport. Inter-agent messages can then be signed.
         """
-        return self._post(f"/v1/a2a/{agent_id}/keys")
+        return self._post(f"/v1/a2a/{_path(agent_id)}/keys")
 
     # --- Content Provenance (EU AI Act Article 50) ---
 
@@ -820,7 +831,7 @@ class VeriSwarmClient:
         These attributes are merged into the Cedar entity at decision time
         and can be referenced in custom policies as ``principal.<key>``.
         """
-        return self._get(f"/v1/agents/{agent_id}/attributes")
+        return self._get(f"/v1/agents/{_path(agent_id)}/attributes")
 
     def set_agent_attributes(
         self,
@@ -834,7 +845,7 @@ class VeriSwarmClient:
         are silently rejected.
         """
         return self._request(
-            f"/v1/agents/{agent_id}/attributes",
+            f"/v1/agents/{_path(agent_id)}/attributes",
             method="PUT",
             body={"attributes": attributes},
         )
@@ -872,21 +883,21 @@ class VeriSwarmClient:
 
     def approve_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Approve a pending JIT grant (requires account session token)."""
-        return self._post(f"/v1/passport/jit/{grant_id}/approve")
+        return self._post(f"/v1/passport/jit/{_path(grant_id)}/approve")
 
     def deny_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """Deny a pending JIT grant."""
         body: dict[str, Any] = {}
         if reason is not None:
             body["reason"] = reason
-        return self._post(f"/v1/passport/jit/{grant_id}/deny", body=body)
+        return self._post(f"/v1/passport/jit/{_path(grant_id)}/deny", body=body)
 
     def revoke_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """Revoke an approved JIT grant immediately."""
         body: dict[str, Any] = {}
         if reason is not None:
             body["reason"] = reason
-        return self._post(f"/v1/passport/jit/{grant_id}/revoke", body=body)
+        return self._post(f"/v1/passport/jit/{_path(grant_id)}/revoke", body=body)
 
     def issue_jit_token(self, grant_id: str) -> dict[str, Any]:
         """Issue the ES256 JIT token for an approved grant.
@@ -894,7 +905,7 @@ class VeriSwarmClient:
         Only callable once per grant — subsequent calls fail. Returns a dict
         containing ``token`` (the signed JWT) and ``expires_at``.
         """
-        return self._post(f"/v1/passport/jit/{grant_id}/token")
+        return self._post(f"/v1/passport/jit/{_path(grant_id)}/token")
 
     def verify_jit_token(
         self,
@@ -924,14 +935,14 @@ class VeriSwarmClient:
         """List JIT grants for the tenant, optionally filtered by agent or status."""
         params = [f"limit={limit}"]
         if agent_id:
-            params.append(f"agent_id={agent_id}")
+            params.append(f"agent_id={_path(agent_id)}")
         if status:
             params.append(f"status={status}")
         return self._get(f"/v1/passport/jit/grants?{'&'.join(params)}")
 
     def get_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Get a single JIT grant by id."""
-        return self._get(f"/v1/passport/jit/grants/{grant_id}")
+        return self._get(f"/v1/passport/jit/grants/{_path(grant_id)}")
 
     # --- Governance: Anomalies, Discovery, Credential Vault, Compliance Scheduling, Reputation ---
 
@@ -939,7 +950,7 @@ class VeriSwarmClient:
         """List behavioral anomalies detected for the tenant."""
         params = [f"limit={limit}"]
         if agent_id:
-            params.append(f"agent_id={agent_id}")
+            params.append(f"agent_id={_path(agent_id)}")
         return self._get(f"/v1/governance/anomalies?{'&'.join(params)}")
 
     def run_shadow_discovery(self) -> dict[str, Any]:
@@ -955,7 +966,7 @@ class VeriSwarmClient:
 
     def dismiss_discovered_agent(self, discovery_id: int) -> dict[str, Any]:
         """Dismiss a discovered shadow agent."""
-        return self._post(f"/v1/governance/discovery/{discovery_id}/dismiss")
+        return self._post(f"/v1/governance/discovery/{_path(discovery_id)}/dismiss")
 
     def store_credential(
         self,
@@ -993,7 +1004,7 @@ class VeriSwarmClient:
 
     def revoke_credential(self, credential_id: int) -> dict[str, Any]:
         """Revoke a stored credential by id."""
-        return self._request(f"/v1/governance/credentials/{credential_id}", method="DELETE")
+        return self._request(f"/v1/governance/credentials/{_path(credential_id)}", method="DELETE")
 
     def get_credential_checkout_history(
         self,
@@ -1005,9 +1016,9 @@ class VeriSwarmClient:
         """Get credential checkout audit history."""
         params = [f"limit={limit}"]
         if credential_id is not None:
-            params.append(f"credential_id={credential_id}")
+            params.append(f"credential_id={_path(credential_id)}")
         if agent_id:
-            params.append(f"agent_id={agent_id}")
+            params.append(f"agent_id={_path(agent_id)}")
         return self._get(f"/v1/governance/credentials/history?{'&'.join(params)}")
 
     def get_compliance_schedule(self) -> dict[str, Any]:
@@ -1033,11 +1044,11 @@ class VeriSwarmClient:
 
     def issue_reputation_passport(self, agent_id: str) -> dict[str, Any]:
         """Issue a signed Reputation Passport (W3C VC) for an agent."""
-        return self._post(f"/v1/governance/passport/{agent_id}")
+        return self._post(f"/v1/governance/passport/{_path(agent_id)}")
 
     def get_agent_reputation(self, agent_id: str) -> dict[str, Any]:
         """Get decay-weighted cross-provider reputation for an agent."""
-        return self._get(f"/v1/governance/reputation/{agent_id}")
+        return self._get(f"/v1/governance/reputation/{_path(agent_id)}")
 
     # --- Internal ---
 
@@ -1079,11 +1090,16 @@ class VeriSwarmClient:
                 raw = raw_bytes.decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:
+            # Cap embedded details. Some logging frameworks emit
+            # exception messages to structured aggregators; an unbounded
+            # server response embedded here can leak request context
+            # into customer log pipelines. (Audit 2026-05-08 MED-SDK-1.)
             details = ""
             try:
-                details = exc.read().decode("utf-8")
+                raw_details = exc.read(4096).decode("utf-8", errors="replace")
+                details = raw_details[:500]
             except Exception:
-                details = str(exc)
+                details = str(exc)[:500]
             raise VeriSwarmClientError(f"VeriSwarm API {exc.code}: {details}") from exc
         except URLError as exc:
             raise VeriSwarmClientError(f"VeriSwarm request failed: {exc.reason}") from exc

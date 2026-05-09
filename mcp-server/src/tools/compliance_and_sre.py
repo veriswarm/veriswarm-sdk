@@ -29,7 +29,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def list_compliance_frameworks() -> str:
@@ -40,7 +40,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_compliance_report(framework_id: str) -> str:
@@ -55,7 +55,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── Cedar Policies ──────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def validate_cedar_policy(policy_text: str) -> str:
@@ -82,7 +82,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def test_cedar_policy(
@@ -110,7 +110,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── SRE: Circuit Breakers + SLOs + Error Budgets ───────────────
 
@@ -123,7 +123,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_circuit_breakers() -> str:
@@ -134,7 +134,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def reset_circuit_breaker(provider: str, model: str) -> str:
@@ -145,7 +145,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_error_budget() -> str:
@@ -156,7 +156,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── Context Governance ─────────────────────────────────────────
 
@@ -169,7 +169,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_context_gaps(days: int = 30) -> str:
@@ -180,9 +180,18 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── Guard Extensions: MCP Scanner + Cross-Model Verification ───
+
+    # Per-tool input caps. The LLM can pass arbitrary-size strings;
+    # without caps the customer's API quota or this MCP process can
+    # be exhausted by a single misbehaving prompt. Caps are generous
+    # but bounded. (Audit 2026-05-08 HIGH-SDK-17.)
+    _MAX_TOOLS_JSON_BYTES = 32 * 1024
+    _MAX_PROMPT_BYTES = 8 * 1024
+    _MAX_RESPONSE_BYTES = 8 * 1024
+    _MAX_CONTENT_BYTES = 32 * 1024
 
     @server.tool()
     async def scan_mcp_tools(tools_json: str) -> str:
@@ -192,6 +201,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Checks for tool poisoning, typosquatting, schema manipulation,
         rug-pull patterns, prompt injection, and excessive permissions.
         """
+        if len(tools_json) > _MAX_TOOLS_JSON_BYTES:
+            return json.dumps({
+                "error": f"tools_json exceeds {_MAX_TOOLS_JSON_BYTES} byte cap",
+                "received_bytes": len(tools_json),
+            })
         try:
             tools = json.loads(tools_json)
             result = client.post("/v1/suite/guard/scan-mcp", json={"tools": tools})
@@ -201,7 +215,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def verify_response(prompt: str, response: str) -> str:
@@ -209,6 +223,16 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Defends against memory poisoning (OWASP ASI06). Results are logged to Vault.
         """
+        if len(prompt) > _MAX_PROMPT_BYTES:
+            return json.dumps({
+                "error": f"prompt exceeds {_MAX_PROMPT_BYTES} byte cap",
+                "received_bytes": len(prompt),
+            })
+        if len(response) > _MAX_RESPONSE_BYTES:
+            return json.dumps({
+                "error": f"response exceeds {_MAX_RESPONSE_BYTES} byte cap",
+                "received_bytes": len(response),
+            })
         try:
             result = client.post(
                 "/v1/suite/guard/verify",
@@ -218,7 +242,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── A2A Transport (Ed25519 signing) ────────────────────────────
 
@@ -235,7 +259,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── Content Provenance (EU AI Act Article 50) ──────────────────
 
@@ -251,6 +275,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns the manifest (signature, content hash, metadata). Machine-readable
         format compatible with EU AI Act Article 50 transparency requirements.
         """
+        if len(content) > _MAX_CONTENT_BYTES:
+            return json.dumps({
+                "error": f"content exceeds {_MAX_CONTENT_BYTES} byte cap",
+                "received_bytes": len(content),
+            })
         try:
             body = {"content": content, "content_type": content_type}
             if agent_id:
@@ -262,7 +291,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def get_content_provenance(content_hash: str) -> str:
@@ -277,7 +306,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── ABAC: Agent Attributes ─────────────────────────────────────
 
@@ -294,7 +323,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def set_agent_attributes(agent_id: str, attributes_json: str) -> str:
@@ -316,7 +345,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # ── Passport JIT (Just-in-Time Access Grants) ─────────────────
 
@@ -347,7 +376,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     # NOTE: approve_jit_grant and issue_jit_token are deliberately NOT
     # registered as MCP tools.
@@ -375,7 +404,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
 
     @server.tool()
     async def list_jit_grants(
@@ -395,4 +424,4 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": str(exc)})
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
