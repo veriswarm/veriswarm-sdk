@@ -11,12 +11,70 @@ import json
 import os
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # ── Config ───────────────────────────────────────────────────────────────
 
-API_URL = os.environ.get("VERISWARM_API_URL", "https://api.veriswarm.ai").rstrip("/")
+# Default to the canonical hosted endpoint. Self-hosted users override via
+# the VERISWARM_API_ALLOWED_HOSTS repo secret + VERISWARM_API_URL repo
+# secret. We deliberately do NOT trust the action's `api-url` workflow
+# input verbatim because a fork PR (or compromised workflow input) could
+# point it at an attacker host that then receives `x-api-key` on every
+# request. (Audit closure 2026-05-08 HIGH-D-13.)
+_DEFAULT_API_HOST = "api.veriswarm.ai"
+_RAW_API_URL = os.environ.get("VERISWARM_API_URL", f"https://{_DEFAULT_API_HOST}").rstrip("/")
+_ALLOWED_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get(
+        "VERISWARM_API_ALLOWED_HOSTS", _DEFAULT_API_HOST
+    ).split(",")
+    if h.strip()
+}
+
+
+def _validate_api_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise SystemExit(
+            f"::error::VERISWARM_API_URL must be https:// (got {parsed.scheme!r})"
+        )
+    host = (parsed.hostname or "").lower()
+    if host not in _ALLOWED_HOSTS:
+        raise SystemExit(
+            f"::error::VERISWARM_API_URL host {host!r} not in allowlist "
+            f"{sorted(_ALLOWED_HOSTS)}. To use a self-hosted endpoint, set "
+            f"VERISWARM_API_ALLOWED_HOSTS as a repo secret to include it."
+        )
+    return url
+
+
+API_URL = _validate_api_url(_RAW_API_URL)
 API_KEY = os.environ.get("VERISWARM_API_KEY", "")
+
+
+class _StripAuthRedirectHandler(HTTPRedirectHandler):
+    """Strip auth headers when following a redirect.
+
+    Python's default HTTPRedirectHandler re-attaches custom request
+    headers (including `x-api-key`) to the redirected URL. A
+    compromised/MITM'd response from `base_url` could 302 to attacker
+    host and steal the API key. Stripping defends even if a redirect
+    sneaks through. (Audit closure 2026-05-08 CRIT-D-7.)
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        new_req.headers = {
+            k: v for k, v in new_req.headers.items()
+            if k.lower() not in ("x-api-key", "authorization")
+        }
+        return new_req
+
+
+_OPENER = build_opener(_StripAuthRedirectHandler())
 AGENT_ID = os.environ.get("VERISWARM_AGENT_ID", "")
 MODE = os.environ.get("VERISWARM_MODE", "all")
 SCAN_PATHS = os.environ.get("VERISWARM_SCAN_PATHS", "")
@@ -38,7 +96,7 @@ def api_request(path: str, method: str = "GET", body: dict | None = None) -> dic
         headers={"Content-Type": "application/json", "x-api-key": API_KEY},
     )
     try:
-        with urlopen(req, timeout=30) as resp:
+        with _OPENER.open(req, timeout=30) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:200]

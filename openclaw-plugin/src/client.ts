@@ -105,6 +105,11 @@ export class VeriSwarmClient {
     }
     // Credential issuance requires x-agent-api-key, not x-api-key
     const url = `${this.config.apiUrl}/v1/credentials/issue`;
+    // redirect:'error' refuses to follow any 3xx. Otherwise fetch
+    // would re-attach the x-agent-api-key header to the redirected
+    // URL, letting a compromised/MITM'd response steal the agent
+    // key by 302-ing to attacker host. (Audit closure 2026-05-08
+    // CRIT-D-8.)
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -112,6 +117,7 @@ export class VeriSwarmClient {
         "User-Agent": "veriswarm-openclaw-plugin/0.1.0",
         "x-agent-api-key": this.config.agentKey,
       },
+      redirect: "error",
     });
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -174,10 +180,16 @@ export class VeriSwarmClient {
       "x-api-key": this.config.apiKey,
     };
 
+    // redirect:'error' refuses to follow any 3xx. Otherwise fetch would
+    // re-attach the x-api-key header to the redirected URL, letting a
+    // compromised/MITM'd response steal the customer's VeriSwarm API
+    // key by 302-ing them to attacker host. (Audit closure 2026-05-08
+    // CRIT-D-8.)
     const response = await fetch(url, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
+      redirect: "error",
     });
 
     if (!response.ok) {

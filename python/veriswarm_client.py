@@ -4,7 +4,31 @@ import json
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class _StripAuthRedirectHandler(HTTPRedirectHandler):
+    """Strip credential headers when urllib follows a redirect.
+
+    urllib's default re-attaches custom headers (`x-api-key`,
+    `Authorization`) to the redirected URL. A compromised or MITM'd
+    response from the configured base_url could 302 to attacker host
+    and steal the workspace API key. (Mirrors the audit closure
+    2026-05-08 CRIT-D-7 fix in the main repo.)
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        new_req.headers = {
+            k: v for k, v in new_req.headers.items()
+            if k.lower() not in ("x-api-key", "authorization")
+        }
+        return new_req
+
+
+_OPENER = build_opener(_StripAuthRedirectHandler())
 
 
 class VeriSwarmClientError(RuntimeError):
@@ -1021,7 +1045,7 @@ class VeriSwarmClient:
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with _OPENER.open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw) if raw else {}
         except HTTPError as exc:

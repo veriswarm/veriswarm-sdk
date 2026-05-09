@@ -912,11 +912,18 @@ export class VeriSwarmClient {
       if (this.apiKey) headers["x-api-key"] = this.apiKey;
       if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
 
+      // redirect:'error' refuses to follow any 3xx. fetch's default
+      // would re-attach headers including x-api-key on the redirected
+      // request — a compromised/MITM'd response from baseUrl could 302
+      // to attacker host and steal the API key. Real APIs don't 302
+      // their JSON endpoints; treating a redirect as an error is the
+      // safe default. (Audit closure 2026-05-08 CRIT-D-8.)
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers,
         body: body == null ? undefined : JSON.stringify(body),
         signal: controller.signal,
+        redirect: "error",
       });
       const contentType = response.headers.get("content-type") || "";
       const payload = contentType.includes("application/json")
