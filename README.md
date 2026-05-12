@@ -24,7 +24,7 @@ Add to your MCP client config (Claude Desktop, Cursor, etc.):
   "mcpServers": {
     "veriswarm": {
       "command": "python3",
-      "args": ["-m", "src"],
+      "args": ["-m", "veriswarm_mcp"],
       "env": {
         "VERISWARM_API_URL": "https://api.veriswarm.ai",
         "VERISWARM_API_KEY": "YOUR_API_KEY"

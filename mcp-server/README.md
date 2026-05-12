@@ -32,7 +32,7 @@ If you prefer manual configuration:
   "mcpServers": {
     "veriswarm": {
       "command": "python",
-      "args": ["-m", "src"],
+      "args": ["-m", "veriswarm_mcp"],
       "env": {
         "VERISWARM_API_URL": "https://api.veriswarm.ai",
         "VERISWARM_API_KEY": "vs_your_platform_key"
