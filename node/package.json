@@ -9,7 +9,8 @@
   },
   "files": [
     "veriswarm_client.mjs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "vitest run",

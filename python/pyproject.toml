@@ -38,3 +38,9 @@ Homepage = "https://veriswarm.ai"
 Repository = "https://github.com/veriswarm/veriswarm-sdk"
 Documentation = "https://veriswarm.ai/docs"
 Issues = "https://github.com/veriswarm/veriswarm-sdk/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

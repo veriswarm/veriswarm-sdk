@@ -11,7 +11,7 @@ try:
 except ImportError:
     raise ImportError("Install langchain-core: pip install veriswarm[langchain]")
 
-from veriswarm_client import VeriSwarmClient
+from veriswarm.client import VeriSwarmClient
 
 logger = logging.getLogger("veriswarm.langchain")
 

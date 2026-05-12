@@ -46,7 +46,7 @@ This installs the MCP server, Guard hooks (PII protection + activity logging), a
 ### Python SDK
 
 ```python
-from veriswarm_client import VeriSwarmClient
+from veriswarm import VeriSwarmClient
 
 client = VeriSwarmClient("https://api.veriswarm.ai", "YOUR_API_KEY")
 

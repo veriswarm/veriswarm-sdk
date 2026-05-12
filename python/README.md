@@ -6,13 +6,12 @@ Lightweight Python client for the VeriSwarm trust scoring API. Zero external dep
 
 ```bash
 pip install veriswarm
-# or copy veriswarm_client.py directly into your project
 ```
 
 ## Quick Start
 
 ```python
-from veriswarm_client import VeriSwarmClient
+from veriswarm import VeriSwarmClient
 
 client = VeriSwarmClient(
     base_url="https://api.veriswarm.ai",
