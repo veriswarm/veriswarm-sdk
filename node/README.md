@@ -196,6 +196,29 @@ const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
 const rep = await client.reputationLookup("my-agent");
 ```
 
+## OpenAI-Compatible LLM Proxy
+
+VeriSwarm runs an OpenAI-wire-compatible proxy at `/v1/proxy/chat/completions` and `/v1/proxy/models`. Every request flows through Guard scanning, the LLM router (cost / complexity / fallback policy), and a Vault audit entry before it reaches the chosen provider — and the response wire shape matches `openai.chat.completions.create(...)` byte-for-byte.
+
+So the recommended integration is to keep using the OpenAI SDK and just point its `baseURL` at VeriSwarm:
+
+```javascript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "https://api.veriswarm.ai/v1/proxy",
+  apiKey: process.env.VERISWARM_API_KEY,
+});
+
+// Streaming and non-streaming both work; chat.completions, models, etc.
+const completion = await openai.chat.completions.create({
+  model: "claude-sonnet-4-6",  // or any model your router policy allows
+  messages: [{ role: "user", content: "What's the trust score for agt_42?" }],
+});
+```
+
+Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approvals, compliance — the surfaces the OpenAI SDK doesn't speak.
+
 ## All Methods
 
 | Method | Description |
@@ -323,3 +346,15 @@ const rep = await client.reputationLookup("my-agent");
 | `verifyJitToken({ token, expectedAction?, expectedResourceId? })` | Verify JIT token at use-time (public) |
 | `listJitGrants({ agentId?, status? })` | List grants for the tenant |
 | `getJitGrant(grantId)` | Get a single grant by id |
+| **A2A Protocol** | |
+| `listA2aCatalog()` | Trust-ranked agent catalog (excludes killed) |
+| `getA2aAgentCard(agentId)` | A2A card with `x-veriswarm-trust` (+ `x-veriswarm-transport`) extension |
+| `submitA2aTask(agentId, { requestingAgentId, messages, signature? })` | Submit task to an agent |
+| `getA2aTask(agentId, taskId)` | Task status + result |
+| `cancelA2aTask(agentId, taskId)` | Cancel an in-flight task |
+| **Operator Approval Queue** | |
+| `createApproval({ agentId?, requestedAction?, ttlSeconds? })` | Submit approval request |
+| `listApprovals({ state?, agentId?, limit? })` | List requests (pending/approved/rejected/expired/all) |
+| `getApproval(approvalId)` | Fetch one request |
+| `approveApproval(approvalId, { reason? })` | Approve (operator session) |
+| `rejectApproval(approvalId, { reason? })` | Reject (operator session) |

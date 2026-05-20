@@ -2,6 +2,7 @@
 from . import (
     agents,
     a2a,
+    approvals,
     compliance_and_sre,
     events,
     guard,
@@ -16,6 +17,7 @@ from . import (
 __all__ = [
     "agents",
     "a2a",
+    "approvals",
     "compliance_and_sre",
     "events",
     "guard",

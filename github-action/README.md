@@ -28,6 +28,8 @@ jobs:
 | **Security Tests** | 33 adversarial tests | Readiness score below `fail-on-low-score` |
 | **PII Scan** | Scan files for personal data | PII found in scanned files |
 | **Injection Scan** | Scan files for injection patterns | Injection detected |
+| **OWASP Attestation** | OWASP Agentic AI Top 10 (2026) coverage | Coverage score below `min-owasp-coverage` |
+| **Compliance** | One or more framework attestations (19 frameworks available — EU AI Act, NIST AI RMF, ISO 42001, NAIC, NYDFS, SEC §206, CFPB ECOA, OCC SR 11-7, ABA, FRCP, CA SB 243 et al.) | Worst per-framework pass ratio below `min-compliance-pass-ratio`, or a control returns `warn` while `fail-on-compliance-warn` is true |
 
 ## Inputs
 
@@ -35,12 +37,16 @@ jobs:
 |-------|----------|---------|-------------|
 | `api-key` | Yes | | VeriSwarm API key (use GitHub secret) |
 | `agent-id` | No | | Agent ID for score/test/decision checks |
-| `mode` | No | `all` | `score`, `test`, `scan`, `decision`, or `all` |
+| `mode` | No | `all` | `score`, `test`, `scan`, `decision`, `owasp`, `compliance`, or `all` |
 | `scan-paths` | No | | Glob for files to scan (e.g., `**/*.py`) |
 | `fail-on-deny` | No | `true` | Fail if trust decision is deny |
 | `fail-on-injection` | No | `true` | Fail if injection detected |
 | `fail-on-low-score` | No | `0` | Min security readiness score (0=disabled) |
 | `min-trust-score` | No | `0` | Min composite trust score (0=disabled) |
+| `min-owasp-coverage` | No | `0` | Min OWASP coverage score (0.0–1.0, 0=disabled) |
+| `frameworks` | No | `eu-ai-act,nist-ai-rmf,iso-42001` | Comma-separated framework slugs for `compliance` mode, or `all` to evaluate every framework returned by `GET /v1/compliance/frameworks` |
+| `min-compliance-pass-ratio` | No | `0` | Min per-framework pass ratio (0.0–1.0, 0=disabled). Applies to the worst framework in the list. |
+| `fail-on-compliance-warn` | No | `false` | Fail if any control's status is `warn` (default: only `fail` blocks the gate) |
 
 ## Examples
 
@@ -87,6 +93,31 @@ jobs:
     fail-on-deny: true
     min-trust-score: 70
     fail-on-low-score: 80
+```
+
+### Compliance gate — block releases when an attestation regresses
+
+```yaml
+- uses: veriswarm/trust-check@v1
+  with:
+    api-key: ${{ secrets.VERISWARM_API_KEY }}
+    mode: compliance
+    # Pick frameworks that match your buyer base. Use `all` to evaluate
+    # every framework returned by GET /v1/compliance/frameworks.
+    frameworks: "eu-ai-act,nydfs-part-500,sec-section-206"
+    # 0.9 = at most 10% of controls may regress before the build fails.
+    min-compliance-pass-ratio: 0.9
+    fail-on-compliance-warn: false
+```
+
+### OWASP-only gate
+
+```yaml
+- uses: veriswarm/trust-check@v1
+  with:
+    api-key: ${{ secrets.VERISWARM_API_KEY }}
+    mode: owasp
+    min-owasp-coverage: 0.9
 ```
 
 ## Outputs

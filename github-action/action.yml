@@ -17,9 +17,21 @@ inputs:
     description: "Agent ID to check (required for score/test/decision)"
     required: false
   mode:
-    description: "Check mode: score, test, scan, decision, owasp, or all"
+    description: "Check mode: score, test, scan, decision, owasp, compliance, or all"
     required: false
     default: "all"
+  frameworks:
+    description: "Comma-separated compliance framework slugs to evaluate in 'compliance' mode (e.g. 'eu-ai-act,nist-ai-rmf,nydfs-part-500'). Use 'all' for every framework. Slugs come from GET /v1/compliance/frameworks."
+    required: false
+    default: "eu-ai-act,nist-ai-rmf,iso-42001"
+  min-compliance-pass-ratio:
+    description: "Minimum per-framework pass ratio (pass / total controls) to pass the gate (0.0-1.0). 0 = no enforcement."
+    required: false
+    default: "0"
+  fail-on-compliance-warn:
+    description: "Fail the gate if any control's status is 'warn' (default: only fail on 'fail')."
+    required: false
+    default: "false"
   scan-paths:
     description: "Glob pattern for files to scan for PII (e.g., '**/*.py')"
     required: false
@@ -66,6 +78,10 @@ outputs:
     description: "OWASP Agentic Top 10 coverage (e.g., '10/10')"
   owasp-score:
     description: "OWASP coverage score (0.0-1.0)"
+  compliance-pass-ratio:
+    description: "Worst per-framework pass ratio observed in 'compliance' mode (0.0-1.0)."
+  compliance-frameworks-checked:
+    description: "Comma-separated framework slugs that were actually evaluated."
   summary:
     description: "Human-readable summary of all checks"
 
@@ -101,6 +117,9 @@ runs:
         VERISWARM_FAIL_ON_LOW_SCORE: ${{ inputs.fail-on-low-score }}
         VERISWARM_MIN_TRUST_SCORE: ${{ inputs.min-trust-score }}
         VERISWARM_MIN_OWASP_COVERAGE: ${{ inputs.min-owasp-coverage }}
+        VERISWARM_FRAMEWORKS: ${{ inputs.frameworks }}
+        VERISWARM_MIN_COMPLIANCE_PASS_RATIO: ${{ inputs.min-compliance-pass-ratio }}
+        VERISWARM_FAIL_ON_COMPLIANCE_WARN: ${{ inputs.fail-on-compliance-warn }}
       # Quote github.action_path defence-in-depth against shell
       # word-splitting if the path ever contains spaces. (Audit
       # 2026-05-08 HIGH-SDK-8.)

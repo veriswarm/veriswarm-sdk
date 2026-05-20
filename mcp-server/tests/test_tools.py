@@ -138,6 +138,7 @@ TOOL_MODULES = [
     "veriswarm_mcp.tools.workflows",
     "veriswarm_mcp.tools.compliance_and_sre",
     "veriswarm_mcp.tools.a2a",
+    "veriswarm_mcp.tools.approvals",
 ]
 
 

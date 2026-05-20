@@ -10,6 +10,7 @@ from .client import VeriSwarmAPIClient
 from .tools import (
     a2a,
     agents,
+    approvals,
     compliance_and_sre,
     events,
     guard,
@@ -45,6 +46,7 @@ def create_server() -> tuple[FastMCP, VeriSwarmAPIClient]:
     workflows.register(server, client)
     compliance_and_sre.register(server, client)
     a2a.register(server, client)
+    approvals.register(server, client)
 
     return server, client
 

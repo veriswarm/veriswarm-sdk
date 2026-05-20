@@ -253,6 +253,29 @@ status = client.get_platform_status()
 print(status["status"])  # "operational" or "degraded"
 ```
 
+## OpenAI-Compatible LLM Proxy
+
+VeriSwarm exposes an OpenAI-wire-compatible proxy at `/v1/proxy/chat/completions` and `/v1/proxy/models`. Every request flows through Guard scanning, the LLM router (cost / complexity / fallback), and a Vault audit entry — and the response shape matches `openai.chat.completions.create(...)` byte-for-byte.
+
+The recommended integration is to use the OpenAI SDK directly and just override its `base_url`:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.veriswarm.ai/v1/proxy",
+    api_key=os.environ["VERISWARM_API_KEY"],
+)
+
+completion = client.chat.completions.create(
+    model="claude-sonnet-4-6",  # or any model your tenant's router allows
+    messages=[{"role": "user", "content": "What's the trust score for agt_42?"}],
+)
+```
+
+Use the `veriswarm` package for trust, Guard, Passport, Vault, A2A, approvals, and compliance — the surfaces the OpenAI SDK doesn't cover.
+
 ## All Methods
 
 | Method | Description |
@@ -380,3 +403,15 @@ print(status["status"])  # "operational" or "degraded"
 | `verify_jit_token(token, expected_action=, expected_resource_id=)` | Verify JIT token at use-time (public) |
 | `list_jit_grants(agent_id=, status=)` | List grants for the tenant |
 | `get_jit_grant(grant_id)` | Get a single grant by id |
+| **A2A Protocol** | |
+| `list_a2a_catalog()` | Trust-ranked agent catalog (excludes killed) |
+| `get_a2a_agent_card(agent_id)` | A2A card with `x-veriswarm-trust` (+ `x-veriswarm-transport`) extension |
+| `submit_a2a_task(agent_id, requesting_agent_id=, messages=, signature=)` | Submit task to an agent |
+| `get_a2a_task(agent_id, task_id)` | Task status + result |
+| `cancel_a2a_task(agent_id, task_id)` | Cancel an in-flight task |
+| **Operator Approval Queue** | |
+| `create_approval(agent_id=, requested_action=, ttl_seconds=)` | Submit approval request |
+| `list_approvals(state=, agent_id=, limit=)` | List requests (pending/approved/rejected/expired/all) |
+| `get_approval(approval_id)` | Fetch one request |
+| `approve_approval(approval_id, reason=)` | Approve (operator session) |
+| `reject_approval(approval_id, reason=)` | Reject (operator session) |

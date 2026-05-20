@@ -763,6 +763,74 @@ class VeriSwarmClient:
             body["models"] = models
         return self._post("/v1/suite/guard/verify", body=body)
 
+    # --- Operator approval queue (/v1/approvals) ---
+
+    def create_approval(
+        self,
+        *,
+        agent_id: str | None = None,
+        requested_action: dict[str, Any] | None = None,
+        ttl_seconds: int = 24 * 3600,
+    ) -> dict[str, Any]:
+        """Submit a new approval request to the operator queue.
+
+        agent_id: agent the request is on behalf of; omit for system-initiated reviews.
+        requested_action: structured description of what's being approved.
+        ttl_seconds: how long the request stays pending before expiring (60s..30d).
+        """
+        body: dict[str, Any] = {
+            "requested_action": requested_action or {},
+            "ttl_seconds": ttl_seconds,
+        }
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        return self._post("/v1/approvals", body=body)
+
+    def list_approvals(
+        self,
+        *,
+        state: str = "pending",
+        agent_id: str | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List approval requests for the authenticated tenant.
+
+        state: one of "pending", "approved", "rejected", "expired", "all".
+        """
+        from urllib.parse import urlencode
+        params: dict[str, Any] = {"state": state, "limit": limit}
+        if agent_id is not None:
+            params["agent_id"] = agent_id
+        return self._get(f"/v1/approvals?{urlencode(params)}")
+
+    def get_approval(self, approval_id: str) -> dict[str, Any]:
+        """Get a single approval request."""
+        return self._get(f"/v1/approvals/{_path(approval_id)}")
+
+    def approve_approval(
+        self, approval_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """Approve a pending approval request.
+
+        Requires an account session token (operator role).
+        """
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        return self._post(f"/v1/approvals/{_path(approval_id)}/approve", body=body)
+
+    def reject_approval(
+        self, approval_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        """Reject a pending approval request.
+
+        Requires an account session token (operator role).
+        """
+        body: dict[str, Any] = {}
+        if reason is not None:
+            body["reason"] = reason
+        return self._post(f"/v1/approvals/{_path(approval_id)}/reject", body=body)
+
     # --- A2A Protocol (catalog, agent cards, tasks) ---
 
     def list_a2a_catalog(self) -> dict[str, Any]:
@@ -1123,7 +1191,7 @@ class VeriSwarmClient:
             method=method,
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "veriswarm-python-sdk/0.1.0",
+                "User-Agent": "veriswarm-python-sdk/0.4.0",
                 "x-api-key": self.api_key,
             },
         )

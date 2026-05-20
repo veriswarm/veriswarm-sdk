@@ -84,6 +84,13 @@ FAIL_ON_INJECTION = os.environ.get("VERISWARM_FAIL_ON_INJECTION", "true").lower(
 FAIL_ON_LOW_SCORE = int(os.environ.get("VERISWARM_FAIL_ON_LOW_SCORE", "0"))
 MIN_TRUST_SCORE = int(os.environ.get("VERISWARM_MIN_TRUST_SCORE", "0"))
 MIN_OWASP_COVERAGE = float(os.environ.get("VERISWARM_MIN_OWASP_COVERAGE", "0"))
+FRAMEWORKS_INPUT = os.environ.get("VERISWARM_FRAMEWORKS", "eu-ai-act,nist-ai-rmf,iso-42001")
+MIN_COMPLIANCE_PASS_RATIO = float(
+    os.environ.get("VERISWARM_MIN_COMPLIANCE_PASS_RATIO", "0")
+)
+FAIL_ON_COMPLIANCE_WARN = (
+    os.environ.get("VERISWARM_FAIL_ON_COMPLIANCE_WARN", "false").lower() == "true"
+)
 
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 GITHUB_STEP_SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
@@ -384,6 +391,94 @@ def check_owasp():
         print(f"::error::{msg}")
 
 
+def _resolve_compliance_frameworks() -> list[str]:
+    """Return the list of framework slugs to evaluate.
+
+    `frameworks: all` queries GET /v1/compliance/frameworks at runtime.
+    Otherwise splits the comma-separated input. Empty entries are dropped.
+    """
+    raw = (FRAMEWORKS_INPUT or "").strip()
+    if not raw or raw.lower() == "all":
+        try:
+            catalog = api_request("/v1/compliance/frameworks")
+        except Exception as exc:
+            print(f"::warning::could not list frameworks (using built-in defaults): {exc}")
+            return ["eu-ai-act", "nist-ai-rmf", "iso-42001"]
+        if isinstance(catalog, dict) and "frameworks" in catalog:
+            entries = catalog["frameworks"]
+        elif isinstance(catalog, list):
+            entries = catalog
+        else:
+            entries = []
+        slugs = [
+            (e.get("id") or e.get("slug")) if isinstance(e, dict) else str(e)
+            for e in entries
+        ]
+        return [s for s in slugs if s]
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def check_compliance():
+    """Evaluate one or more compliance frameworks and gate the build.
+
+    Per-framework pass ratio = pass / (pass + warn + fail). The gate
+    fails the build when the worst framework's ratio is below
+    `min-compliance-pass-ratio`, or when `fail-on-compliance-warn` is
+    true and any control's status is 'warn'.
+    """
+    slugs = _resolve_compliance_frameworks()
+    if not slugs:
+        print("::warning::no compliance frameworks resolved; skipping check")
+        return
+
+    print(f"Checking {len(slugs)} compliance framework(s)...")
+    set_output("compliance-frameworks-checked", ",".join(slugs))
+
+    worst_ratio = 1.0
+    saw_warn = False
+    for slug in slugs:
+        result = api_request(f"/v1/compliance/{slug}")
+        if "error" in result:
+            failures.append(
+                f"Compliance framework `{slug}` could not be evaluated: {result.get('error')}"
+            )
+            continue
+
+        # Result shape: { controls: [{status: pass|warn|fail, ...}], ... }
+        controls = result.get("controls") or []
+        passes = sum(1 for c in controls if (c.get("status") or "").lower() == "pass")
+        warns = sum(1 for c in controls if (c.get("status") or "").lower() == "warn")
+        fails = sum(1 for c in controls if (c.get("status") or "").lower() == "fail")
+        total = passes + warns + fails
+        ratio = (passes / total) if total else 1.0
+        worst_ratio = min(worst_ratio, ratio)
+        if warns:
+            saw_warn = True
+
+        tech_preview = " ⚠ technical preview" if result.get("technical_preview") else ""
+        line = (
+            f"Compliance `{slug}`{tech_preview}: "
+            f"**{passes}/{total}** pass · {warns} warn · {fails} fail "
+            f"(ratio: {ratio:.2f})"
+        )
+        summary_lines.append(line)
+        print(f"  {slug}: {passes}/{total} pass ({ratio:.0%})")
+
+    set_output("compliance-pass-ratio", f"{worst_ratio:.2f}")
+
+    if MIN_COMPLIANCE_PASS_RATIO > 0 and worst_ratio < MIN_COMPLIANCE_PASS_RATIO:
+        msg = (
+            f"Worst compliance pass ratio {worst_ratio:.2f} below minimum "
+            f"{MIN_COMPLIANCE_PASS_RATIO:.2f}"
+        )
+        failures.append(msg)
+        print(f"::error::{msg}")
+
+    if FAIL_ON_COMPLIANCE_WARN and saw_warn:
+        failures.append("One or more compliance controls returned 'warn' status")
+        print("::error::fail-on-compliance-warn=true and a warn was observed")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -397,7 +492,11 @@ def main():
     print(f"   Mode: {MODE}")
     print()
 
-    modes = [MODE] if MODE != "all" else ["score", "decision", "test", "scan", "owasp"]
+    modes = (
+        [MODE]
+        if MODE != "all"
+        else ["score", "decision", "test", "scan", "owasp", "compliance"]
+    )
 
     for mode in modes:
         if mode == "score":
@@ -410,6 +509,8 @@ def main():
             check_scan()
         elif mode == "owasp":
             check_owasp()
+        elif mode == "compliance":
+            check_compliance()
 
     # Write summary
     summary_md = "## 🐝 VeriSwarm Trust Check\n\n"

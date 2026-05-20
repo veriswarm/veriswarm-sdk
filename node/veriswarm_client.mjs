@@ -696,6 +696,61 @@ export class VeriSwarmClient {
     return this.#request("/v1/suite/guard/verify", { method: "POST", body });
   }
 
+  // --- Operator approval queue (/v1/approvals) ---
+
+  /**
+   * Submit a new approval request to the operator queue.
+   *
+   * @param {object} opts
+   * @param {string} [opts.agentId]            - agent the request is on behalf of; omit for system-initiated reviews
+   * @param {object} [opts.requestedAction={}] - structured description of what's being approved
+   * @param {number} [opts.ttlSeconds=86400]   - seconds the request stays pending before expiring (60 - 30*86400)
+   */
+  async createApproval({ agentId = null, requestedAction = {}, ttlSeconds = 24 * 3600 } = {}) {
+    const body = { requested_action: requestedAction, ttl_seconds: ttlSeconds };
+    if (agentId !== null) body.agent_id = agentId;
+    return this.#request("/v1/approvals", { method: "POST", body });
+  }
+
+  /**
+   * List approval requests for the authenticated tenant.
+   *
+   * @param {object} [opts]
+   * @param {"pending"|"approved"|"rejected"|"expired"|"all"} [opts.state="pending"]
+   * @param {string}  [opts.agentId]
+   * @param {number}  [opts.limit=100]
+   */
+  async listApprovals({ state = "pending", agentId = null, limit = 100 } = {}) {
+    const params = new URLSearchParams({ state, limit: String(limit) });
+    if (agentId !== null) params.set("agent_id", agentId);
+    return this.#request(`/v1/approvals?${params.toString()}`);
+  }
+
+  /** Get a single approval request. */
+  async getApproval(approvalId) {
+    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}`);
+  }
+
+  /** Approve a pending approval request. Requires account session token (operator role). */
+  async approveApproval(approvalId, { reason = null } = {}) {
+    const body = {};
+    if (reason !== null) body.reason = reason;
+    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  /** Reject a pending approval request. Requires account session token (operator role). */
+  async rejectApproval(approvalId, { reason = null } = {}) {
+    const body = {};
+    if (reason !== null) body.reason = reason;
+    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}/reject`, {
+      method: "POST",
+      body,
+    });
+  }
+
   // --- A2A Protocol (catalog, agent cards, tasks) ---
 
   /** List the tenant's trust-ranked A2A agent catalog (descending trust score, excludes killed). */
@@ -972,7 +1027,7 @@ export class VeriSwarmClient {
     try {
       const headers = {
         "Content-Type": "application/json",
-        "User-Agent": "veriswarm-node-sdk/0.1.0",
+        "User-Agent": "veriswarm-node-sdk/0.4.0",
       };
       if (this.apiKey) headers["x-api-key"] = this.apiKey;
       if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
