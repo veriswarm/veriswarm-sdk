@@ -696,6 +696,51 @@ export class VeriSwarmClient {
     return this.#request("/v1/suite/guard/verify", { method: "POST", body });
   }
 
+  // --- A2A Protocol (catalog, agent cards, tasks) ---
+
+  /** List the tenant's trust-ranked A2A agent catalog (descending trust score, excludes killed). */
+  async listA2aCatalog() {
+    return this.#request("/v1/a2a/catalog");
+  }
+
+  /** Get an A2A agent card with the `x-veriswarm-trust` (and optional `x-veriswarm-transport`) extension. */
+  async getA2aAgentCard(agentId) {
+    return this.#request(`/v1/a2a/${encodeURIComponent(agentId)}/card`);
+  }
+
+  /**
+   * Submit a task to an agent via the A2A protocol.
+   *
+   * @param {string} agentId - receiving agent (`agt_*`)
+   * @param {{requestingAgentId: string, messages: Array<object>, signature?: object}} payload
+   *   - requestingAgentId: caller's agent id
+   *   - messages: A2A-shaped message list
+   *   - signature: optional Ed25519 envelope `{key_id, signature, algo}`
+   */
+  async submitA2aTask(agentId, { requestingAgentId, messages, signature } = {}) {
+    const body = { requesting_agent_id: requestingAgentId, messages };
+    if (signature) body.signature = signature;
+    return this.#request(`/v1/a2a/${encodeURIComponent(agentId)}/tasks`, {
+      method: "POST",
+      body,
+    });
+  }
+
+  /** Get status + result of an A2A task. */
+  async getA2aTask(agentId, taskId) {
+    return this.#request(
+      `/v1/a2a/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}`,
+    );
+  }
+
+  /** Cancel an in-flight A2A task. No-op if already terminated. */
+  async cancelA2aTask(agentId, taskId) {
+    return this.#request(
+      `/v1/a2a/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+      { method: "POST" },
+    );
+  }
+
   // --- A2A Transport (Ed25519 signing) ---
 
   /** Provision Ed25519 transport keys for an agent. Returns the public key. */

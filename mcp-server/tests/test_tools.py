@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 class TestVeriSwarmAPIClient:
     def setup_method(self):
-        from src.client import VeriSwarmAPIClient
+        from veriswarm_mcp.client import VeriSwarmAPIClient
         self.Client = VeriSwarmAPIClient
 
     def test_base_url_trailing_slash_stripped(self):
@@ -88,7 +88,7 @@ class TestServerCreation:
     def test_create_server_returns_tuple(self):
         import os
         from mcp.server.fastmcp import FastMCP
-        from src.server import create_server
+        from veriswarm_mcp.server import create_server
 
         with patch.dict(os.environ, {"VERISWARM_API_KEY": "test-key", "VERISWARM_API_URL": "https://api.veriswarm.ai"}):
             server, client = create_server()
@@ -99,7 +99,7 @@ class TestServerCreation:
 
     def test_create_server_warns_when_no_keys(self, capsys):
         import os
-        from src.server import create_server
+        from veriswarm_mcp.server import create_server
 
         env_overrides = {
             "VERISWARM_API_KEY": "",
@@ -127,13 +127,17 @@ class TestServerCreation:
 # ---------------------------------------------------------------------------
 
 TOOL_MODULES = [
-    "src.tools.trust",
-    "src.tools.events",
-    "src.tools.guard",
-    "src.tools.passport",
-    "src.tools.vault",
-    "src.tools.agents",
-    "src.tools.platform",
+    "veriswarm_mcp.tools.trust",
+    "veriswarm_mcp.tools.events",
+    "veriswarm_mcp.tools.guard",
+    "veriswarm_mcp.tools.passport",
+    "veriswarm_mcp.tools.vault",
+    "veriswarm_mcp.tools.agents",
+    "veriswarm_mcp.tools.platform",
+    "veriswarm_mcp.tools.runtime",
+    "veriswarm_mcp.tools.workflows",
+    "veriswarm_mcp.tools.compliance_and_sre",
+    "veriswarm_mcp.tools.a2a",
 ]
 
 
@@ -161,7 +165,7 @@ def test_register_accepts_server_and_client(module_path):
 
 class TestEventTools:
     def _make_client(self):
-        from src.client import VeriSwarmAPIClient
+        from veriswarm_mcp.client import VeriSwarmAPIClient
         client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
         return client
 
@@ -178,7 +182,7 @@ class TestEventTools:
             return {"status": "ok", "event_id": json.get("event_id", "")}
         client.post = mock_post
 
-        from src.tools import events
+        from veriswarm_mcp.tools import events
         server = MagicMock()
         # Manually invoke by calling the inner coroutine
         # We test by re-importing and calling report_tool_call directly
@@ -203,7 +207,7 @@ class TestEventTools:
 
         with patch.object(client, "post", side_effect=mock_post):
             import asyncio
-            from src.tools.events import register
+            from veriswarm_mcp.tools.events import register
 
             server = MagicMock()
             register(server, client)

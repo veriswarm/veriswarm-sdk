@@ -763,6 +763,61 @@ class VeriSwarmClient:
             body["models"] = models
         return self._post("/v1/suite/guard/verify", body=body)
 
+    # --- A2A Protocol (catalog, agent cards, tasks) ---
+
+    def list_a2a_catalog(self) -> dict[str, Any]:
+        """List the tenant's trust-ranked A2A agent catalog.
+
+        Returns agents in descending trust-score order, excluding any
+        agent currently in the kill-switch state.
+        """
+        return self._get("/v1/a2a/catalog")
+
+    def get_a2a_agent_card(self, agent_id: str) -> dict[str, Any]:
+        """Get an A2A agent card.
+
+        The card includes the `x-veriswarm-trust` extension and — when
+        keys are provisioned — the `x-veriswarm-transport` extension
+        carrying the agent's Ed25519 public key.
+        """
+        return self._get(f"/v1/a2a/{_path(agent_id)}/card")
+
+    def submit_a2a_task(
+        self,
+        agent_id: str,
+        *,
+        requesting_agent_id: str,
+        messages: list[dict[str, Any]],
+        signature: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Submit a task to an agent via the A2A protocol.
+
+        agent_id: receiving agent (`agt_*`).
+        requesting_agent_id: caller's agent id (`agt_*`).
+        messages: A2A-shaped message list.
+        signature: optional Ed25519 signature envelope
+            ``{"key_id": ..., "signature": ..., "algo": "ed25519"}``.
+
+        Raises HTTP 403 if the receiving agent is killed, paused, or stopped.
+        """
+        body: dict[str, Any] = {
+            "requesting_agent_id": requesting_agent_id,
+            "messages": messages,
+        }
+        if signature is not None:
+            body["signature"] = signature
+        return self._post(f"/v1/a2a/{_path(agent_id)}/tasks", body=body)
+
+    def get_a2a_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
+        """Get the status + result of an A2A task."""
+        return self._get(f"/v1/a2a/{_path(agent_id)}/tasks/{_path(task_id)}")
+
+    def cancel_a2a_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
+        """Cancel an in-flight A2A task. No-op if already terminated."""
+        return self._post(
+            f"/v1/a2a/{_path(agent_id)}/tasks/{_path(task_id)}/cancel"
+        )
+
     # --- A2A Transport (Ed25519 signing) ---
 
     def provision_a2a_keys(self, agent_id: str) -> dict[str, Any]:

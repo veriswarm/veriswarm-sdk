@@ -1,4 +1,28 @@
 """VeriSwarm MCP tool modules."""
-from . import agents, events, guard, passport, platform, trust, vault, runtime, workflows, compliance_and_sre
+from . import (
+    agents,
+    a2a,
+    compliance_and_sre,
+    events,
+    guard,
+    passport,
+    platform,
+    runtime,
+    trust,
+    vault,
+    workflows,
+)
 
-__all__ = ["agents", "events", "guard", "passport", "platform", "trust", "vault", "runtime", "workflows", "compliance_and_sre"]
+__all__ = [
+    "agents",
+    "a2a",
+    "compliance_and_sre",
+    "events",
+    "guard",
+    "passport",
+    "platform",
+    "runtime",
+    "trust",
+    "vault",
+    "workflows",
+]
