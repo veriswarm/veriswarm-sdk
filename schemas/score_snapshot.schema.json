@@ -50,6 +50,16 @@
         }
       }
     },
+    "calibration": {
+      "type": ["object", "null"],
+      "description": "Fifth trust dimension (Brier-score calibration). Null/absent for cold-start agents below the minimum matched-pairs threshold; the composite falls back to the four established dimensions.",
+      "required": ["score", "confidence"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "brier_avg": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
     "policy_tier": {
       "type": "string",
       "enum": ["tier_0", "tier_1", "tier_2", "tier_3", "tier_x"]
