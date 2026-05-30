@@ -58,6 +58,15 @@ MCP_PREFIX = "mcp__"
 # Short timeout: fail open fast so the hook never blocks the agent
 API_TIMEOUT = 3.0
 
+# Opt-in fail-closed secret tripwire. When enabled, obvious provider-prefix
+# secrets (ghp_, sk-, AKIA, …) that survive tokenization are locally redacted
+# rather than passed through. Default OFF — ships dormant.
+SECRETS_DETECTION = os.environ.get("GUARD_SECRETS_DETECTION", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 
 def _api_headers() -> dict:
     return {"Content-Type": "application/json", "x-api-key": API_KEY}
@@ -81,6 +90,48 @@ def _tokenize(text: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+# -- Fail-closed secret tripwire (opt-in) ---------------------------------
+
+_TRIPWIRE = None
+
+
+def _get_tripwire():
+    """Lazily build the vendored-manifest tripwire. None if unavailable."""
+    global _TRIPWIRE
+    if _TRIPWIRE is None:
+        try:
+            from veriswarm_mcp.secret_tripwire import (
+                SecretTripwire,
+                load_vendored_manifest,
+            )
+
+            _TRIPWIRE = SecretTripwire(load_vendored_manifest())
+        except Exception:
+            _TRIPWIRE = False  # sentinel: tried and failed, don't retry
+    return _TRIPWIRE or None
+
+
+def apply_secret_tripwire(text: str) -> str:
+    """Escalate obvious-secret strings to fail-closed redaction.
+
+    No-op unless GUARD_SECRETS_DETECTION is enabled. On a known-prefix hit,
+    try authoritative tokenization first; if it doesn't clear the secret,
+    fall back to local non-recoverable redaction ([VS:<TYPE>:offline]).
+    """
+    if not SECRETS_DETECTION or not isinstance(text, str) or not text:
+        return text
+    tw = _get_tripwire()
+    if tw is None or not tw.scan(text):
+        return text
+    result = _tokenize(text)
+    guarded = text
+    if result and result.get("tokens_created", 0) > 0:
+        guarded = result.get("tokenized_text") or text
+    if tw.scan(guarded):
+        guarded = tw.redact_offline(guarded)
+    return guarded
 
 
 # -- Event Handlers -------------------------------------------------------
@@ -129,6 +180,11 @@ def handle_pre_tool_use(event: dict) -> None:
     changed = False
 
     for key, value in fields_to_scan.items():
+        guarded = apply_secret_tripwire(value)
+        if guarded != value:
+            updated[key] = guarded
+            changed = True
+            value = guarded
         result = _tokenize(value)
         if result and result.get("tokens_created", 0) > 0:
             updated[key] = result["tokenized_text"]
