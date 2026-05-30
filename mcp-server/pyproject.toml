@@ -42,3 +42,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["veriswarm_mcp*"]
+
+[tool.setuptools.package-data]
+veriswarm_mcp = ["secret_rules_manifest.json"]
