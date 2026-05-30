@@ -41,6 +41,7 @@
  */
 
 import { VeriSwarmClient, type TokenizeResult } from "./client.js";
+import { SecretTripwire, ensureTripwire, loadVendoredManifest } from "./secret_tripwire.js";
 
 // ── Injection Patterns (BASIC HEURISTIC ONLY) ──────────────────────────
 //
@@ -96,6 +97,8 @@ interface PluginState {
   blockedTools: Set<string>;
   allowedTools: Set<string> | null;
   piiSessions: Map<string, string>; // toolName -> sessionId
+  secretsDetection: boolean;
+  tripwire: SecretTripwire | null;
 }
 
 // NOTE: Module-level state is shared within a single OpenClaw gateway process.
@@ -110,6 +113,8 @@ const state: PluginState = {
   blockedTools: new Set(),
   allowedTools: null,
   piiSessions: new Map(),
+  secretsDetection: false,
+  tripwire: null,
 };
 
 // ── Plugin Entry ────────────────────────────────────────────────────────
@@ -195,6 +200,14 @@ export const pluginEntry: PluginEntry = {
         description: "Only these tools allowed (allowlist mode). Empty = allow all.",
         default: [],
       },
+      secretsDetection: {
+        type: "boolean",
+        description:
+          "Scan outbound tool-call args for provider-prefix secrets. " +
+          "On a hit, tokenize via the API when online, or redact locally " +
+          "(fail-closed) when offline. Default off.",
+        default: false,
+      },
     },
     required: ["apiKey"],
     additionalProperties: false,
@@ -228,6 +241,25 @@ export const pluginEntry: PluginEntry = {
     state.injectionScan = cfg.injectionScan ?? true;
     state.auditEnabled = cfg.auditEnabled ?? true;
 
+    state.secretsDetection = cfg.secretsDetection === true;
+    if (state.secretsDetection) {
+      // Build immediately from the vendored manifest so the tripwire is
+      // live from the very first tool call (no startup race window).
+      // Then refresh from the API in the background; if that fetch fails
+      // we keep the vendored baseline. (register is synchronous, so we
+      // must not await the network here.)
+      state.tripwire = new SecretTripwire(loadVendoredManifest());
+      ensureTripwire({
+        fetchManifest: async () => state.client!.getSecretRules(),
+      })
+        .then((tw) => {
+          state.tripwire = tw;
+        })
+        .catch(() => {
+          /* keep vendored baseline — offline is fine */
+        });
+    }
+
     if (cfg.blockedTools?.length) {
       state.blockedTools = new Set(cfg.blockedTools);
     }
@@ -256,6 +288,56 @@ export const pluginEntry: PluginEntry = {
         if (state.allowedTools && !state.allowedTools.has(toolName)) {
           await logEvent("tool.blocked", { tool_name: toolName, reason: "not_in_allowlist" });
           return { block: true, message: `[VeriSwarm Guard] Tool '${toolName}' is not in the allowlist.` };
+        }
+      }
+
+      // Secret tripwire — runs ahead of PII tokenization. Catches obvious
+      // provider-prefix secrets (API keys, tokens) in the agent's native
+      // outbound path. On a hit we escalate to authoritative tokenization
+      // when online, and fail closed to local non-recoverable redaction
+      // when offline or when the API leaves any known-prefix span intact.
+      if (
+        state.secretsDetection &&
+        state.tripwire &&
+        event.input &&
+        typeof event.input === "string"
+      ) {
+        const hits = state.tripwire.scan(event.input);
+        if (hits.length > 0) {
+          const convId = event.conversation_id || event.conversationId || event.session_id;
+          const key = piiSessionKey(toolName, convId);
+          try {
+            const result = await state.client.tokenizePii(event.input);
+            let guarded =
+              result.tokens_created > 0 ? result.tokenized_text : event.input;
+            if (result.tokens_created > 0) {
+              state.piiSessions.set(key, result.session_id);
+            }
+            // Belt-and-suspenders: if any known-prefix span survived the
+            // API's tokenization, redact it locally so no recognized
+            // secret leaves unprotected.
+            if (state.tripwire.scan(guarded).length > 0) {
+              guarded = state.tripwire.redactOffline(guarded);
+            }
+            await logEvent("secret.tripwire", {
+              tool_name: toolName,
+              rules: hits.map((h) => h.ruleName),
+              mode: "online",
+            });
+            return { input: guarded };
+          } catch (e) {
+            // Offline / API failure → fail closed with local redaction.
+            console.warn(
+              `[VeriSwarm] Secret tripwire: API unreachable for tool=${toolName}; ` +
+              `applying offline redaction. Error: ${(e as Error)?.message ?? e}`
+            );
+            await logEvent("secret.tripwire", {
+              tool_name: toolName,
+              rules: hits.map((h) => h.ruleName),
+              mode: "offline",
+            }).catch(() => {});
+            return { input: state.tripwire.redactOffline(event.input) };
+          }
         }
       }
 

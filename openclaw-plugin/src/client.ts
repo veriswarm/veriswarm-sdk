@@ -4,6 +4,8 @@
  * Gate (trust), Guard (PII + security), Passport (identity), Vault (audit).
  */
 
+import type { SecretManifest } from "./secret_tripwire.js";
+
 export interface VeriSwarmConfig {
   apiUrl: string;
   apiKey: string;
@@ -117,6 +119,10 @@ export class VeriSwarmClient {
   async getFindings(agentId?: string): Promise<any> {
     const params = agentId ? `?agent_id=${agentId}` : "";
     return this.request(`/v1/suite/guard/findings${params}`);
+  }
+
+  async getSecretRules(): Promise<SecretManifest> {
+    return this.request("/v1/suite/guard/secret-rules");
   }
 
   // ── Passport (Identity) ───────────────────────────────────────────

@@ -74,3 +74,28 @@ export class SecretTripwire {
     return out;
   }
 }
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+export function loadVendoredManifest(): SecretManifest {
+  const path = fileURLToPath(new URL("./secret_rules_manifest.json", import.meta.url));
+  return JSON.parse(readFileSync(path, "utf-8")) as SecretManifest;
+}
+
+export interface EnsureOptions {
+  // injected for testability; defaults to the vendored copy only
+  fetchManifest?: () => Promise<SecretManifest>;
+}
+
+export async function ensureTripwire(opts: EnsureOptions = {}): Promise<SecretTripwire> {
+  const vendored = loadVendoredManifest();
+  if (!opts.fetchManifest) return new SecretTripwire(vendored);
+  try {
+    const fresh = await opts.fetchManifest();
+    if (fresh && Array.isArray(fresh.rules)) return new SecretTripwire(fresh);
+  } catch {
+    // fall through to vendored — offline baseline
+  }
+  return new SecretTripwire(vendored);
+}
