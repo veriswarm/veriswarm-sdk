@@ -9,6 +9,8 @@
   },
   "files": [
     "veriswarm_client.mjs",
+    "secret_tripwire.mjs",
+    "secret_rules_manifest.json",
     "README.md",
     "LICENSE"
   ],

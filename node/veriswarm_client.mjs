@@ -7,6 +7,8 @@
  *   const client = new VeriSwarmClient({ baseUrl: "https://api.veriswarm.ai", apiKey: "vsk_..." });
  *   const decision = await client.checkDecision({ agentId: "agt_123", actionType: "post_message" });
  */
+import { SecretTripwire, ensureTripwire } from "./secret_tripwire.mjs";
+
 export class VeriSwarmClient {
   /**
    * @param {object} options
@@ -15,7 +17,7 @@ export class VeriSwarmClient {
    * @param {string} [options.agentKey] - individual agent API key (vak_...)
    * @param {number} [options.timeoutMs=15000]
    */
-  constructor({ baseUrl, apiKey = null, agentKey = null, timeoutMs = 15000 }) {
+  constructor({ baseUrl, apiKey = null, agentKey = null, timeoutMs = 15000, secretsDetection = false }) {
     if (!baseUrl) throw new Error("baseUrl is required");
     if (!apiKey && !agentKey) throw new Error("either apiKey or agentKey is required");
     // Reject non-https baseUrl. The SDK ships x-api-key on every
@@ -42,6 +44,8 @@ export class VeriSwarmClient {
     this.apiKey = apiKey;
     this.agentKey = agentKey;
     this.timeoutMs = timeoutMs;
+    this.secretsDetection = secretsDetection === true;
+    this._tripwire = null;
   }
 
   // --- Decisions ---
@@ -144,6 +148,40 @@ export class VeriSwarmClient {
   /** Restore original PII values from Guard tokens. */
   async rehydratePii({ text, sessionId }) {
     return this.#request("/v1/suite/guard/pii/rehydrate", { method: "POST", body: { text, session_id: sessionId } });
+  }
+
+  /** Fetch the canonical client-tripwire secret-rules manifest. */
+  async getSecretRules() {
+    return this.#request("/v1/suite/guard/secret-rules", { method: "GET" });
+  }
+
+  // Returns text safe to emit: tokenized when online, locally redacted
+  // (fail-closed) when offline. No-op when secretsDetection is disabled.
+  // The tripwire is a client-side safety net for obvious provider-prefix
+  // secrets — never a substitute for the authoritative Guard scan.
+  async guardOutboundText(text, { agentId, sessionId } = {}) {
+    if (!this.secretsDetection || typeof text !== "string" || text.length === 0) {
+      return text;
+    }
+    if (!this._tripwire) {
+      this._tripwire = await ensureTripwire({
+        fetchManifest: () => this.getSecretRules(),
+      });
+    }
+    if (this._tripwire.scan(text).length === 0) return text;
+    try {
+      const result = await this.tokenizePii({ text, agentId, sessionId });
+      let guarded = result?.tokens_created > 0 ? result.tokenized_text : text;
+      // Belt-and-suspenders: if the API left any known-prefix span intact
+      // (the PII tokenizer is not a secret detector), redact it locally.
+      if (this._tripwire.scan(guarded).length > 0) {
+        guarded = this._tripwire.redactOffline(guarded);
+      }
+      return guarded;
+    } catch {
+      // Offline / API failure → fail closed with local redaction.
+      return this._tripwire.redactOffline(text);
+    }
   }
 
   /** Scan text for prompt injection patterns. */
