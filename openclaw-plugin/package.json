@@ -5,17 +5,28 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc && cp src/secret_rules_manifest.json dist/secret_rules_manifest.json",
+    "dev": "tsc --watch",
+    "test": "vitest run"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
-  "keywords": ["openclaw", "veriswarm", "guard", "pii", "trust", "security", "ai-agent"],
+  "keywords": [
+    "openclaw",
+    "veriswarm",
+    "guard",
+    "pii",
+    "trust",
+    "security",
+    "ai-agent"
+  ],
   "license": "MIT",
-  "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.4"
+    "typescript": "^5.4",
+    "vitest": "^4.1.7"
   },
   "peerDependencies": {
     "openclaw": ">=2026.2"
