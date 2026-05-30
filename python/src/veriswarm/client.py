@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as _q, urlencode as _qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from veriswarm.secret_tripwire import SecretTripwire, ensure_tripwire
 
 
 # Path-component encoder. quote(..., safe="") percent-encodes every
@@ -57,6 +59,8 @@ class VeriSwarmClient:
     base_url: str
     api_key: str
     timeout_seconds: int = 15
+    secrets_detection: bool = False
+    _tripwire: "SecretTripwire | None" = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -221,6 +225,45 @@ class VeriSwarmClient:
     def scan_injection(self, *, text: str) -> dict[str, Any]:
         """Scan text for prompt injection patterns."""
         return self._post("/v1/suite/guard/scan", {"text": text})
+
+    def get_secret_rules(self) -> dict[str, Any]:
+        """Fetch the client-tripwire secret-rules manifest."""
+        return self._request("/v1/suite/guard/secret-rules", method="GET")
+
+    def guard_outbound_text(
+        self,
+        text: str,
+        *,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+    ) -> str:
+        """Tokenize-when-online / redact-when-offline outbound text.
+
+        No-op unless ``secrets_detection`` is enabled. On a prefix hit the
+        authoritative tokenize endpoint is tried first; any failure (or a
+        surviving prefix span) falls back to a non-recoverable local
+        redaction (fail-closed).
+        """
+        if not self.secrets_detection or not isinstance(text, str) or not text:
+            return text
+        if self._tripwire is None:
+            self._tripwire = ensure_tripwire(fetch_manifest=self.get_secret_rules)
+        if not self._tripwire.scan(text):
+            return text
+        try:
+            result = self.tokenize_pii(
+                text=text, agent_id=agent_id, session_id=session_id
+            )
+            guarded = text
+            if isinstance(result, dict) and result.get("tokens_created", 0) > 0:
+                guarded = result.get("tokenized_text") or text
+            # Belt-and-suspenders: the PII tokenizer is not a secret detector,
+            # so re-scan and locally redact any provider-prefix span it left.
+            if self._tripwire.scan(guarded):
+                guarded = self._tripwire.redact_offline(guarded)
+            return guarded
+        except Exception:
+            return self._tripwire.redact_offline(text)
 
     # --- Credentials ---
 
