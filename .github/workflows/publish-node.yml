@@ -23,10 +23,14 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 22 ships npm 10.x.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
       - name: Verify package
         run: npm pack --dry-run
 
-      - name: Publish to npm
+      # No NODE_AUTH_TOKEN: npm exchanges the GitHub OIDC id-token for a
+      # short-lived registry credential via the package's trusted publisher.
+      - name: Publish to npm (OIDC trusted publishing)
         run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
