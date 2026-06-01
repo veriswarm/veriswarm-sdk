@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.veriswarm/veriswarm-mcp",
+  "description": "VeriSwarm MCP Server — Trust infrastructure for AI agents via Model Context Protocol",
+  "repository": {
+    "url": "https://github.com/veriswarm/veriswarm-sdk",
+    "source": "github"
+  },
+  "version": "0.3.1",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "veriswarm-mcp",
+      "version": "0.3.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

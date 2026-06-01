@@ -1,5 +1,7 @@
 # VeriSwarm MCP Server
 
+<!-- mcp-name: io.github.veriswarm/veriswarm-mcp -->
+
 Trust infrastructure for AI agents via Model Context Protocol.
 
 ## Quick Start

@@ -32,3 +32,39 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: mcp-server/dist/
+
+  publish-registry:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: mcp-server
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+
+      - name: Wait for PyPI to expose the new release
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsSL "https://pypi.org/pypi/veriswarm-mcp/0.3.1/json" >/dev/null 2>&1; then
+              echo "veriswarm-mcp 0.3.1 is live on PyPI."
+              exit 0
+            fi
+            echo "Attempt $i: 0.3.1 not on PyPI yet, retrying in 15s..."
+            sleep 15
+          done
+          echo "PyPI did not expose 0.3.1 in time." >&2
+          exit 1
+
+      - name: Login to MCP Registry (keyless OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
