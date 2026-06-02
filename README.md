@@ -1,5 +1,7 @@
 # VeriSwarm SDK & Integrations
 
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.veriswarm%2Fveriswarm--mcp-1f6feb)](https://github.com/mcp/veriswarm/veriswarm-mcp)
+
 Official client libraries, MCP server, and plugins for [VeriSwarm](https://veriswarm.ai) — trust infrastructure for AI agents.
 
 ## Packages
