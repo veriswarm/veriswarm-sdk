@@ -91,6 +91,8 @@ MIN_COMPLIANCE_PASS_RATIO = float(
 FAIL_ON_COMPLIANCE_WARN = (
     os.environ.get("VERISWARM_FAIL_ON_COMPLIANCE_WARN", "false").lower() == "true"
 )
+CI_SCAN_PATHS = os.environ.get("VERISWARM_CI_SCAN_PATHS", "")
+FAIL_ON_CI_EXFIL = os.environ.get("VERISWARM_FAIL_ON_CI_EXFIL", "true").lower() == "true"
 
 GITHUB_OUTPUT = os.environ.get("GITHUB_OUTPUT", "")
 GITHUB_STEP_SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
@@ -479,6 +481,163 @@ def check_compliance():
         print("::error::fail-on-compliance-warn=true and a warn was observed")
 
 
+# CI files the exfil scanner understands out of the box. Override via the
+# `ci-scan-paths` input. These globs intentionally target build/CI config
+# only — they never reach into .env / secret material (which the API caps
+# and which _is_sensitive_filename rejects as defence in depth).
+_DEFAULT_CI_GLOBS = (
+    ".github/workflows/*.yml",
+    ".github/workflows/*.yaml",
+    ".gitlab-ci.yml",
+    ".circleci/config.yml",
+    "Dockerfile",
+    "**/Dockerfile",
+    "**/*.Dockerfile",
+)
+_MAX_CI_FILES = 100
+_MAX_CI_FILE_BYTES = 200_000  # matches the API's CiScanFile content/diff cap
+
+
+def _git_diff_for(path: str, base_ref: str) -> str | None:
+    """Best-effort unified diff of `path` vs the PR base ref.
+
+    Layer 2 (exfil-pattern) checks only run on *added* lines, so they need
+    the diff. Returns None when the base ref isn't reachable (shallow
+    checkout, non-PR run) — Layer 1 config checks still run on full content.
+    The base ref is a GitHub-provided branch name, not attacker free-text,
+    but we still pass it as an argv element (never a shell string).
+    """
+    import subprocess
+
+    workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    for base in (f"origin/{base_ref}", base_ref):
+        try:
+            out = subprocess.run(
+                ["git", "diff", f"{base}...HEAD", "--", path],
+                capture_output=True, text=True, timeout=20, cwd=workspace,
+            )
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout[:_MAX_CI_FILE_BYTES]
+    return None
+
+
+def check_ci_exfil():
+    """Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk.
+
+    Threat model: pull_request_target privilege escalation, where a PR
+    edits CI config or a Dockerfile to add network egress next to a secret
+    reference and exfiltrate repo secrets. Layer 1 inspects full file
+    content; Layer 2 inspects the PR diff. The API returns the block
+    decision (derived from the tenant's GuardPolicy enforcement level);
+    we gate on that `blocked` field rather than re-deriving it here.
+    """
+    patterns = (
+        [p.strip() for p in CI_SCAN_PATHS.split(",") if p.strip()]
+        if CI_SCAN_PATHS
+        else list(_DEFAULT_CI_GLOBS)
+    )
+    workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    workspace_real = os.path.realpath(workspace)
+
+    matched: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for fp in glob.glob(os.path.join(workspace, pattern), recursive=True):
+            real = os.path.realpath(fp)
+            if real in seen or not os.path.isfile(real):
+                continue
+            seen.add(real)
+            matched.append(fp)
+
+    # Same containment + sensitive-denylist filter as the PII scan: a custom
+    # ci-scan-paths could otherwise traverse outside the repo or scoop a
+    # secret file. (Audit 2026-05-08 CRIT-SDK-6 / denylist.)
+    rejected = 0
+    files_to_scan: list[str] = []
+    for fp in matched:
+        if not _is_under_workspace(fp) or _is_sensitive_filename(fp):
+            rejected += 1
+            continue
+        files_to_scan.append(fp)
+    if rejected:
+        print(f"::warning::Skipped {rejected} CI file(s) (outside workspace or sensitive)")
+
+    if not files_to_scan:
+        print("::notice::No CI files found to scan (workflow YAML / Dockerfiles)")
+        return
+
+    base_ref = os.environ.get("GITHUB_BASE_REF", "")  # set on pull_request events
+
+    payload_files: list[dict] = []
+    for fp in files_to_scan[:_MAX_CI_FILES]:
+        rel = os.path.relpath(os.path.realpath(fp), workspace_real)
+        try:
+            with open(fp, encoding="utf-8", errors="replace") as f:
+                content = f.read()[:_MAX_CI_FILE_BYTES]
+        except Exception:
+            continue
+        entry: dict = {"path": rel, "content": content}
+        if base_ref:
+            diff = _git_diff_for(rel, base_ref)
+            if diff:
+                entry["diff"] = diff
+        payload_files.append(entry)
+
+    if not payload_files:
+        print("::notice::No readable CI files to scan")
+        return
+
+    print(f"Scanning {len(payload_files)} CI file(s) for secret-exfiltration risk...")
+    result = api_request(
+        "/v1/suite/guard/scan-ci", method="POST", body={"files": payload_files}
+    )
+    if "error" in result:
+        print(f"::warning::CI exfil scan failed: {result['error']}")
+        return
+
+    findings = result.get("findings", [])
+    highest = result.get("highest_severity", "none")
+    blocked = bool(result.get("blocked"))
+    enforcement = result.get("enforcement_level") or "default"
+
+    set_output("ci-exfil-blocked", str(blocked).lower())
+    set_output("ci-exfil-highest-severity", highest)
+    set_output("ci-exfil-findings", str(len(findings)))
+
+    for fnd in findings:
+        sev = fnd.get("severity", "info")
+        level = "error" if sev in ("critical", "high") else "warning"
+        loc = fnd.get("path", "?")
+        line = fnd.get("line")
+        file_anno = f" file={loc}" + (f",line={line}" if line else "")
+        # `evidence` can echo scanned file bytes (e.g. a secret reference)
+        # into public workflow logs — surface check + recommendation only.
+        print(
+            f"::{level}{file_anno}::CI exfil [{sev}] {fnd.get('check', '?')} "
+            f"— {str(fnd.get('recommendation', ''))[:160]}"
+        )
+
+    if findings:
+        emoji = "❌" if blocked else "⚠️"
+        summary_lines.append(
+            f"CI Exfil Scan: {emoji} **{len(findings)} finding(s)**, highest "
+            f"**{highest}** (enforcement: {enforcement}, blocked: {blocked})"
+        )
+    else:
+        summary_lines.append("CI Exfil Scan: ✅ Clean (no exfiltration patterns)")
+    print(f"  Findings: {len(findings)} | Highest: {highest} | Blocked: {blocked}")
+
+    if FAIL_ON_CI_EXFIL and blocked:
+        msg = (
+            f"CI secret-exfiltration scan blocked the build (highest severity: "
+            f"{highest}, enforcement: {enforcement})"
+        )
+        failures.append(msg)
+        print(f"::error::{msg}")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -495,7 +654,7 @@ def main():
     modes = (
         [MODE]
         if MODE != "all"
-        else ["score", "decision", "test", "scan", "owasp", "compliance"]
+        else ["score", "decision", "test", "scan", "owasp", "compliance", "ci-exfil"]
     )
 
     for mode in modes:
@@ -511,6 +670,8 @@ def main():
             check_owasp()
         elif mode == "compliance":
             check_compliance()
+        elif mode == "ci-exfil":
+            check_ci_exfil()
 
     # Write summary
     summary_md = "## 🐝 VeriSwarm Trust Check\n\n"

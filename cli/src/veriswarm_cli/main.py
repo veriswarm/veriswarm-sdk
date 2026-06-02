@@ -9,6 +9,7 @@ Usage:
     veriswarm events stream                 Stream events from stdin (one JSON per line)
     veriswarm test <agent_id>               Run security test suite against an agent
     veriswarm scan <text>                   Scan text for PII or prompt injection
+    veriswarm scan-ci <path>...             Scan CI YAML/Dockerfiles for secret exfiltration
     veriswarm reputation <agent_ref>        Look up cross-provider reputation
     veriswarm compliance <framework>        Generate a compliance report
 """
@@ -45,6 +46,7 @@ def main():
         "events": cmd_events,
         "test": cmd_test,
         "scan": cmd_scan,
+        "scan-ci": cmd_scan_ci,
         "reputation": cmd_reputation,
         "compliance": cmd_compliance,
     }
@@ -307,6 +309,123 @@ def cmd_scan(args: list[str]):
                 print(f"  Pattern: {p}")
         else:
             print("  \033[92mClean\033[0m")
+
+
+# ── scan-ci ──────────────────────────────────────────────────────────────
+
+_CI_MAX_FILE_BYTES = 200_000  # matches the API's CiScanFile content/diff cap
+_CI_SEVERITY_COLOR = {
+    "critical": "\033[91m",
+    "high": "\033[91m",
+    "medium": "\033[93m",
+    "low": "\033[90m",
+    "info": "\033[90m",
+}
+
+
+def _ci_git_diff(path: str, base_ref: str) -> str | None:
+    """Best-effort unified diff of `path` vs `base_ref` for Layer 2 checks."""
+    import subprocess
+
+    for base in (f"origin/{base_ref}", base_ref):
+        try:
+            out = subprocess.run(
+                ["git", "diff", f"{base}...HEAD", "--", path],
+                capture_output=True, text=True, timeout=20,
+            )
+        except Exception:
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout[:_CI_MAX_FILE_BYTES]
+    return None
+
+
+def cmd_scan_ci(args: list[str]):
+    """Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk.
+
+    Each path's full content drives Layer 1 vulnerable-config checks. Pass
+    --base <ref> to also compute a git diff per file for Layer 2
+    exfil-pattern checks (network egress next to a secret/env reference in
+    added lines). Exits 1 when the API returns blocked=true.
+    """
+    base_ref = None
+    if "--base" in args:
+        idx = args.index("--base")
+        if idx + 1 < len(args):
+            base_ref = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    paths = [a for a in args if not a.startswith("--")]
+    if not paths:
+        print("Usage: veriswarm scan-ci <path>... [--base <ref>]")
+        print("  e.g. veriswarm scan-ci .github/workflows/ci.yml Dockerfile --base main")
+        sys.exit(1)
+
+    # Expand any literal globs the shell didn't (e.g. quoted patterns).
+    import glob as _glob
+
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        hits = _glob.glob(p, recursive=True) or [p]
+        for h in hits:
+            real = os.path.realpath(h)
+            if real not in seen and os.path.isfile(real):
+                seen.add(real)
+                expanded.append(h)
+
+    files: list[dict] = []
+    for p in expanded[:200]:  # API caps at 200 files
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                content = f.read()[:_CI_MAX_FILE_BYTES]
+        except OSError as exc:
+            print(f"  \033[93mSkipping {p}: {exc}\033[0m", file=sys.stderr)
+            continue
+        entry: dict = {"path": p, "content": content}
+        if base_ref:
+            diff = _ci_git_diff(p, base_ref)
+            if diff:
+                entry["diff"] = diff
+        files.append(entry)
+
+    if not files:
+        print("No readable files to scan.")
+        sys.exit(1)
+
+    print(f"Scanning {len(files)} file(s) for secret-exfiltration risk...")
+    result = api_request("/v1/suite/guard/scan-ci", method="POST", body={"files": files})
+
+    findings = result.get("findings", [])
+    highest = result.get("highest_severity", "none")
+    blocked = bool(result.get("blocked"))
+    enforcement = result.get("enforcement_level") or "default"
+    reset = "\033[0m"
+
+    if findings:
+        print()
+        for fnd in findings:
+            sev = fnd.get("severity", "info")
+            color = _CI_SEVERITY_COLOR.get(sev, "")
+            loc = fnd.get("path", "?")
+            line = fnd.get("line")
+            where = f"{loc}:{line}" if line else loc
+            print(f"  {color}[{sev.upper()}]{reset} {fnd.get('check', '?')}  ({fnd.get('layer', '?')})  {where}")
+            if fnd.get("recommendation"):
+                print(f"      → {fnd['recommendation']}")
+    else:
+        print(f"  \033[92mClean — no exfiltration patterns detected\033[0m")
+
+    hi_color = _CI_SEVERITY_COLOR.get(highest, "")
+    block_color = "\033[91m" if blocked else "\033[92m"
+    print()
+    print(f"Findings:    {len(findings)}")
+    print(f"Highest:     {hi_color}{highest}{reset}")
+    print(f"Enforcement: {enforcement}")
+    print(f"Blocked:     {block_color}{str(blocked).upper()}{reset}")
+
+    if blocked:
+        sys.exit(1)
 
 
 # ── reputation ───────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ inputs:
     description: "Agent ID to check (required for score/test/decision)"
     required: false
   mode:
-    description: "Check mode: score, test, scan, decision, owasp, compliance, or all"
+    description: "Check mode: score, test, scan, decision, owasp, compliance, ci-exfil, or all"
     required: false
     default: "all"
   frameworks:
@@ -60,6 +60,14 @@ inputs:
     description: "Minimum OWASP Agentic Top 10 coverage score to pass (0.0-1.0). 0 = no enforcement."
     required: false
     default: "0"
+  ci-scan-paths:
+    description: "Comma-separated globs for CI files to scan for secret exfiltration in 'ci-exfil' mode. Empty = built-in defaults (.github/workflows/*.yml, Dockerfile, .gitlab-ci.yml, .circleci/config.yml)."
+    required: false
+    default: ""
+  fail-on-ci-exfil:
+    description: "Fail the check when the CI exfil scan returns blocked=true (decision is made server-side from your GuardPolicy enforcement level)."
+    required: false
+    default: "true"
 
 outputs:
   trust-score:
@@ -82,6 +90,12 @@ outputs:
     description: "Worst per-framework pass ratio observed in 'compliance' mode (0.0-1.0)."
   compliance-frameworks-checked:
     description: "Comma-separated framework slugs that were actually evaluated."
+  ci-exfil-blocked:
+    description: "Whether the CI exfil scan blocked the build ('true'/'false')."
+  ci-exfil-highest-severity:
+    description: "Highest severity finding from the CI exfil scan (critical/high/medium/low/info/none)."
+  ci-exfil-findings:
+    description: "Number of CI exfil findings detected."
   summary:
     description: "Human-readable summary of all checks"
 
@@ -120,6 +134,8 @@ runs:
         VERISWARM_FRAMEWORKS: ${{ inputs.frameworks }}
         VERISWARM_MIN_COMPLIANCE_PASS_RATIO: ${{ inputs.min-compliance-pass-ratio }}
         VERISWARM_FAIL_ON_COMPLIANCE_WARN: ${{ inputs.fail-on-compliance-warn }}
+        VERISWARM_CI_SCAN_PATHS: ${{ inputs.ci-scan-paths }}
+        VERISWARM_FAIL_ON_CI_EXFIL: ${{ inputs.fail-on-ci-exfil }}
       # Quote github.action_path defence-in-depth against shell
       # word-splitting if the path ever contains spaces. (Audit
       # 2026-05-08 HIGH-SDK-8.)
