@@ -384,6 +384,7 @@ Use the `veriswarm` package for trust, Guard, Passport, Vault, A2A, approvals, a
 | `get_context_gaps(days=)` | Detect knowledge-gap agents |
 | **Guard Extensions** | |
 | `scan_mcp_tools(tools)` | Pre-deploy MCP tool scanner (6 checks) |
+| `scan_ci(files)` | CI/CD secret-exfiltration scanner (workflow YAML + Dockerfiles) |
 | `verify_response(prompt, response)` | Cross-model verification (ASI06 defense) |
 | **A2A Transport** | |
 | `provision_a2a_keys(agent_id)` | Provision Ed25519 keys for inter-agent signing |

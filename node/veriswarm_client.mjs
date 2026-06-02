@@ -725,6 +725,21 @@ export class VeriSwarmClient {
   }
 
   /**
+   * Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk.
+   * Each file is `{ path, content?, diff? }`: pass `content` (full file at head)
+   * for Layer 1 vulnerable-config checks and `diff` (unified diff hunks) for
+   * Layer 2 exfil-pattern checks. Returns a report with `findings`,
+   * `highestSeverity`, `blocked` (from the tenant's GuardPolicy enforcement
+   * level), and `enforcementLevel`.
+   */
+  async scanCi(files) {
+    return this.#request("/v1/suite/guard/scan-ci", {
+      method: "POST",
+      body: { files },
+    });
+  }
+
+  /**
    * Cross-model verification — check a response with multiple LLMs.
    * Defends against memory poisoning (OWASP ASI06).
    */

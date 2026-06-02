@@ -192,6 +192,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     _MAX_PROMPT_BYTES = 8 * 1024
     _MAX_RESPONSE_BYTES = 8 * 1024
     _MAX_CONTENT_BYTES = 32 * 1024
+    # CI payloads carry full files + diffs, so the cap is larger than tools_json
+    # but still bounded to protect this process and the customer's API quota.
+    _MAX_FILES_JSON_BYTES = 256 * 1024
 
     @server.tool()
     async def scan_mcp_tools(tools_json: str) -> str:
@@ -212,6 +215,32 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             return json.dumps(result, indent=2)
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON in tools_json: {exc}"})
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+
+    @server.tool()
+    async def scan_ci(files_json: str) -> str:
+        """Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk.
+
+        files_json: JSON string of an array of file objects, each
+        {"path": str, "content"?: str, "diff"?: str}. Pass "content" (full file
+        at head) for Layer 1 vulnerable-config checks and "diff" (unified diff
+        hunks) for Layer 2 exfil-pattern checks. Returns findings plus a
+        "blocked" decision from the tenant's GuardPolicy enforcement level.
+        """
+        if len(files_json) > _MAX_FILES_JSON_BYTES:
+            return json.dumps({
+                "error": f"files_json exceeds {_MAX_FILES_JSON_BYTES} byte cap",
+                "received_bytes": len(files_json),
+            })
+        try:
+            files = json.loads(files_json)
+            result = client.post("/v1/suite/guard/scan-ci", json={"files": files})
+            return json.dumps(result, indent=2)
+        except json.JSONDecodeError as exc:
+            return json.dumps({"error": f"Invalid JSON in files_json: {exc}"})
         except httpx.HTTPStatusError as exc:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:

@@ -788,6 +788,18 @@ class VeriSwarmClient:
         """
         return self._post("/v1/suite/guard/scan-mcp", body={"tools": tools})
 
+    def scan_ci(self, files: list[dict[str, Any]]) -> dict[str, Any]:
+        """Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk.
+
+        Each file is ``{"path": str, "content"?: str, "diff"?: str}``: pass
+        ``content`` (full file at head) for Layer 1 vulnerable-config checks and
+        ``diff`` (unified diff hunks) for Layer 2 exfil-pattern checks. Returns a
+        structured report with ``findings``, ``highest_severity``, ``blocked``
+        (derived from the tenant's GuardPolicy enforcement level), and
+        ``enforcement_level``.
+        """
+        return self._post("/v1/suite/guard/scan-ci", body={"files": files})
+
     def verify_response(
         self,
         *,
