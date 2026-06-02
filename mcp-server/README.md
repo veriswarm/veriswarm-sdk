@@ -2,6 +2,10 @@
 
 <!-- mcp-name: io.github.veriswarm/veriswarm-mcp -->
 
+[![PyPI version](https://img.shields.io/pypi/v/veriswarm-mcp)](https://pypi.org/project/veriswarm-mcp/)
+[![Python versions](https://img.shields.io/pypi/pyversions/veriswarm-mcp)](https://pypi.org/project/veriswarm-mcp/)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.veriswarm%2Fveriswarm--mcp-1f6feb)](https://github.com/mcp/veriswarm/veriswarm-mcp)
+
 Trust infrastructure for AI agents via Model Context Protocol.
 
 ## Quick Start

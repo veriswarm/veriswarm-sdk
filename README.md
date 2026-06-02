@@ -1,5 +1,8 @@
 # VeriSwarm SDK & Integrations
 
+[![pip veriswarm](https://img.shields.io/pypi/v/veriswarm?label=pip%20veriswarm)](https://pypi.org/project/veriswarm/)
+[![pip veriswarm-mcp](https://img.shields.io/pypi/v/veriswarm-mcp?label=pip%20veriswarm-mcp)](https://pypi.org/project/veriswarm-mcp/)
+[![npm @veriswarm/sdk](https://img.shields.io/npm/v/@veriswarm/sdk?label=npm%20%40veriswarm%2Fsdk)](https://www.npmjs.com/package/@veriswarm/sdk)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.veriswarm%2Fveriswarm--mcp-1f6feb)](https://github.com/mcp/veriswarm/veriswarm-mcp)
 
 Official client libraries, MCP server, and plugins for [VeriSwarm](https://veriswarm.ai) — trust infrastructure for AI agents.
