@@ -740,6 +740,37 @@ export class VeriSwarmClient {
   }
 
   /**
+   * Score one conversation turn for multi-turn exfiltration risk (Guard Session Sentry).
+   * Tracks cumulative session-level risk across turns; returns a score, severity, and
+   * optional block decision based on the tenant's GuardPolicy enforcement level.
+   *
+   * @param {string} sessionId   - Conversation session id (max 64 chars)
+   * @param {number} turnIndex   - Zero-based turn counter within the session
+   * @param {object} [opts]
+   * @param {string} [opts.userText=""]     - The user's message text for this turn
+   * @param {string} [opts.agentText=""]    - The agent's reply text for this turn
+   * @param {string} [opts.systemPrompt=""] - System prompt (include on first turn or when it changes)
+   * @param {string} [opts.agentId]         - Agent id (`agt_*`); omit when not applicable
+   * @param {string} [opts.actorId]         - Human actor / user id; omit when not applicable
+   * @returns {Promise<{session_id, enabled, session_score, turn_value, highest_severity,
+   *   contributions, enforcement_level, block_threshold, blocked, version}>}
+   *   When the feature flag is off, returns the dormant shape:
+   *   `{session_id, enabled: false, blocked: false, session_score: 0.0, highest_severity: "info", contributions: []}`.
+   */
+  async scanSessionTurn(sessionId, turnIndex, { userText = "", agentText = "", systemPrompt = "", agentId, actorId } = {}) {
+    const body = {
+      session_id: sessionId,
+      turn_index: turnIndex,
+      user_text: userText,
+      agent_text: agentText,
+      system_prompt: systemPrompt,
+    };
+    if (agentId !== undefined) body.agent_id = agentId;
+    if (actorId !== undefined) body.actor_id = actorId;
+    return this.#request("/v1/suite/guard/scan-session", { method: "POST", body });
+  }
+
+  /**
    * Cross-model verification — check a response with multiple LLMs.
    * Defends against memory poisoning (OWASP ASI06).
    */

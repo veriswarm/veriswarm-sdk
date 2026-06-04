@@ -328,6 +328,7 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | **Guard Extensions** | |
 | `scanMcpTools(tools)` | Pre-deploy MCP tool scanner (6 checks) |
 | `scanCi(files)` | CI/CD secret-exfiltration scanner (workflow YAML + Dockerfiles) |
+| `scanSessionTurn(sessionId, turnIndex, opts?)` | Multi-turn exfiltration risk scoring (Guard Session Sentry) |
 | `verifyResponse({ prompt, response })` | Cross-model verification (ASI06 defense) |
 | **A2A Transport** | |
 | `provisionA2aKeys(agentId)` | Provision Ed25519 keys for inter-agent signing |
