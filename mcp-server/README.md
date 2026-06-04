@@ -78,7 +78,7 @@ If you prefer manual configuration:
 | `report_interaction` | Report an agent-to-agent interaction |
 | `report_incident` | Report a security incident for Guard review |
 
-### Guard Security (13)
+### Guard Security (12)
 | Tool | Description |
 |---|---|
 | `scan_tool` | Request a security scan for a tool or MCP server |
