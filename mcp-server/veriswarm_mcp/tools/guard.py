@@ -7,6 +7,15 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import bounded_string, safe_error_response, safe_optional_id
+
+# Maximum character budgets for Session Sentry turn text fields.
+# Large prompts are the vector; cap generously enough for real usage
+# while blocking quota-exhaustion via oversized LLM-controlled inputs.
+# (Audit 2026-05-08 HIGH-SDK-17.)
+_MAX_SESSION_ID_CHARS = 64
+_MAX_TURN_TEXT_CHARS = 32_768   # 32 KB — covers long agent replies
+_MAX_SYSTEM_PROMPT_CHARS = 16_384  # 16 KB
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -184,3 +193,90 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+
+    @server.tool()
+    async def guard_scan_session(
+        session_id: str,
+        turn_index: int,
+        user_text: str = "",
+        agent_text: str = "",
+        system_prompt: str = "",
+        agent_id: str = "",
+        actor_id: str = "",
+    ) -> str:
+        """Score one conversation turn for multi-turn exfiltration risk (Session Sentry).
+
+        Call this once per turn — after the agent has generated its reply and
+        before you send it to the user. Pass a stable ``session_id`` for the
+        entire conversation and a monotonically increasing ``turn_index`` (0, 1,
+        2 …). The scorer accumulates canary-token egress and system-prompt
+        extraction signals across turns with time decay.
+
+        Key response fields:
+        - ``blocked`` (bool) — if True, suppress the reply and halt the turn;
+          the enforcement_level and block_threshold explain why.
+        - ``session_score`` — cumulative exfiltration risk for the session
+          (0.0–1.0).
+        - ``turn_value`` — this turn's raw contribution before decay.
+        - ``highest_severity`` — "none" | "low" | "medium" | "high" | "critical".
+        - ``contributions`` — list of scored signals (type, value, weight).
+        - ``enabled`` — False while the tenant is on the free tier (dormant);
+          blocked will always be False in that state.
+
+        session_id: stable identifier for this conversation (≤64 chars,
+            alphanumeric / hyphens / underscores). Use the same value for
+            every turn in the same conversation.
+        turn_index: zero-based turn counter; must increase monotonically within
+            a session. The scorer uses ordering to apply time decay.
+        user_text: the user's message for this turn (optional but improves signal).
+        agent_text: the agent's reply for this turn — primary exfil surface;
+            always pass this.
+        system_prompt: the system prompt active for this turn (optional; used to
+            detect system-prompt extraction attempts in agent_text).
+        agent_id: optional VeriSwarm agent ID (`agt_*`) to associate the scan
+            with a registered agent's trust record.
+        actor_id: optional caller / user identifier for audit purposes.
+        """
+        # --- input validation ---
+        try:
+            bounded_string(session_id, field_name="session_id", max_chars=_MAX_SESSION_ID_CHARS)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+        try:
+            turn_index = int(turn_index)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "turn_index must be a non-negative integer"})
+        if turn_index < 0:
+            return json.dumps({"error": "turn_index must be >= 0"})
+
+        try:
+            user_text = bounded_string(user_text, field_name="user_text", max_chars=_MAX_TURN_TEXT_CHARS)
+            agent_text = bounded_string(agent_text, field_name="agent_text", max_chars=_MAX_TURN_TEXT_CHARS)
+            system_prompt = bounded_string(system_prompt, field_name="system_prompt", max_chars=_MAX_SYSTEM_PROMPT_CHARS)
+        except Exception as exc:
+            return json.dumps({"error": str(exc)})
+
+        agent_id_clean = safe_optional_id(agent_id or None, "agent_id")
+        actor_id_clean = safe_optional_id(actor_id or None, "actor_id")
+
+        # --- API call ---
+        body: dict = {
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "user_text": user_text,
+            "agent_text": agent_text,
+            "system_prompt": system_prompt,
+        }
+        if agent_id_clean:
+            body["agent_id"] = agent_id_clean
+        if actor_id_clean:
+            body["actor_id"] = actor_id_clean
+
+        try:
+            result = client.post("/v1/suite/guard/scan-session", json=body)
+            return json.dumps(result, indent=2)
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return safe_error_response(exc, context="guard_scan_session")

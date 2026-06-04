@@ -216,3 +216,125 @@ class TestEventTools:
             # invocable from here without a full MCP runtime.
             # We verify the module imports cleanly and register doesn't raise.
             assert True
+
+
+# ---------------------------------------------------------------------------
+# guard_scan_session validation tests (no HTTP)
+# ---------------------------------------------------------------------------
+
+class TestGuardScanSessionValidation:
+    """Validate input-bounding logic for guard_scan_session without real HTTP."""
+
+    def _make_client(self):
+        from veriswarm_mcp.client import VeriSwarmAPIClient
+        return VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+
+    def _register_and_get_tool(self, client):
+        """Register guard tools against a mock server and return the inner
+        guard_scan_session coroutine by inspecting the mock's call args."""
+        import asyncio
+        from veriswarm_mcp.tools.guard import register
+
+        captured_fn = {}
+
+        class _CaptureTool:
+            """Fake FastMCP that records the decorated functions."""
+            def tool(self):
+                def decorator(fn):
+                    captured_fn[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        register(_CaptureTool(), client)
+        return captured_fn["guard_scan_session"]
+
+    def test_session_id_too_long_returns_error(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tool = self._register_and_get_tool(client)
+
+        result = asyncio.run(tool(session_id="x" * 65, turn_index=0))
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert "session_id" in parsed["error"]
+
+    def test_negative_turn_index_returns_error(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tool = self._register_and_get_tool(client)
+
+        result = asyncio.run(tool(session_id="sess-001", turn_index=-1))
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert "turn_index" in parsed["error"]
+
+    def test_non_integer_turn_index_returns_error(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tool = self._register_and_get_tool(client)
+
+        result = asyncio.run(tool(session_id="sess-001", turn_index="bad"))
+        parsed = _json.loads(result)
+        assert "error" in parsed
+
+    def test_oversized_agent_text_returns_error(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tool = self._register_and_get_tool(client)
+
+        big = "a" * (32_768 + 1)
+        result = asyncio.run(tool(session_id="sess-001", turn_index=0, agent_text=big))
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert "agent_text" in parsed["error"]
+
+    def test_valid_inputs_call_post(self):
+        """Valid inputs should hit client.post; no validation error returned."""
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        posted = {}
+
+        def mock_post(path, json=None, **kwargs):
+            posted["path"] = path
+            posted["body"] = json
+            return {
+                "session_id": "sess-001",
+                "enabled": False,
+                "session_score": 0.0,
+                "turn_value": 0.0,
+                "highest_severity": "none",
+                "contributions": [],
+                "enforcement_level": "log",
+                "block_threshold": 0.8,
+                "blocked": False,
+                "version": "1.0",
+            }
+
+        with patch.object(client, "post", side_effect=mock_post):
+            tool = self._register_and_get_tool(client)
+            result = asyncio.run(tool(
+                session_id="sess-001",
+                turn_index=0,
+                user_text="Hello",
+                agent_text="Hi there",
+                system_prompt="You are a helpful assistant.",
+                agent_id="agt_abc123",
+            ))
+
+        parsed = _json.loads(result)
+        assert "error" not in parsed
+        assert posted["path"] == "/v1/suite/guard/scan-session"
+        assert posted["body"]["session_id"] == "sess-001"
+        assert posted["body"]["turn_index"] == 0
+        assert posted["body"]["agent_id"] == "agt_abc123"
+        assert "blocked" in parsed

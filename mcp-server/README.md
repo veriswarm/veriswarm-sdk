@@ -56,7 +56,7 @@ If you prefer manual configuration:
 | `VERISWARM_API_KEY` | Yes (or `AGENT_KEY`) | Platform API key for workspace operations |
 | `VERISWARM_AGENT_KEY` | Yes (or `API_KEY`) | Agent-scoped key for self-reporting tools |
 
-## Tools (67 total)
+## Tools (68 total)
 
 > **Auth note:** Tools marked with (session) require `x-account-access-token` and are not available with API key only. All other tools work with `x-api-key`.
 
@@ -78,7 +78,7 @@ If you prefer manual configuration:
 | `report_interaction` | Report an agent-to-agent interaction |
 | `report_incident` | Report a security incident for Guard review |
 
-### Guard Security (12)
+### Guard Security (13)
 | Tool | Description |
 |---|---|
 | `scan_tool` | Request a security scan for a tool or MCP server |
@@ -92,6 +92,7 @@ If you prefer manual configuration:
 | `rehydrate_pii` | Restore original PII values from VeriSwarm tokens |
 | `get_pii_session` | Get details of a PII tokenization session |
 | `revoke_pii_session` | Revoke a PII session, deleting all stored tokens |
+| `guard_scan_session` | Score one conversation turn for multi-turn exfiltration risk (Session Sentry); check `blocked` before sending the reply |
 
 ### Passport Identity (4)
 | Tool | Description |
