@@ -93,6 +93,8 @@ Session Sentry detects data-extraction patterns that only become visible across 
 
 **Toggle:** `sessionScan: false` disables the scan entirely. No API calls are made.
 
+**Counter memory cap:** The per-conversation turn counter map is capped at 10,000 entries. When the cap is reached the oldest-inserted conversation id is evicted (FIFO); if that conversation is still active its turn counter resets to 0 on the next message, which the server treats safely (under-counting, not over-blocking).
+
 ## Development
 
 ```bash

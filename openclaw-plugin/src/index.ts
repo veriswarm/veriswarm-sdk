@@ -106,6 +106,15 @@ interface PluginState {
   tripwire: SecretTripwire | null;
 }
 
+// Maximum number of conversation ids tracked in sessionTurnCounters.
+// Map preserves insertion order; when the cap is reached the oldest-inserted
+// entry is evicted (FIFO, not LRU). Stale conversations are the ones most
+// likely to be evicted; the only risk is that a still-live old conversation
+// gets its counter reset to 0. The server stores turn state server-side
+// (keyed by turn_index overwrite), so eviction causes at-worst under-counting
+// in the edge — the fail-safe direction.
+export const MAX_SESSION_COUNTERS = 10_000;
+
 // NOTE: Module-level state is shared within a single OpenClaw gateway process.
 // This is safe for single-agent deployments. For multi-agent OpenClaw instances,
 // each agent should run its own gateway process (separate Docker container).
@@ -488,6 +497,14 @@ export const pluginEntry: PluginEntry = {
       // counter so the API can detect multi-turn patterns. We read, use, then
       // write-back the incremented value (turn_index is the index of THIS turn).
       const turnIndex = state.sessionTurnCounters.get(sessionId) ?? 0;
+      // FIFO eviction: if this is a new key and the map is at the cap, delete
+      // the oldest-inserted entry before inserting. Map preserves insertion
+      // order, so .keys().next().value is always the oldest key.
+      if (!state.sessionTurnCounters.has(sessionId) &&
+          state.sessionTurnCounters.size >= MAX_SESSION_COUNTERS) {
+        const oldest = state.sessionTurnCounters.keys().next().value;
+        if (oldest !== undefined) state.sessionTurnCounters.delete(oldest);
+      }
       state.sessionTurnCounters.set(sessionId, turnIndex + 1);
 
       // ── Session Sentry scan (FAIL-OPEN) ─────────────────────────────
@@ -523,12 +540,18 @@ export const pluginEntry: PluginEntry = {
             // before_tool_call. The session has triggered multi-turn exfiltration
             // detection — we do NOT log an error; we log an audit event and
             // return the refusal.
-            await logEvent("session.sentry.blocked", {
+            //
+            // Fire-and-forget: do NOT await inside the try-block. A synchronous
+            // throw from logEvent (e.g. future refactor breaks its internals)
+            // would propagate to the outer catch and FAIL-OPEN past a legitimate
+            // block. The .catch(() => {}) mirrors logEvent's own internal catch —
+            // audit loss is acceptable; allowing a blocked message is not.
+            void logEvent("session.sentry.blocked", {
               session_id: sessionId,
               turn_index: turnIndex,
               session_score: scanResult.session_score,
               highest_severity: scanResult.highest_severity,
-            });
+            }).catch(() => {});
             return {
               content:
                 "Message blocked by VeriSwarm Guard session protection: " +

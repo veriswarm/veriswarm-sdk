@@ -7,7 +7,7 @@
  * - drive the message_sending hook directly
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { pluginEntry } from "../src/index.js";
+import { pluginEntry, MAX_SESSION_COUNTERS } from "../src/index.js";
 
 // Captures hooks the plugin registers so we can invoke them directly.
 function makeApi() {
@@ -268,6 +268,75 @@ describe("message_sending — Session Sentry", () => {
 
     expect(capturedBodies[0].session_id).toHaveLength(64);
     expect(capturedBodies[0].session_id).toBe(longId.slice(0, 64));
+  });
+
+  // ── Session counter FIFO cap ───────────────────────────────────────
+
+  it("caps sessionTurnCounters at MAX_SESSION_COUNTERS by evicting the oldest entry", async () => {
+    // Drive the hook synchronously via a resolved-promise mock so 10k iterations
+    // don't accumulate real async overhead.
+    fetchSpy = mockFetch((_url) => scanResponse(false));
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    // Insert MAX_SESSION_COUNTERS + 1 distinct conversation ids.
+    // The first insertion (conv-0) should be evicted when the (MAX+1)th is added.
+    const promises: Promise<any>[] = [];
+    for (let i = 0; i < MAX_SESSION_COUNTERS + 1; i++) {
+      promises.push(
+        hooks["message_sending"]({
+          content: "msg",
+          conversation_id: `cap-evict-${i}`,
+        })
+      );
+    }
+    await Promise.all(promises);
+
+    // Verify cap by re-sending for the first conversation id.
+    // If it was evicted, its counter resets to 0 (fresh entry).
+    const capturedBodies: any[] = [];
+    fetchSpy.mockRestore();
+    fetchSpy = mockFetch((url, init) => {
+      if (url.includes("scan-session")) {
+        capturedBodies.push(JSON.parse(String(init.body)));
+      }
+      return scanResponse(false);
+    });
+
+    await hooks["message_sending"]({
+      content: "msg",
+      conversation_id: "cap-evict-0",
+    });
+
+    // conv-0 was evicted — turn_index restarts at 0, not at MAX_SESSION_COUNTERS.
+    expect(capturedBodies[0].turn_index).toBe(0);
+  }, 30_000);
+
+  // ── Blocked path: logEvent rejection must not fail-open ───────────
+
+  it("still returns the block refusal when logEvent (audit) rejects", async () => {
+    // Mock scan to return blocked:true.
+    fetchSpy = mockFetch((url, _init) => {
+      if (url.includes("scan-session")) {
+        return scanResponse(true, { highest_severity: "high" });
+      }
+      // Mock the logEvent ingestEvent call to reject.
+      return Promise.reject(new Error("audit endpoint down")) as any;
+    });
+
+    const { api, hooks } = makeApi();
+    // auditEnabled:true so logEvent actually attempts to call ingestEvent.
+    pluginEntry.register(api as any, { ...BASE_CONFIG, auditEnabled: true });
+
+    const result = await hooks["message_sending"]({
+      content: "sensitive data the agent is trying to send",
+      conversation_id: "conv-audit-reject",
+    });
+
+    // The block refusal must still be returned even though audit logging failed.
+    expect(result.content).toContain("blocked by VeriSwarm Guard session protection");
+    expect(result.content).not.toContain("sensitive data");
   });
 
   // ── Request payload shape ──────────────────────────────────────────
