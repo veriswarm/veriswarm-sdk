@@ -800,6 +800,41 @@ class VeriSwarmClient:
         """
         return self._post("/v1/suite/guard/scan-ci", body={"files": files})
 
+    def scan_session_turn(
+        self,
+        session_id: str,
+        turn_index: int,
+        *,
+        user_text: str = "",
+        agent_text: str = "",
+        system_prompt: str = "",
+        agent_id: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Score one conversation turn for multi-turn exfiltration risk (Guard Session Sentry).
+
+        Sends the turn to POST /v1/suite/guard/scan-session. Returns the scan
+        report; check ``blocked`` to decide whether to suppress the agent's
+        response, and ``enabled`` to see whether Session Sentry is active for
+        your platform/plan.
+
+        When the platform flag is off the response shape is
+        ``{session_id, enabled: false, blocked: false, session_score: 0.0,
+        highest_severity: "info", contributions: []}``.
+        """
+        body: dict[str, Any] = {
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "user_text": user_text,
+            "agent_text": agent_text,
+            "system_prompt": system_prompt,
+        }
+        if agent_id is not None:
+            body["agent_id"] = agent_id
+        if actor_id is not None:
+            body["actor_id"] = actor_id
+        return self._post("/v1/suite/guard/scan-session", body=body)
+
     def verify_response(
         self,
         *,
