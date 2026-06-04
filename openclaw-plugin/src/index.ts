@@ -94,9 +94,14 @@ interface PluginState {
   policyEnabled: boolean;
   injectionScan: boolean;
   auditEnabled: boolean;
+  sessionScan: boolean;
   blockedTools: Set<string>;
   allowedTools: Set<string> | null;
   piiSessions: Map<string, string>; // toolName -> sessionId
+  // Per-conversation outbound-turn counters for Session Sentry.
+  // Key: conversation/session id (or "default" when the event carries none).
+  // Value: next turn_index to use (pre-increment on each send).
+  sessionTurnCounters: Map<string, number>;
   secretsDetection: boolean;
   tripwire: SecretTripwire | null;
 }
@@ -110,9 +115,11 @@ const state: PluginState = {
   policyEnabled: true,
   injectionScan: true,
   auditEnabled: true,
+  sessionScan: true,
   blockedTools: new Set(),
   allowedTools: null,
   piiSessions: new Map(),
+  sessionTurnCounters: new Map(),
   secretsDetection: false,
   tripwire: null,
 };
@@ -208,6 +215,18 @@ export const pluginEntry: PluginEntry = {
           "(fail-closed) when offline. Default off.",
         default: false,
       },
+      sessionScan: {
+        type: "boolean",
+        description:
+          "Enable Session Sentry multi-turn exfiltration detection. " +
+          "Each outbound message is submitted to /v1/suite/guard/scan-session; " +
+          "if the conversation-level risk score triggers a block the message is " +
+          "replaced with a Guard refusal. Fail-open: any API error is logged and " +
+          "the message is sent unmodified. Safe to leave on while the platform " +
+          "flag is dormant — the server returns {enabled:false, blocked:false}. " +
+          "Default: true.",
+        default: true,
+      },
     },
     required: ["apiKey"],
     additionalProperties: false,
@@ -240,6 +259,11 @@ export const pluginEntry: PluginEntry = {
     state.policyEnabled = cfg.policyEnabled ?? true;
     state.injectionScan = cfg.injectionScan ?? true;
     state.auditEnabled = cfg.auditEnabled ?? true;
+    state.sessionScan = cfg.sessionScan ?? true;
+
+    // Reset per-conversation turn counters on each register call
+    // (covers hot-reload / test re-use of the module-level state).
+    state.sessionTurnCounters = new Map();
 
     state.secretsDetection = cfg.secretsDetection === true;
     if (state.secretsDetection) {
@@ -269,7 +293,8 @@ export const pluginEntry: PluginEntry = {
 
     console.log(
       `[VeriSwarm] Guard active — PII: ${state.piiEnabled}, Policy: ${state.policyEnabled}, ` +
-        `Injection scan: ${state.injectionScan}, Audit: ${state.auditEnabled}`
+        `Injection scan: ${state.injectionScan}, Audit: ${state.auditEnabled}, ` +
+        `Session Sentry: ${state.sessionScan}`
     );
 
     // ── HOOKS: Transparent Protection ─────────────────────────────────
@@ -418,27 +443,127 @@ export const pluginEntry: PluginEntry = {
       return { output };
     });
 
-    // Hook: Before message sending — PII tokenize outbound to LLM
+    // Hook: Before message sending — PII tokenize outbound to LLM + Session Sentry
+    //
+    // The message_sending event fires for each outbound agent message. OpenClaw
+    // exposes the content as event.content or event.text. The conversation
+    // identity is carried in event.conversation_id / event.conversationId /
+    // event.session_id (in priority order). If none of these are present we fall
+    // back to the literal key "default" and note the limitation below.
+    //
+    // Content mutation: the hook returns { content: newText } to replace the
+    // outbound message, matching exactly how the PII tokenization branch works
+    // above. For a block we substitute a fixed refusal string rather than the
+    // tokenized text — same return shape, different content.
     api.on("message_sending", async (event: any) => {
-      if (!state.client || !state.piiEnabled) return {};
+      if (!state.client) return {};
       const content = event.content || event.text || "";
-      if (typeof content !== "string" || content.length < 4) return {};
+      if (typeof content !== "string") return {};
 
-      const convId = event.conversation_id || event.conversationId || event.session_id;
-      const key = piiSessionKey("__message__", convId);
-      try {
-        const result = await state.client.tokenizePii(content);
-        if (result.tokens_created > 0) {
-          state.piiSessions.set(key, result.session_id);
-          return { content: result.tokenized_text };
+      // ── Derive session identity ─────────────────────────────────────
+      // OpenClaw provides conversation_id / conversationId / session_id depending
+      // on version. We use the first truthy value. If none is present the entire
+      // agent's message stream is bucketed under "default"; this means the turn
+      // counter is shared across all conversations handled by this gateway
+      // process, which is a known limitation when OpenClaw does not expose a
+      // conversation id. Deployments where multiple simultaneous conversations
+      // are served by a single process should upgrade to an OpenClaw version that
+      // exposes conversation_id on the message_sending event.
+      const rawConvId: string =
+        event.conversation_id ||
+        event.conversationId ||
+        event.session_id ||
+        "default";
+
+      // Truncate/hash to ≤64 chars. UUIDs and short IDs fit natively.
+      // For longer ids (e.g. base64 thread blobs) we take a 64-char prefix —
+      // this preserves monotonicity without adding a crypto dependency.
+      // If perfect uniqueness across very long ids matters, callers can pre-hash
+      // before passing to OpenClaw; we document this in the README.
+      const sessionId: string =
+        rawConvId.length <= 64 ? rawConvId : rawConvId.slice(0, 64);
+
+      // ── Per-conversation turn counter ───────────────────────────────
+      // Each call to message_sending for a given session_id increments the
+      // counter so the API can detect multi-turn patterns. We read, use, then
+      // write-back the incremented value (turn_index is the index of THIS turn).
+      const turnIndex = state.sessionTurnCounters.get(sessionId) ?? 0;
+      state.sessionTurnCounters.set(sessionId, turnIndex + 1);
+
+      // ── Session Sentry scan (FAIL-OPEN) ─────────────────────────────
+      // Must never block the message on any failure. Any exception or non-200
+      // is caught and logged at debug level so it is observable without being
+      // noisy in production. The dormant server returns {enabled:false,
+      // blocked:false} which passes through immediately.
+      let scannedContent = content;
+      if (state.sessionScan && content.length > 0) {
+        try {
+          const scanResult = await state.client.scanSessionTurn({
+            session_id: sessionId,
+            turn_index: turnIndex,
+            // Only the outbound (agent) side of the message is visible here.
+            // user_text is left empty because the message_sending hook fires on
+            // the agent's outbound turn; the user's inbound text is not exposed
+            // by this hook event. If OpenClaw adds a prior-user-message field to
+            // the event in future, wire it here.
+            agent_text: content,
+            user_text: "",
+            // system_prompt: not surfaced in the message_sending event or plugin
+            // config — left empty. If config.systemPrompt is added in future,
+            // read it from cfg and pass it through here.
+            system_prompt: "",
+            // agent_id is the identity this plugin registered under.
+            agent_id: agentId,
+          });
+
+          if (scanResult.blocked === true) {
+            // Replace the outbound content with the Guard refusal string.
+            // This is the same { content } return shape used by PII tokenization,
+            // consistent with how the secret tripwire replaces { input } in
+            // before_tool_call. The session has triggered multi-turn exfiltration
+            // detection — we do NOT log an error; we log an audit event and
+            // return the refusal.
+            await logEvent("session.sentry.blocked", {
+              session_id: sessionId,
+              turn_index: turnIndex,
+              session_score: scanResult.session_score,
+              highest_severity: scanResult.highest_severity,
+            });
+            return {
+              content:
+                "Message blocked by VeriSwarm Guard session protection: " +
+                "this conversation has triggered multi-turn data-extraction detection.",
+            };
+          }
+        } catch (e) {
+          // FAIL-OPEN: any network error, timeout, or unexpected response must
+          // not interrupt message delivery. Log at warn level (same as the PII
+          // branches above) so the customer's log aggregator can alert on it.
+          console.warn(
+            `[VeriSwarm] Session Sentry scan failed for session=${sessionId} ` +
+            `turn=${turnIndex}; sending unmodified. Error: ${(e as Error)?.message ?? e}`
+          );
         }
-      } catch (e) {
-        // Fail open — but observable. (HIGH-SDK-11.)
-        console.warn(
-          `[VeriSwarm] PII tokenization (outbound message) failed; ` +
-          `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-        );
       }
+
+      // ── PII tokenization (existing) ─────────────────────────────────
+      if (state.piiEnabled && scannedContent.length >= 4) {
+        const key = piiSessionKey("__message__", rawConvId);
+        try {
+          const result = await state.client.tokenizePii(scannedContent);
+          if (result.tokens_created > 0) {
+            state.piiSessions.set(key, result.session_id);
+            return { content: result.tokenized_text };
+          }
+        } catch (e) {
+          // Fail open — but observable. (HIGH-SDK-11.)
+          console.warn(
+            `[VeriSwarm] PII tokenization (outbound message) failed; ` +
+            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+          );
+        }
+      }
+
       return {};
     });
 
@@ -725,7 +850,7 @@ export const pluginEntry: PluginEntry = {
     }).catch(() => {});
 
     console.log(
-      `[VeriSwarm] Plugin registered — 11 tools, 3 hooks. Agent: ${agentId}`
+      `[VeriSwarm] Plugin registered — 11 tools, 3 hooks (incl. Session Sentry). Agent: ${agentId}`
     );
   },
 };

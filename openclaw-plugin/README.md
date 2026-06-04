@@ -23,6 +23,7 @@ export VERISWARM_API_KEY=vsk_your_key_here
 | **Tool Policy** | Blocked tools return errors. Allowlist mode restricts to approved tools only. |
 | **Injection Scan** | Tool outputs scanned for prompt injection patterns before reaching the agent |
 | **Audit** | Every tool call, block, and PII event logged to VeriSwarm Vault |
+| **Session Sentry** | Multi-turn exfiltration detection: each outbound message is scanned against the full conversation history. If the session-level risk score crosses the configured threshold the outbound message is replaced with a Guard refusal. Fail-open — any API error lets the message through unchanged. |
 
 ### Tools Registered (11 total)
 
@@ -51,7 +52,7 @@ export VERISWARM_API_KEY=vsk_your_key_here
 
 - `before_tool_call` — Policy check + PII tokenize inputs
 - `after_tool_call` — PII tokenize outputs + injection scan + audit
-- `message_sending` — PII tokenize outbound messages to LLM
+- `message_sending` — PII tokenize outbound messages to LLM + Session Sentry multi-turn scan
 
 ## Configuration
 
@@ -70,6 +71,7 @@ export VERISWARM_API_KEY=vsk_your_key_here
           policyEnabled: true,                  // Enforce tool policies (default: true)
           injectionScan: true,                  // Scan for injection (default: true)
           auditEnabled: true,                   // Log to Vault (default: true)
+          sessionScan: true,                    // Session Sentry multi-turn exfil detection (default: true)
           blockedTools: ["dangerous_tool"],      // Optional blocklist
           allowedTools: [],                     // Optional allowlist (empty = allow all)
         }
@@ -78,6 +80,18 @@ export VERISWARM_API_KEY=vsk_your_key_here
   }
 }
 ```
+
+## Session Sentry — Multi-Turn Exfiltration Detection
+
+Session Sentry detects data-extraction patterns that only become visible across multiple conversation turns — e.g. an adversarial user probing an agent across turns to assemble sensitive data piecemeal. Each outbound agent message is submitted to `POST /v1/suite/guard/scan-session` with a per-conversation turn counter. The server accumulates session state and returns a risk score; if `blocked: true` is returned, the outbound message is replaced with a Guard refusal before it reaches the LLM.
+
+**Behavior when the platform flag is dormant:** The server returns `{enabled: false, blocked: false}`. The message is sent unmodified. No action needed — the toggle is safe to leave on at all times.
+
+**Session identity:** The plugin derives a `session_id` from `event.conversation_id`, `event.conversationId`, or `event.session_id` (first truthy value). If none is present, all messages in this gateway process share the key `"default"` — a limitation when OpenClaw does not expose a conversation id on the `message_sending` event. Session ids longer than 64 characters are truncated by slicing to the first 64 chars; if your deployment uses ids where the first 64 chars are not unique, consider pre-hashing them before passing to OpenClaw.
+
+**Fail-open guarantee:** Any network error, timeout, or unexpected API response causes the scan to be skipped and the message to be sent unmodified. An observable `[VeriSwarm] Session Sentry scan failed` warning is logged.
+
+**Toggle:** `sessionScan: false` disables the scan entirely. No API calls are made.
 
 ## Development
 

@@ -172,6 +172,20 @@ export class VeriSwarmClient {
     return this.request("/v1/suite/vault/verify");
   }
 
+  // ── Guard (Session Sentry / multi-turn exfiltration) ─────────────
+
+  async scanSessionTurn(body: {
+    session_id: string;
+    turn_index: number;
+    user_text?: string;
+    agent_text?: string;
+    system_prompt?: string;
+    agent_id?: string;
+    actor_id?: string;
+  }): Promise<{ blocked: boolean; enabled: boolean; session_score?: number; highest_severity?: string; [key: string]: any }> {
+    return this.request("/v1/suite/guard/scan-session", "POST", body as Record<string, any>);
+  }
+
   // ── Events ────────────────────────────────────────────────────────
 
   async ingestEvent(
