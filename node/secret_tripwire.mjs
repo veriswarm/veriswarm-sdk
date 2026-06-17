@@ -66,7 +66,9 @@ export async function ensureTripwire({ fetchManifest } = {}) {
   if (!fetchManifest) return new SecretTripwire(vendored);
   try {
     const fresh = await fetchManifest();
-    if (fresh && Array.isArray(fresh.rules)) return new SecretTripwire(fresh);
+    if (fresh && Array.isArray(fresh.rules) && fresh.rules.length > 0) {
+      return new SecretTripwire(fresh);
+    }
   } catch {
     // offline fallback — vendored baseline
   }

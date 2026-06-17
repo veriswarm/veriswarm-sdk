@@ -86,6 +86,108 @@ function piiSessionKey(toolName: string, conversationId?: string | null): string
   return `${conv}:${toolName}`;
 }
 
+type SecretGuardMode = "online" | "offline";
+
+interface SecretGuardOutcome {
+  value: unknown;
+  changed: boolean;
+  rules: Set<string>;
+  modes: Set<SecretGuardMode>;
+}
+
+function emptySecretGuardOutcome(value: unknown): SecretGuardOutcome {
+  return {
+    value,
+    changed: false,
+    rules: new Set<string>(),
+    modes: new Set<SecretGuardMode>(),
+  };
+}
+
+function mergeSecretGuardOutcome(
+  target: SecretGuardOutcome,
+  child: SecretGuardOutcome
+): void {
+  target.changed ||= child.changed;
+  for (const rule of child.rules) target.rules.add(rule);
+  for (const mode of child.modes) target.modes.add(mode);
+}
+
+async function guardSecretInput(
+  input: unknown,
+  state: PluginState,
+  toolName: string,
+  piiKey: string,
+  seen = new WeakSet<object>()
+): Promise<SecretGuardOutcome> {
+  if (!state.client || !state.tripwire) return emptySecretGuardOutcome(input);
+
+  if (typeof input === "string") {
+    const hits = state.tripwire.scan(input);
+    if (hits.length === 0) return emptySecretGuardOutcome(input);
+
+    try {
+      const result = await state.client.tokenizePii(input);
+      let guarded =
+        result.tokens_created > 0 ? result.tokenized_text || input : input;
+      if (result.tokens_created > 0 && result.session_id) {
+        state.piiSessions.set(piiKey, result.session_id);
+      }
+      // The PII tokenizer is not a secret detector; fail closed if a
+      // provider-prefix span remains, or if tokenized_text was omitted.
+      if (state.tripwire.scan(guarded).length > 0) {
+        guarded = state.tripwire.redactOffline(guarded);
+      }
+      return {
+        value: guarded,
+        changed: guarded !== input,
+        rules: new Set(hits.map((h) => h.ruleName)),
+        modes: new Set<SecretGuardMode>(["online"]),
+      };
+    } catch (e) {
+      console.warn(
+        `[VeriSwarm] Secret tripwire: API unreachable for tool=${toolName}; ` +
+          `applying offline redaction. Error: ${(e as Error)?.message ?? e}`
+      );
+      return {
+        value: state.tripwire.redactOffline(input),
+        changed: true,
+        rules: new Set(hits.map((h) => h.ruleName)),
+        modes: new Set<SecretGuardMode>(["offline"]),
+      };
+    }
+  }
+
+  if (Array.isArray(input)) {
+    if (seen.has(input)) return emptySecretGuardOutcome(input);
+    seen.add(input);
+    const next = [...input];
+    const outcome = emptySecretGuardOutcome(next);
+    for (let i = 0; i < input.length; i++) {
+      const child = await guardSecretInput(input[i], state, toolName, piiKey, seen);
+      if (child.changed) next[i] = child.value;
+      mergeSecretGuardOutcome(outcome, child);
+    }
+    return outcome.changed ? outcome : emptySecretGuardOutcome(input);
+  }
+
+  if (input && typeof input === "object") {
+    const record = input as Record<string, unknown>;
+    if (seen.has(record)) return emptySecretGuardOutcome(input);
+    seen.add(record);
+    const next: Record<string, unknown> = { ...record };
+    const outcome = emptySecretGuardOutcome(next);
+    for (const [key, value] of Object.entries(record)) {
+      const child = await guardSecretInput(value, state, toolName, piiKey, seen);
+      if (child.changed) next[key] = child.value;
+      mergeSecretGuardOutcome(outcome, child);
+    }
+    return outcome.changed ? outcome : emptySecretGuardOutcome(input);
+  }
+
+  return emptySecretGuardOutcome(input);
+}
+
 // ── Plugin State ────────────────────────────────────────────────────────
 
 interface PluginState {
@@ -333,45 +435,19 @@ export const pluginEntry: PluginEntry = {
       if (
         state.secretsDetection &&
         state.tripwire &&
-        event.input &&
-        typeof event.input === "string"
+        event.input !== undefined &&
+        event.input !== null
       ) {
-        const hits = state.tripwire.scan(event.input);
-        if (hits.length > 0) {
-          const convId = event.conversation_id || event.conversationId || event.session_id;
-          const key = piiSessionKey(toolName, convId);
-          try {
-            const result = await state.client.tokenizePii(event.input);
-            let guarded =
-              result.tokens_created > 0 ? result.tokenized_text : event.input;
-            if (result.tokens_created > 0) {
-              state.piiSessions.set(key, result.session_id);
-            }
-            // Belt-and-suspenders: if any known-prefix span survived the
-            // API's tokenization, redact it locally so no recognized
-            // secret leaves unprotected.
-            if (state.tripwire.scan(guarded).length > 0) {
-              guarded = state.tripwire.redactOffline(guarded);
-            }
-            await logEvent("secret.tripwire", {
-              tool_name: toolName,
-              rules: hits.map((h) => h.ruleName),
-              mode: "online",
-            });
-            return { input: guarded };
-          } catch (e) {
-            // Offline / API failure → fail closed with local redaction.
-            console.warn(
-              `[VeriSwarm] Secret tripwire: API unreachable for tool=${toolName}; ` +
-              `applying offline redaction. Error: ${(e as Error)?.message ?? e}`
-            );
-            await logEvent("secret.tripwire", {
-              tool_name: toolName,
-              rules: hits.map((h) => h.ruleName),
-              mode: "offline",
-            }).catch(() => {});
-            return { input: state.tripwire.redactOffline(event.input) };
-          }
+        const convId = event.conversation_id || event.conversationId || event.session_id;
+        const key = piiSessionKey(toolName, convId);
+        const guarded = await guardSecretInput(event.input, state, toolName, key);
+        if (guarded.changed) {
+          await logEvent("secret.tripwire", {
+            tool_name: toolName,
+            rules: Array.from(guarded.rules),
+            mode: guarded.modes.has("offline") ? "offline" : "online",
+          }).catch(() => {});
+          return { input: guarded.value };
         }
       }
 

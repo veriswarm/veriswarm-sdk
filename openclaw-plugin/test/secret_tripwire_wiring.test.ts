@@ -16,4 +16,11 @@ describe("vendored manifest loader", () => {
     });
     expect(tw.version).toMatch(/^sha256:/);
   });
+
+  it("ensureTripwire falls back to vendored copy when fetch returns no rules", async () => {
+    const tw = await ensureTripwire({
+      fetchManifest: async () => ({ version: "sha256:empty", rules: [] }),
+    });
+    expect(tw.version).toMatch(/^sha256:/);
+  });
 });
