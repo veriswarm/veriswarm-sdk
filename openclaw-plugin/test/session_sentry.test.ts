@@ -270,6 +270,58 @@ describe("message_sending — Session Sentry", () => {
     expect(capturedBodies[0].session_id).toBe(longId.slice(0, 64));
   });
 
+  it("scans event.text when content is absent", async () => {
+    const capturedBodies: any[] = [];
+    fetchSpy = mockFetch((url, init) => {
+      if (url.includes("scan-session")) {
+        capturedBodies.push(JSON.parse(String(init.body)));
+      }
+      return scanResponse(false);
+    });
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    const result = await hooks["message_sending"]({
+      text: "agent outbound text from OpenClaw text field",
+      conversation_id: "conv-text-field",
+    });
+
+    expect(result).toEqual({});
+    expect(capturedBodies).toHaveLength(1);
+    expect(capturedBodies[0].session_id).toBe("conv-text-field");
+    expect(capturedBodies[0].agent_text).toBe(
+      "agent outbound text from OpenClaw text field"
+    );
+  });
+
+  it("uses conversationId and session_id when conversation_id is absent", async () => {
+    const capturedBodies: any[] = [];
+    fetchSpy = mockFetch((url, init) => {
+      if (url.includes("scan-session")) {
+        capturedBodies.push(JSON.parse(String(init.body)));
+      }
+      return scanResponse(false);
+    });
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    await hooks["message_sending"]({
+      content: "camel-case id",
+      conversationId: "conv-camel-case",
+    });
+    await hooks["message_sending"]({
+      content: "session id fallback",
+      session_id: "sess-fallback",
+    });
+
+    expect(capturedBodies.map((body) => body.session_id)).toEqual([
+      "conv-camel-case",
+      "sess-fallback",
+    ]);
+  });
+
   // ── Session counter FIFO cap ───────────────────────────────────────
 
   it("caps sessionTurnCounters at MAX_SESSION_COUNTERS by evicting the oldest entry", async () => {
