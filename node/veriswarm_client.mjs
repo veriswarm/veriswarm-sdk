@@ -171,7 +171,7 @@ export class VeriSwarmClient {
     if (this._tripwire.scan(text).length === 0) return text;
     try {
       const result = await this.tokenizePii({ text, agentId, sessionId });
-      let guarded = result?.tokens_created > 0 ? result.tokenized_text : text;
+      let guarded = result?.tokens_created > 0 ? result.tokenized_text || text : text;
       // Belt-and-suspenders: if the API left any known-prefix span intact
       // (the PII tokenizer is not a secret detector), redact it locally.
       if (this._tripwire.scan(guarded).length > 0) {

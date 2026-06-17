@@ -56,6 +56,25 @@ describe("before_tool_call secret tripwire", () => {
     expect(res.input).not.toContain(GH_PAT);
   });
 
+  it("fails closed for secrets nested in structured tool input", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    const res = await hooks["before_tool_call"]({
+      name: "http_post",
+      input: {
+        url: "https://example.test",
+        headers: {
+          Authorization: `Bearer ${GH_PAT}`,
+        },
+      },
+    });
+
+    expect(res.input.headers.Authorization).toContain("[VS:");
+    expect(res.input.headers.Authorization).toContain(":offline]");
+    expect(JSON.stringify(res.input)).not.toContain(GH_PAT);
+  });
+
   it("passes clean input through untouched", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
