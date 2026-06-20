@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import json
+
+import pytest
 
 GH = "ghp_" + "A" * 36
 
@@ -47,3 +50,27 @@ def test_prefix_hit_uses_tokenize_when_online(monkeypatch):
     monkeypatch.setattr(gh, "_tokenize", _ok)
     out = gh.apply_secret_tripwire("token " + GH)
     assert out == "token [VS_TOKEN_1]"
+
+
+def test_pre_tool_use_redacts_nested_tool_arguments(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, enabled=True)
+    monkeypatch.setattr(gh, "_tokenize", lambda text: None)
+
+    event = {
+        "tool_name": "mcp__vault__write_secret",
+        "tool_input": {
+            "headers": {"authorization": "Bearer " + GH},
+            "payloads": [{"token": GH}],
+            "unchanged": "safe",
+        },
+    }
+
+    with pytest.raises(SystemExit) as exc:
+        gh.handle_pre_tool_use(event)
+
+    assert exc.value.code == 0
+    output = json.loads(capsys.readouterr().out)
+    updated = output["hookSpecificOutput"]["updatedInput"]
+    assert updated["headers"]["authorization"] == "Bearer [VS:GITHUB_TOKEN:offline]"
+    assert updated["payloads"][0]["token"] == "[VS:GITHUB_TOKEN:offline]"
+    assert updated["unchanged"] == "safe"
