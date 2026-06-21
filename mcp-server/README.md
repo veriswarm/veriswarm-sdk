@@ -152,11 +152,12 @@ If you prefer manual configuration:
 | `list_deletion_records` | List GDPR deletion records with verification hashes |
 | `verify_deletion` | Verify a deletion record exists and return its proof |
 
-### A2A Trust (2)
+### A2A Trust (3)
 | Tool | Description |
 |---|---|
 | `get_agent_reputation` | Get cross-platform reputation score for an agent |
 | `get_a2a_history` | Get agent-to-agent interaction history (inbound or outbound) |
+| `invoke_a2a_agent` | Submit a task to a trust-ranked agent and wait for the result — submits, polls until the task is terminal (completed/failed/canceled) or `max_wait_seconds` elapses, and returns the final task (status + artifacts). On timeout returns the latest task with `"timed_out": true`; keep polling with `get_a2a_task`. Convenience over `submit_a2a_task` + `get_a2a_task`. |
 
 ### Benchmarking & Operations (2)
 | Tool | Description |

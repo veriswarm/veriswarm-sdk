@@ -110,6 +110,60 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             return safe_error_response(exc, context="submit_a2a_task")
 
     @server.tool()
+    async def invoke_a2a_agent(
+        agent_id: str,
+        requesting_agent_id: str,
+        messages_json: str,
+        signature_json: str = "",
+        max_wait_seconds: float = 30.0,
+        poll_interval_seconds: float = 1.0,
+    ) -> str:
+        """Submit an A2A task to a (trust-ranked) agent and wait for the result.
+
+        Convenience over submit_a2a_task + get_a2a_task: submits the task, then
+        polls until it reaches a terminal state (completed / failed / canceled) or
+        max_wait_seconds elapses, and returns the final task JSON (status, messages,
+        artifacts). On timeout it returns the latest non-terminal task with
+        "timed_out": true — keep polling with get_a2a_task. All trust / policy
+        enforcement happens server-side; this tool only orchestrates submit + poll.
+        """
+        import asyncio
+        import time as _time
+        try:
+            agent_id = safe_id(agent_id, "agent_id")
+            requesting_agent_id = safe_id(requesting_agent_id, "requesting_agent_id")
+            bounded_string(messages_json, field_name="messages_json", max_chars=32_768)
+            messages = json.loads(messages_json)
+            if not isinstance(messages, list):
+                return json.dumps({"error": "messages_json must be a JSON array"})
+            payload = {"requesting_agent_id": requesting_agent_id, "messages": messages}
+            if signature_json:
+                bounded_string(signature_json, field_name="signature_json", max_chars=16_384)
+                payload["signature"] = json.loads(signature_json)
+
+            max_wait = min(120.0, max(1.0, float(max_wait_seconds)))
+            interval = min(10.0, max(0.25, float(poll_interval_seconds)))
+
+            submitted = client.post(f"/v1/a2a/{agent_id}/tasks", json=payload)
+            task_id = safe_id(str(submitted.get("id", "")), "task_id")
+
+            deadline = _time.monotonic() + max_wait
+            terminal = {"completed", "failed", "canceled"}
+            task = submitted
+            while _time.monotonic() < deadline:
+                task = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
+                if task.get("status") in terminal:
+                    return json.dumps(task, indent=2)
+                await asyncio.sleep(interval)
+            task = dict(task)
+            task["timed_out"] = True
+            return json.dumps(task, indent=2)
+        except httpx.HTTPStatusError as exc:
+            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
+        except Exception as exc:
+            return safe_error_response(exc, context="invoke_a2a_agent")
+
+    @server.tool()
     async def get_a2a_task(agent_id: str, task_id: str) -> str:
         """Get the status + result of an A2A task.
 
