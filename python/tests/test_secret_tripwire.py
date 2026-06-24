@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from veriswarm.secret_tripwire import SecretTripwire, load_vendored_manifest
+from veriswarm.secret_tripwire import (
+    SecretTripwire,
+    ensure_tripwire,
+    load_vendored_manifest,
+)
 
 GH = "ghp_" + "A" * 36
 MANIFEST = {
@@ -50,3 +54,10 @@ def test_load_vendored_manifest():
     m = load_vendored_manifest()
     assert m["version"].startswith("sha256:")
     assert any(r["name"] == "github_pat" for r in m["rules"])
+
+
+def test_ensure_tripwire_falls_back_when_fetched_manifest_has_no_rules():
+    tw = ensure_tripwire(fetch_manifest=lambda: {"version": "sha256:empty", "rules": []})
+
+    assert tw.version.startswith("sha256:")
+    assert tw.scan(GH)

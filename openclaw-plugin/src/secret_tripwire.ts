@@ -93,7 +93,9 @@ export async function ensureTripwire(opts: EnsureOptions = {}): Promise<SecretTr
   if (!opts.fetchManifest) return new SecretTripwire(vendored);
   try {
     const fresh = await opts.fetchManifest();
-    if (fresh && Array.isArray(fresh.rules)) return new SecretTripwire(fresh);
+    if (fresh && Array.isArray(fresh.rules) && fresh.rules.length > 0) {
+      return new SecretTripwire(fresh);
+    }
   } catch {
     // fall through to vendored — offline baseline
   }
