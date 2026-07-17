@@ -47,6 +47,61 @@ def test_invoke_submits_polls_and_returns_completed():
     assert poll["n"] >= 2
 
 
+def test_invoke_forwards_signature_envelope_to_task_submit():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    captured_payload = {}
+    signature = {
+        "key_id": "key_123",
+        "signature": "deadbeef",
+        "algo": "ed25519",
+    }
+
+    def fake_post(path, json=None, **kw):
+        assert path == "/v1/a2a/agt_x/tasks"
+        captured_payload.update(json or {})
+        return {"id": "a2a_task_1", "status": "submitted"}
+
+    def fake_get(path, **kw):
+        assert path == "/v1/a2a/agt_x/tasks/a2a_task_1"
+        return {"id": "a2a_task_1", "status": "completed"}
+
+    with patch.object(client, "post", side_effect=fake_post), \
+         patch.object(client, "get", side_effect=fake_get):
+        fn = _get_invoke_tool(client)
+        out = asyncio.run(fn(
+            "agt_x",
+            "agt_req",
+            json.dumps([{"role": "user", "content": "go"}]),
+            signature_json=json.dumps(signature),
+            max_wait_seconds=5,
+            poll_interval_seconds=0.25,
+        ))
+
+    data = json.loads(out)
+    assert data["status"] == "completed"
+    assert captured_payload["requesting_agent_id"] == "agt_req"
+    assert captured_payload["messages"] == [{"role": "user", "content": "go"}]
+    assert captured_payload["signature"] == signature
+
+
+def test_invoke_rejects_invalid_signature_json_without_submitting():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    fn = _get_invoke_tool(client)
+
+    with patch.object(client, "post") as post_mock:
+        out = asyncio.run(fn(
+            "agt_x",
+            "agt_req",
+            json.dumps([{"role": "user", "content": "go"}]),
+            signature_json="{not-json",
+        ))
+
+    data = json.loads(out)
+    assert "error" in data
+    assert data["type"] == "JSONDecodeError"
+    post_mock.assert_not_called()
+
+
 def test_invoke_times_out_without_raising():
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     with patch.object(client, "post", side_effect=lambda *a, **k: {"id": "t1", "status": "submitted"}), \
