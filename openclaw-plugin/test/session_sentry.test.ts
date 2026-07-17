@@ -112,6 +112,42 @@ describe("message_sending — Session Sentry", () => {
     expect(result).toEqual({});
   });
 
+  it("fails open and sends message unmodified when API request times out", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal as AbortSignal | undefined;
+        signal?.addEventListener("abort", () => {
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+    });
+
+    try {
+      const { api, hooks } = makeApi();
+      pluginEntry.register(api as any, BASE_CONFIG);
+
+      const resultPromise = hooks["message_sending"]({
+        content: "Should pass through on timeout",
+        conversation_id: "conv-timeout-test",
+      });
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await resultPromise;
+
+      expect(result).toEqual({});
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Session Sentry scan failed")
+      );
+    } finally {
+      warnSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("fails open and sends message unmodified when API returns non-200", async () => {
     fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("Internal Server Error", { status: 500 })
