@@ -59,6 +59,51 @@ def test_invoke_times_out_without_raising():
     assert data["timed_out"] is True
 
 
+def test_invoke_forwards_signature_and_returns_failed_terminal_status():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    captured = {"payload": None, "poll_paths": []}
+    signature = {"key_id": "key_1", "signature": "sig_1", "algo": "ed25519"}
+
+    def fake_post(path, json=None, **kw):
+        assert path == "/v1/a2a/agt_x/tasks"
+        captured["payload"] = json
+        return {"id": "a2a_task_1", "status": "submitted"}
+
+    def fake_get(path, **kw):
+        captured["poll_paths"].append(path)
+        return {"id": "a2a_task_1", "status": "failed", "error": "policy_denied"}
+
+    with patch.object(client, "post", side_effect=fake_post), \
+         patch.object(client, "get", side_effect=fake_get):
+        fn = _get_invoke_tool(client)
+        out = asyncio.run(fn("agt_x", "agt_req", json.dumps([{"role": "user", "content": "go"}]),
+                             signature_json=json.dumps(signature),
+                             max_wait_seconds=5, poll_interval_seconds=0.25))
+
+    assert captured["payload"] == {
+        "requesting_agent_id": "agt_req",
+        "messages": [{"role": "user", "content": "go"}],
+        "signature": signature,
+    }
+    assert captured["poll_paths"] == ["/v1/a2a/agt_x/tasks/a2a_task_1"]
+    data = json.loads(out)
+    assert data["status"] == "failed"
+    assert "timed_out" not in data
+
+
+def test_invoke_rejects_bad_signature_json_without_submitting():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    fn = _get_invoke_tool(client)
+
+    with patch.object(client, "post") as post:
+        out = asyncio.run(fn("agt_x", "agt_req", "[]", signature_json="{not-json"))
+
+    post.assert_not_called()
+    data = json.loads(out)
+    assert data["error"]
+    assert data["type"] == "JSONDecodeError"
+
+
 def test_invoke_rejects_bad_agent_id():
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     fn = _get_invoke_tool(client)
