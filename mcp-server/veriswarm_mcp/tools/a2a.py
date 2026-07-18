@@ -15,6 +15,25 @@ from ..client import VeriSwarmAPIClient
 from ._shared import bounded_string, safe_error_response, safe_id
 
 
+_TERMINAL_TASK_STATES = {
+    "completed",
+    "succeeded",
+    "failed",
+    "canceled",
+    "cancelled",
+    "rejected",
+}
+
+
+def _task_status_state(task: dict) -> str | None:
+    status = task.get("status") if isinstance(task, dict) else None
+    if isinstance(status, dict):
+        status = status.get("state")
+    if not isinstance(status, str):
+        return None
+    return status.strip().lower()
+
+
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     # ── Catalog + agent cards ──────────────────────────────────────
 
@@ -148,11 +167,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             task_id = safe_id(str(submitted.get("id", "")), "task_id")
 
             deadline = _time.monotonic() + max_wait
-            terminal = {"completed", "failed", "canceled"}
             task = submitted
             while _time.monotonic() < deadline:
                 task = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
-                if task.get("status") in terminal:
+                if _task_status_state(task) in _TERMINAL_TASK_STATES:
                     return json.dumps(task, indent=2)
                 await asyncio.sleep(interval)
             task = dict(task)

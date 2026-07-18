@@ -47,6 +47,43 @@ def test_invoke_submits_polls_and_returns_completed():
     assert poll["n"] >= 2
 
 
+def test_invoke_handles_nested_a2a_task_status():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+
+    with patch.object(client, "post", side_effect=lambda *a, **k: {"id": "a2a_task_1"}), \
+         patch.object(client, "get", side_effect=lambda *a, **k: {
+             "id": "a2a_task_1",
+             "status": {"state": "completed", "timestamp": "2026-07-18T00:00:00Z"},
+             "artifacts": [{"role": "assistant", "content": "done"}],
+         }):
+        fn = _get_invoke_tool(client)
+        out = asyncio.run(fn("agt_x", "agt_req", json.dumps([{"role": "user", "content": "go"}]),
+                             max_wait_seconds=5, poll_interval_seconds=0.25))
+
+    data = json.loads(out)
+    assert data["status"]["state"] == "completed"
+    assert data["artifacts"][0]["content"] == "done"
+    assert "timed_out" not in data
+
+
+def test_invoke_treats_documented_terminal_aliases_as_terminal():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    fn = _get_invoke_tool(client)
+
+    for status in ("succeeded", "cancelled", "rejected"):
+        with patch.object(client, "post", side_effect=lambda *a, **k: {"id": "a2a_task_1"}), \
+             patch.object(client, "get", side_effect=lambda *a, **k: {
+                 "id": "a2a_task_1",
+                 "status": status,
+             }):
+            out = asyncio.run(fn("agt_x", "agt_req", json.dumps([{"role": "user", "content": "go"}]),
+                                 max_wait_seconds=5, poll_interval_seconds=0.25))
+
+        data = json.loads(out)
+        assert data["status"] == status
+        assert "timed_out" not in data
+
+
 def test_invoke_times_out_without_raising():
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     with patch.object(client, "post", side_effect=lambda *a, **k: {"id": "t1", "status": "submitted"}), \
