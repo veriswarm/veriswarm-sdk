@@ -156,4 +156,87 @@ describe('VeriSwarmClient', () => {
       expect(result).toEqual(activeResponse);
     });
   });
+
+  // --- A2A Protocol ---
+
+  describe('A2A protocol', () => {
+    const client = new VeriSwarmClient({ baseUrl, apiKey });
+
+    it('fetches catalog and agent cards from expected encoded paths', async () => {
+      fetch
+        .mockResolvedValueOnce(makeFetchResponse({ agents: [] }))
+        .mockResolvedValueOnce(makeFetchResponse({ id: 'agt_../one two' }));
+
+      await expect(client.listA2aCatalog()).resolves.toEqual({ agents: [] });
+      await expect(client.getA2aAgentCard('agt_../one two')).resolves.toEqual({
+        id: 'agt_../one two',
+      });
+
+      expect(fetch.mock.calls[0][0]).toBe(`${baseUrl}/v1/a2a/catalog`);
+      expect(fetch.mock.calls[1][0]).toBe(
+        `${baseUrl}/v1/a2a/agt_..%2Fone%20two/card`
+      );
+    });
+
+    it('submits tasks with snake_case payload and omits missing signature', async () => {
+      fetch.mockResolvedValueOnce(makeFetchResponse({ id: 'a2a_task_1', status: 'submitted' }));
+      const messages = [{ role: 'user', content: 'start' }];
+
+      await expect(
+        client.submitA2aTask('agt_receiver', {
+          requestingAgentId: 'agt_sender',
+          messages,
+        })
+      ).resolves.toEqual({ id: 'a2a_task_1', status: 'submitted' });
+
+      expect(fetch).toHaveBeenCalledWith(
+        `${baseUrl}/v1/a2a/agt_receiver/tasks`,
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            requesting_agent_id: 'agt_sender',
+            messages,
+          }),
+        })
+      );
+      const callBody = JSON.parse(fetch.mock.calls[0][1].body);
+      expect(callBody).not.toHaveProperty('signature');
+    });
+
+    it('includes signature when submitting signed tasks', async () => {
+      fetch.mockResolvedValueOnce(makeFetchResponse({ id: 'a2a_task_2', status: 'submitted' }));
+      const messages = [{ role: 'user', content: 'signed task' }];
+      const signature = { key_id: 'key_1', signature: 'sig', algo: 'ed25519' };
+
+      await client.submitA2aTask('agt_receiver', {
+        requestingAgentId: 'agt_sender',
+        messages,
+        signature,
+      });
+
+      expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+        requesting_agent_id: 'agt_sender',
+        messages,
+        signature,
+      });
+    });
+
+    it('encodes agent and task ids for get, cancel, and key provisioning paths', async () => {
+      fetch
+        .mockResolvedValueOnce(makeFetchResponse({ status: 'completed' }))
+        .mockResolvedValueOnce(makeFetchResponse({ status: 'canceled' }))
+        .mockResolvedValueOnce(makeFetchResponse({ public_key: 'pub' }));
+
+      await client.getA2aTask('agt/receiver', 'a2a task/1');
+      await client.cancelA2aTask('agt/receiver', 'a2a task/1');
+      await client.provisionA2aKeys('agt/key owner');
+
+      const encodedTaskPath = `${baseUrl}/v1/a2a/agt%2Freceiver/tasks/a2a%20task%2F1`;
+      expect(fetch.mock.calls[0][0]).toBe(encodedTaskPath);
+      expect(fetch.mock.calls[1][0]).toBe(`${encodedTaskPath}/cancel`);
+      expect(fetch.mock.calls[1][1]).toEqual(expect.objectContaining({ method: 'POST' }));
+      expect(fetch.mock.calls[2][0]).toBe(`${baseUrl}/v1/a2a/agt%2Fkey%20owner/keys`);
+      expect(fetch.mock.calls[2][1]).toEqual(expect.objectContaining({ method: 'POST' }));
+    });
+  });
 });
