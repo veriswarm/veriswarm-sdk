@@ -104,6 +104,27 @@ def test_invoke_rejects_bad_signature_json_without_submitting():
     assert data["type"] == "JSONDecodeError"
 
 
+def test_invoke_returns_task_id_when_polling_fails_after_submit():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+
+    with patch.object(client, "post", return_value={"id": "a2a_task_1", "status": "submitted"}), \
+         patch.object(client, "get", side_effect=RuntimeError("network down")):
+        fn = _get_invoke_tool(client)
+        out = asyncio.run(fn(
+            "agt_x",
+            "agt_req",
+            json.dumps([{"role": "user", "content": "go"}]),
+            max_wait_seconds=5,
+            poll_interval_seconds=0.25,
+        ))
+
+    data = json.loads(out)
+    assert data["id"] == "a2a_task_1"
+    assert data["status"] == "submitted"
+    assert data["poll_failed"] is True
+    assert "get_a2a_task" in data["error"]
+
+
 def test_invoke_rejects_bad_agent_id():
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     fn = _get_invoke_tool(client)

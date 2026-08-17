@@ -15,6 +15,22 @@ from ..client import VeriSwarmAPIClient
 from ._shared import bounded_string, safe_error_response, safe_id
 
 
+def _submitted_but_poll_failed_response(
+    task: dict,
+    task_id: str,
+    message: str,
+    exc_type: str | None = None,
+) -> str:
+    """Return the submitted task id so callers can continue polling safely."""
+    result = dict(task)
+    result.setdefault("id", task_id)
+    result["poll_failed"] = True
+    result["error"] = message
+    if exc_type:
+        result["type"] = exc_type
+    return json.dumps(result, indent=2)
+
+
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     # ── Catalog + agent cards ──────────────────────────────────────
 
@@ -151,7 +167,21 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             terminal = {"completed", "failed", "canceled"}
             task = submitted
             while _time.monotonic() < deadline:
-                task = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
+                try:
+                    task = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
+                except httpx.HTTPStatusError as exc:
+                    return _submitted_but_poll_failed_response(
+                        task,
+                        task_id,
+                        f"Task submitted but polling failed with API error {exc.response.status_code}: {exc.response.text}",
+                    )
+                except Exception as exc:
+                    return _submitted_but_poll_failed_response(
+                        task,
+                        task_id,
+                        "Task submitted but polling failed. Use get_a2a_task with the returned id to continue polling.",
+                        type(exc).__name__,
+                    )
                 if task.get("status") in terminal:
                     return json.dumps(task, indent=2)
                 await asyncio.sleep(interval)
