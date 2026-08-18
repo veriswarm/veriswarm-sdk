@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from unittest.mock import patch
 
 from veriswarm_mcp.client import VeriSwarmAPIClient
@@ -123,6 +124,53 @@ def test_invoke_returns_task_id_when_polling_fails_after_submit():
     assert data["status"] == "submitted"
     assert data["poll_failed"] is True
     assert "get_a2a_task" in data["error"]
+
+
+def test_invoke_polling_does_not_block_event_loop():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    get_started = asyncio.Event()
+    ticker_ran_during_get = asyncio.Event()
+
+    def fake_post(path, json=None, **kw):
+        return {"id": "a2a_task_1", "status": "submitted"}
+
+    def fake_get(path, **kw):
+        get_started_loop.call_soon_threadsafe(get_started.set)
+        time.sleep(0.2)
+        return {"id": "a2a_task_1", "status": "completed"}
+
+    async def run_invoke_and_ticker():
+        nonlocal get_started_loop
+        get_started_loop = asyncio.get_running_loop()
+        fn = _get_invoke_tool(client)
+
+        async def ticker():
+            await get_started.wait()
+            await asyncio.sleep(0.01)
+            ticker_ran_during_get.set()
+
+        task = asyncio.create_task(
+            fn(
+                "agt_x",
+                "agt_req",
+                json.dumps([{"role": "user", "content": "go"}]),
+                max_wait_seconds=5,
+                poll_interval_seconds=0.25,
+            )
+        )
+        ticker_task = asyncio.create_task(ticker())
+        out = await task
+        await ticker_task
+        return out
+
+    get_started_loop = None
+    with patch.object(client, "post", side_effect=fake_post), \
+         patch.object(client, "get", side_effect=fake_get):
+        out = asyncio.run(run_invoke_and_ticker())
+
+    data = json.loads(out)
+    assert data["status"] == "completed"
+    assert ticker_ran_during_get.is_set()
 
 
 def test_invoke_rejects_bad_agent_id():

@@ -160,7 +160,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             max_wait = min(120.0, max(1.0, float(max_wait_seconds)))
             interval = min(10.0, max(0.25, float(poll_interval_seconds)))
 
-            submitted = client.post(f"/v1/a2a/{agent_id}/tasks", json=payload)
+            submitted = await asyncio.to_thread(
+                client.post, f"/v1/a2a/{agent_id}/tasks", json=payload
+            )
             task_id = safe_id(str(submitted.get("id", "")), "task_id")
 
             deadline = _time.monotonic() + max_wait
@@ -168,7 +170,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             task = submitted
             while _time.monotonic() < deadline:
                 try:
-                    task = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
+                    task = await asyncio.to_thread(
+                        client.get, f"/v1/a2a/{agent_id}/tasks/{task_id}"
+                    )
                 except httpx.HTTPStatusError as exc:
                     return _submitted_but_poll_failed_response(
                         task,
