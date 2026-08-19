@@ -3,6 +3,8 @@ import json
 import time
 from unittest.mock import patch
 
+import pytest
+
 from veriswarm_mcp.client import VeriSwarmAPIClient
 from veriswarm_mcp.tools import a2a
 
@@ -177,6 +179,32 @@ def test_invoke_polling_does_not_block_event_loop():
     assert ticker_ran_before_invoke_returned
 
 
+@pytest.mark.parametrize("terminal_status", ["failed", "canceled"])
+def test_invoke_returns_terminal_failure_states_without_timing_out(terminal_status):
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    poll = {"n": 0}
+
+    def fake_get(path, **kw):
+        poll["n"] += 1
+        assert path == "/v1/a2a/agt_x/tasks/a2a_task_1"
+        return {
+            "id": "a2a_task_1",
+            "status": terminal_status,
+            "error": {"message": "terminal result"},
+        }
+
+    with patch.object(client, "post", return_value={"id": "a2a_task_1", "status": "submitted"}), \
+         patch.object(client, "get", side_effect=fake_get):
+        fn = _get_invoke_tool(client)
+        out = asyncio.run(fn("agt_x", "agt_req", json.dumps([{"role": "user", "content": "go"}])))
+
+    data = json.loads(out)
+    assert data["status"] == terminal_status
+    assert data["error"]["message"] == "terminal result"
+    assert "timed_out" not in data
+    assert poll["n"] == 1
+
+
 def test_invoke_rejects_bad_agent_id():
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     fn = _get_invoke_tool(client)
@@ -189,3 +217,37 @@ def test_invoke_rejects_non_list_messages():
     fn = _get_invoke_tool(client)
     out = asyncio.run(fn("agt_x", "agt_req", json.dumps({"not": "a list"})))
     assert "error" in json.loads(out)
+
+
+def test_invoke_rejects_invalid_signature_json_without_submitting():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    fn = _get_invoke_tool(client)
+
+    with patch.object(client, "post") as post, patch.object(client, "get") as get:
+        out = asyncio.run(
+            fn(
+                "agt_x",
+                "agt_req",
+                json.dumps([{"role": "user", "content": "go"}]),
+                signature_json="{not valid json",
+            )
+        )
+
+    data = json.loads(out)
+    assert "error" in data
+    post.assert_not_called()
+    get.assert_not_called()
+
+
+def test_invoke_rejects_missing_submitted_task_id_without_polling():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    fn = _get_invoke_tool(client)
+
+    with patch.object(client, "post", return_value={"status": "submitted"}) as post, \
+         patch.object(client, "get") as get:
+        out = asyncio.run(fn("agt_x", "agt_req", json.dumps([{"role": "user", "content": "go"}])))
+
+    data = json.loads(out)
+    assert "error" in data
+    post.assert_called_once()
+    get.assert_not_called()
