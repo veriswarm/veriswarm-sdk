@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import httpx
 
+from .url_security import validate_api_url
+
 
 class VeriSwarmAPIClient:
     def __init__(self, base_url: str, api_key: str = "", agent_key: str = ""):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_api_url(base_url, field_name="base_url")
         self.api_key = api_key
         self.agent_key = agent_key
         self._http = httpx.Client(timeout=15.0)
