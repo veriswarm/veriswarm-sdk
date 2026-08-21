@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import __version__
-from .client import api_request, get_config
+from .client import api_request, get_config, validate_api_url
 
 
 def main():
@@ -84,6 +84,8 @@ def cmd_init(args: list[str]):
     if not api_key:
         print("API key is required. Get one at https://veriswarm.ai/account?tab=settings")
         sys.exit(1)
+
+    api_url = validate_api_url(api_url, field_name="API URL")
 
     os.makedirs(config_dir, exist_ok=True)
     config["api_url"] = api_url

@@ -4,7 +4,11 @@ from __future__ import annotations
 import json
 import os
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+_LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1"}
 
 
 class _StripAuthRedirectHandler(HTTPRedirectHandler):
@@ -29,6 +33,29 @@ class _StripAuthRedirectHandler(HTTPRedirectHandler):
 _OPENER = build_opener(_StripAuthRedirectHandler())
 
 
+def validate_api_url(url: str, *, field_name: str = "VERISWARM_API_URL") -> str:
+    """Return a normalized API URL that is safe to receive CLI auth headers."""
+    if not isinstance(url, str) or not url.strip():
+        raise SystemExit(f"{field_name} is required")
+
+    normalized = url.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        raise SystemExit(f"{field_name} must be an absolute URL")
+
+    is_localhost_http = (
+        parsed.scheme == "http"
+        and (parsed.hostname or "").lower() in _LOCALHOST_NAMES
+    )
+    if parsed.scheme != "https" and not is_localhost_http:
+        raise SystemExit(
+            f"{field_name} must be https:// (got {parsed.scheme!r}). "
+            "Only http://localhost is permitted as a dev escape hatch."
+        )
+
+    return normalized
+
+
 def get_config() -> tuple[str, str]:
     """Get API base URL and key from env or config file."""
     base_url = os.environ.get("VERISWARM_API_URL", "")
@@ -44,7 +71,8 @@ def get_config() -> tuple[str, str]:
                 api_key = api_key or config.get("api_key", "")
 
     base_url = base_url or "https://api.veriswarm.ai"
-    return base_url.rstrip("/"), api_key
+    return validate_api_url(base_url), api_key
+
 
 
 def api_request(path: str, *, method: str = "GET", body: dict | list | None = None, timeout: int = 15) -> dict:
