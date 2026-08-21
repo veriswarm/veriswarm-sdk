@@ -7,7 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
-from ._shared import bounded_string, safe_error_response, safe_optional_id
+from ._shared import bounded_string, safe_error_response, safe_id, safe_optional_id
 
 # Maximum character budgets for Session Sentry turn text fields.
 # Large prompts are the vector; cap generously enough for real usage
@@ -74,6 +74,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         reason: human-readable reason for the kill switch activation
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.post(
                 f"/v1/suite/guard/kill/{agent_id}",
                 json={"reason": reason},
@@ -90,6 +91,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.post(f"/v1/suite/guard/unkill/{agent_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -140,6 +142,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_pii_session(session_id: str) -> str:
         """Get details of a PII tokenization session including all tokens created."""
         try:
+            session_id = safe_id(session_id, "session_id")
             result = client.get(f"/v1/suite/guard/pii/sessions/{session_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -153,6 +156,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
+            session_id = safe_id(session_id, "session_id")
             result = client.delete(f"/v1/suite/guard/pii/sessions/{session_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
