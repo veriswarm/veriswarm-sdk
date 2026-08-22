@@ -65,6 +65,23 @@ def _require_cryptography() -> tuple[Any, Any]:
     return serialization, Ed25519PrivateKey
 
 
+def _quote_string(value: str) -> str:
+    """Quote a value as an RFC 8941 String: backslash-escape `\\` and `"`,
+    then wrap in double quotes.
+
+    `keyid`, `nonce`, and `signature_agent` are all caller-supplied (nonce
+    directly through the public `sign_request()` API) and MUST go through
+    this before being interpolated into a quoted-string param. An
+    unescaped `"` would otherwise break out of its param and let arbitrary
+    extra params be smuggled into both the signed base and the
+    Signature-Input header. Mirrors `quoteString` in the Node SDK's
+    `webbotauth.mjs` byte-for-byte, so both SDKs produce identical bases
+    for identical inputs.
+    """
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
 def _derive_authority(url: str) -> str:
     """Derive the RFC 9421 `@authority` component from a request URL.
 
@@ -98,9 +115,9 @@ def _build_signature_params(
     """
     parts = [f"created={created}", f"expires={expires}"]
     if nonce is not None:
-        parts.append(f'nonce="{nonce}"')
-    parts.append(f'keyid="{keyid}"')
-    parts.append(f'tag="{tag}"')
+        parts.append(f"nonce={_quote_string(nonce)}")
+    parts.append(f"keyid={_quote_string(keyid)}")
+    parts.append(f"tag={_quote_string(tag)}")
     return '("@authority" "signature-agent");' + ";".join(parts)
 
 
@@ -174,9 +191,10 @@ class WebBotAuthSigner:
 
         self._private_key = key
         self.key_id = key_id
-        # RFC 8941 String — quoted once here, reused verbatim as both the
-        # Signature-Agent header value and the base's signature-agent line.
-        self.signature_agent = f'"{signature_agent}"'
+        # RFC 8941 String — quoted (and escaped) once here, reused verbatim
+        # as both the Signature-Agent header value and the base's
+        # signature-agent line.
+        self.signature_agent = _quote_string(signature_agent)
 
     def sign_request(
         self,

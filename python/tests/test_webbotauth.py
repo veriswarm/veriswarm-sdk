@@ -9,11 +9,14 @@ import textwrap
 
 import pytest
 
+import base64
+
 from veriswarm.webbotauth import (
     DEFAULT_SIGNATURE_AGENT,
     WebBotAuthError,
     WebBotAuthSigner,
     _derive_authority,
+    _quote_string,
     build_signature_base,
 )
 
@@ -62,7 +65,6 @@ def test_signature_verifies_against_reconstructed_base():
 
     sig_match = re.match(r"^sig1=:([A-Za-z0-9+/=]+):$", headers["Signature"])
     assert sig_match is not None
-    import base64
     signature_bytes = base64.b64decode(sig_match.group(1))
 
     # Verifies cleanly against the true base.
@@ -85,7 +87,6 @@ def test_tampered_base_fails_verification():
         expires=1_700_000_300,
         keyid="key-1",
     )
-    import base64
     sig_match = re.match(r"^sig1=:([A-Za-z0-9+/=]+):$", headers["Signature"])
     signature_bytes = base64.b64decode(sig_match.group(1))
 
@@ -214,6 +215,123 @@ def test_created_defaults_to_current_time_when_omitted():
     assert match is not None
     created = int(match.group(1))
     assert before <= created <= after
+
+
+# ---------------------------------------------------------------------------
+# 5b. Structured-field injection: keyid / nonce / signature_agent must be
+#     escaped, not just quote-wrapped, since all three are (directly or
+#     indirectly) caller-controlled and interpolated into RFC 8941 quoted
+#     Strings inside the signature base and Signature-Input header.
+# ---------------------------------------------------------------------------
+
+
+def test_quote_string_escapes_backslash_and_quote():
+    # Mirrors Node's quoteString exactly: backslash first, then quote.
+    assert _quote_string('a"b') == '"a\\"b"'
+    assert _quote_string("a\\b") == '"a\\\\b"'
+    assert _quote_string('a\\b"c') == '"a\\\\b\\"c"'
+    assert _quote_string("plain") == '"plain"'
+
+
+def test_nonce_containing_quote_is_escaped_not_injected():
+    private_key, pem = _keypair()
+    signer = WebBotAuthSigner(private_key_pem=pem, key_id="key-1")
+    malicious_nonce = 'n";evil="injected'
+
+    headers = signer.sign_request(
+        "https://example.com/", created=1000, nonce=malicious_nonce
+    )
+    sig_input = headers["Signature-Input"]
+
+    # The raw injected param must never appear unescaped.
+    assert ';evil="injected"' not in sig_input
+    # The nonce value is present, but its embedded quote is backslash-escaped.
+    assert _quote_string(malicious_nonce) in sig_input
+    # Exactly one nonce param, one keyid param, one tag param — no smuggled
+    # extras from the unescaped quote breaking out of its field.
+    assert sig_input.count("nonce=") == 1
+    assert sig_input.count("keyid=") == 1
+    assert sig_input.count("tag=") == 1
+
+
+def test_keyid_containing_quote_is_escaped_not_injected():
+    private_key, pem = _keypair()
+    malicious_keyid = 'key";evil="injected'
+    signer = WebBotAuthSigner(private_key_pem=pem, key_id=malicious_keyid)
+
+    headers = signer.sign_request("https://example.com/", created=1000)
+    sig_input = headers["Signature-Input"]
+
+    assert ';evil="injected"' not in sig_input
+    assert _quote_string(malicious_keyid) in sig_input
+    assert sig_input.count("keyid=") == 1
+    assert sig_input.count("tag=") == 1
+
+
+def test_signature_agent_containing_quote_is_escaped_not_injected():
+    private_key, pem = _keypair()
+    malicious_agent = 'https://example.com";evil="injected'
+    signer = WebBotAuthSigner(
+        private_key_pem=pem, key_id="key-1", signature_agent=malicious_agent
+    )
+
+    headers = signer.sign_request("https://example.com/", created=1000)
+
+    # The header value is exactly the escaped quoted string — the embedded
+    # `"` is backslash-escaped, not left to terminate the RFC 8941 String
+    # early and smuggle an `evil` field into the header.
+    assert headers["Signature-Agent"] == _quote_string(malicious_agent)
+    assert headers["Signature-Agent"] == '"https://example.com\\";evil=\\"injected"'
+
+
+@pytest.mark.parametrize(
+    "keyid,nonce,signature_agent",
+    [
+        ("key-1", "nonce-1", "https://api.veriswarm.ai"),
+        ('key"1', 'nonce"1', 'https://api.veriswarm.ai"evil'),
+        ("key\\1", "nonce\\1", "https://api.veriswarm.ai\\evil"),
+        ('key\\"1', 'nonce\\"1', 'https://api.veriswarm.ai\\"evil'),
+    ],
+)
+def test_escaped_fields_stay_byte_identical_between_base_and_header_and_verify(
+    monkeypatch, keyid, nonce, signature_agent
+):
+    """Regression for the injection defect: for values containing `"`
+    and/or `\\` in keyid, nonce, and signature_agent, the emitted
+    Signature-Input params must remain byte-identical to the params
+    actually signed inside the base, AND the signature must still verify
+    cryptographically against the reconstructed base.
+    """
+    import veriswarm.webbotauth as webbotauth_module
+
+    captured: dict[str, str] = {}
+    original = webbotauth_module.build_signature_base
+
+    def spy(**kwargs):
+        result = original(**kwargs)
+        captured["base"] = result
+        return result
+
+    monkeypatch.setattr(webbotauth_module, "build_signature_base", spy)
+
+    private_key, pem = _keypair()
+    public_key = private_key.public_key()
+    signer = WebBotAuthSigner(
+        private_key_pem=pem, key_id=keyid, signature_agent=signature_agent
+    )
+    headers = signer.sign_request("https://example.com/", created=1000, nonce=nonce)
+
+    # Byte-identity between the signed base and the emitted header.
+    base = captured["base"]
+    header_params = headers["Signature-Input"][len("sig1="):]
+    base_params = base.split('"@signature-params": ', 1)[1]
+    assert base_params == header_params
+
+    # The signature still verifies against the true (escaped) base.
+    sig_match = re.match(r"^sig1=:([A-Za-z0-9+/=]+):$", headers["Signature"])
+    assert sig_match is not None
+    signature_bytes = base64.b64decode(sig_match.group(1))
+    public_key.verify(signature_bytes, base.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
