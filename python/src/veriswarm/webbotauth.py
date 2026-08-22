@@ -133,21 +133,25 @@ def build_signature_base(
 ) -> str:
     """Build the RFC 9421 signature base string for Web Bot Auth.
 
-    `signature_agent` must already be in wire format — an RFC 8941 String,
-    i.e. the directory origin wrapped in double quotes (e.g.
-    `"https://api.veriswarm.ai"`) — since that exact value is emitted
-    verbatim into the base and is also the `Signature-Agent` header value.
+    `signature_agent` is the RAW directory origin (e.g.
+    `https://api.veriswarm.ai`) — this function quotes and escapes it
+    internally as an RFC 8941 String via the same shared helper used for
+    `keyid`/`nonce`/`tag`. Callers never pre-quote it. This is a public
+    contract shared with the Node SDK's `buildSignatureBase`: both take a
+    raw origin and quote it internally, so the two SDKs behave identically
+    for the same inputs.
 
     The verifier reconstructs this same string from the `@authority`,
     `Signature-Agent`, and `Signature-Input` headers of the request it
     receives, so every byte here is load-bearing.
     """
+    quoted_signature_agent = _quote_string(signature_agent)
     params = _build_signature_params(
         created=created, expires=expires, keyid=keyid, nonce=nonce, tag=tag
     )
     return (
         f'"@authority": {authority}\n'
-        f'"signature-agent": {signature_agent}\n'
+        f'"signature-agent": {quoted_signature_agent}\n'
         f'"@signature-params": {params}'
     )
 
@@ -191,10 +195,11 @@ class WebBotAuthSigner:
 
         self._private_key = key
         self.key_id = key_id
-        # RFC 8941 String — quoted (and escaped) once here, reused verbatim
-        # as both the Signature-Agent header value and the base's
-        # signature-agent line.
-        self.signature_agent = _quote_string(signature_agent)
+        # Stored RAW (unquoted) — build_signature_base quotes it internally,
+        # and the Signature-Agent header value is quoted at emission time in
+        # sign_request(). Matches the Node SDK's contract: callers pass a
+        # raw origin, never a pre-quoted one.
+        self.signature_agent = signature_agent
 
     def sign_request(
         self,
@@ -225,17 +230,21 @@ class WebBotAuthSigner:
             keyid=self.key_id,
             nonce=nonce,
         )
-        # Extract the params substring straight out of the base we just
-        # signed (rather than recomputing it) so Signature-Input is
-        # structurally guaranteed byte-identical to what's inside
-        # `@signature-params`, not merely "should match by determinism".
+        # Extract the quoted signature-agent and the params substring
+        # straight out of the base we just signed (rather than
+        # recomputing them) so the emitted headers are structurally
+        # guaranteed byte-identical to what's inside the base, not merely
+        # "should match by determinism".
+        quoted_signature_agent = base.split('"signature-agent": ', 1)[1].split(
+            '\n"@signature-params": ', 1
+        )[0]
         params = base.split('"@signature-params": ', 1)[1]
 
         signature_bytes = self._private_key.sign(base.encode("utf-8"))
         signature_b64 = base64.b64encode(signature_bytes).decode("ascii")
 
         return {
-            "Signature-Agent": self.signature_agent,
+            "Signature-Agent": quoted_signature_agent,
             "Signature-Input": f"sig1={params}",
             "Signature": f"sig1=:{signature_b64}:",
         }

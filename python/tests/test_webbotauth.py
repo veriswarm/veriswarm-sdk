@@ -20,9 +20,6 @@ from veriswarm.webbotauth import (
     build_signature_base,
 )
 
-QUOTED_DEFAULT_AGENT = f'"{DEFAULT_SIGNATURE_AGENT}"'
-
-
 def _keypair():
     """Generate a fresh Ed25519 keypair + PKCS8 PEM. Skips if cryptography is absent."""
     pytest.importorskip("cryptography")
@@ -56,7 +53,7 @@ def test_signature_verifies_against_reconstructed_base():
 
     base = build_signature_base(
         authority="example.com",
-        signature_agent=QUOTED_DEFAULT_AGENT,
+        signature_agent=DEFAULT_SIGNATURE_AGENT,
         created=1_700_000_000,
         expires=1_700_000_300,
         keyid="key-1",
@@ -82,7 +79,7 @@ def test_tampered_base_fails_verification():
 
     base = build_signature_base(
         authority="example.com",
-        signature_agent=QUOTED_DEFAULT_AGENT,
+        signature_agent=DEFAULT_SIGNATURE_AGENT,
         created=1_700_000_000,
         expires=1_700_000_300,
         keyid="key-1",
@@ -335,6 +332,54 @@ def test_escaped_fields_stay_byte_identical_between_base_and_header_and_verify(
 
 
 # ---------------------------------------------------------------------------
+# 5c. Cross-SDK parity: golden vector shared with the Node SDK.
+# ---------------------------------------------------------------------------
+
+
+def test_matches_cross_sdk_golden_vector():
+    """Fixed, hand-verified vector captured from a live run of both SDKs
+    against the same Ed25519 key. This MUST stay in lockstep with the
+    equivalent assertion in `node/test/webbotauth.test.mjs` — if the
+    expected strings below ever change, the Node SDK and the VeriSwarm API
+    server's verifier must change identically, in the same PR/release.
+
+    Exercises `build_signature_base` directly with a RAW (unquoted)
+    `signature_agent`, per the shared cross-SDK contract: the helper
+    quotes+escapes `signature_agent` internally, exactly like it already
+    does for `keyid`/`nonce`/`tag`. `keyid` and `nonce` both contain an
+    embedded `"` to also pin the escaping behavior in the same vector.
+    """
+    base = build_signature_base(
+        authority="example.com",
+        signature_agent="https://api.veriswarm.ai",  # raw, not pre-quoted
+        created=1000,
+        expires=1300,
+        keyid='k"1',
+        nonce='n"2',
+    )
+
+    expected_base = (
+        '"@authority": example.com\n'
+        '"signature-agent": "https://api.veriswarm.ai"\n'
+        '"@signature-params": ("@authority" "signature-agent");created=1000;'
+        'expires=1300;nonce="n\\"2";keyid="k\\"1";tag="web-bot-auth"'
+    )
+    assert base == expected_base
+
+    expected_signature_input = (
+        'sig1=("@authority" "signature-agent");created=1000;expires=1300;'
+        'nonce="n\\"2";keyid="k\\"1";tag="web-bot-auth"'
+    )
+    params = base.split('"@signature-params": ', 1)[1]
+    assert f"sig1={params}" == expected_signature_input
+
+    quoted_signature_agent = base.split('"signature-agent": ', 1)[1].split(
+        '\n"@signature-params": ', 1
+    )[0]
+    assert quoted_signature_agent == '"https://api.veriswarm.ai"'
+
+
+# ---------------------------------------------------------------------------
 # 6. Constructor / input validation errors
 # ---------------------------------------------------------------------------
 
@@ -434,15 +479,17 @@ def test_import_veriswarm_succeeds_without_cryptography():
         import veriswarm  # noqa: F401
         from veriswarm.webbotauth import WebBotAuthSigner, build_signature_base  # noqa: F401
 
-        # Pure string-building helper needs no crypto at all.
+        # Pure string-building helper needs no crypto at all. signature_agent
+        # is RAW (unquoted) — build_signature_base quotes it internally.
         base = build_signature_base(
             authority="example.com",
-            signature_agent='"https://api.veriswarm.ai"',
+            signature_agent="https://api.veriswarm.ai",
             created=1000,
             expires=1300,
             keyid="key-1",
         )
         assert '"@authority": example.com' in base
+        assert '"signature-agent": "https://api.veriswarm.ai"' in base
 
         try:
             WebBotAuthSigner(private_key_pem="dummy", key_id="k1")
