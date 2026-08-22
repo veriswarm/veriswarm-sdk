@@ -5,10 +5,13 @@
   "main": "veriswarm_client.mjs",
   "type": "module",
   "exports": {
-    ".": "./veriswarm_client.mjs"
+    ".": "./veriswarm_client.mjs",
+    "./webbotauth": "./webbotauth.mjs",
+    "./webbotauth.mjs": "./webbotauth.mjs"
   },
   "files": [
     "veriswarm_client.mjs",
+    "webbotauth.mjs",
     "secret_tripwire.mjs",
     "secret_rules_manifest.json",
     "README.md",

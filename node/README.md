@@ -121,6 +121,28 @@ await client.createManifest("agt_123", { capabilities: ["search", "summarize"] }
 const manifests = await client.getManifests("agt_123");
 ```
 
+## Web Bot Auth (signed agents)
+
+Sign outbound HTTP requests per the IETF Web Bot Auth profile (RFC 9421 HTTP Message Signatures with Ed25519), so your agent is cryptographically identifiable at the edge (e.g. Cloudflare, Google). VeriSwarm issues the Ed25519 key pair via `POST /v1/suite/passport/webbotauth/keys` and returns the private key **exactly once** in that response — VeriSwarm never stores it. Save it somewhere durable (secret manager, env var) immediately; there is no way to retrieve it again later.
+
+```javascript
+import { WebBotAuthSigner } from "@veriswarm/sdk/webbotauth.mjs";
+
+const signer = new WebBotAuthSigner({
+  privateKeyPem: process.env.WEBBOTAUTH_PRIVATE_KEY_PEM,
+  keyId: "key_abc123", // returned alongside the private key at issuance
+});
+
+// Option 1: get the three headers and attach them yourself
+const headers = signer.signRequest({ url: "https://target.example/api/data" });
+// { "Signature-Agent": ..., "Signature-Input": ..., "Signature": ... }
+
+// Option 2: signed fetch() wrapper
+const response = await signer.fetch("https://target.example/api/data", { method: "GET" });
+```
+
+Being listed in VeriSwarm's signature directory is VeriSwarm's own verification claim about the key. Being honored as a signed agent by a given edge provider (e.g. Cloudflare) is a separate matter: it additionally requires VeriSwarm's one-time agent-operator registration with that provider, plus ongoing per-agent behavioral compliance (respecting `robots.txt`, keeping request rates reasonable). Signing requests does not itself guarantee bypassing blocks or guaranteed access to any site.
+
 ## Vault (Audit Ledger)
 
 ```javascript
@@ -285,6 +307,11 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `reputationLookup(slug)` | Shared reputation lookup |
 | `getBadgeUrl(slug, options?)` | Embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |
+| **Web Bot Auth** (`webbotauth.mjs`, separate entry point) | |
+| `new WebBotAuthSigner({ privateKeyPem, keyId, signatureAgent? })` | Construct a signer from an issued Ed25519 key |
+| `signer.signRequest({ url, created?, expiresInSeconds?, nonce? })` | Returns `{ "Signature-Agent", "Signature-Input", "Signature" }` |
+| `signer.fetch(url, init?)` | Signed `fetch()` wrapper |
+| `buildSignatureBase({ authority, signatureAgent, created, expires, keyid, nonce?, tag? })` | Low-level RFC 9421 signature base builder |
 | **Cortex Workflows** | |
 | `listWorkflows({ isActive? })` | List workflows |
 | `getWorkflow(workflowId)` | Get workflow + recent executions |
