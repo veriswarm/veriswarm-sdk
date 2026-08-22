@@ -32,6 +32,7 @@ dependencies = []
 
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2"]
+webbotauth = ["cryptography>=42"]
 
 [project.urls]
 Homepage = "https://veriswarm.ai"

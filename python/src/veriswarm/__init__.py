@@ -13,11 +13,14 @@ Usage:
     )
 """
 from veriswarm.client import VeriSwarmClient, VeriSwarmClientError
+from veriswarm.webbotauth import WebBotAuthError, WebBotAuthSigner
 
 __version__ = "0.3.0"
 
 __all__ = [
     "VeriSwarmClient",
     "VeriSwarmClientError",
+    "WebBotAuthSigner",
+    "WebBotAuthError",
     "__version__",
 ]

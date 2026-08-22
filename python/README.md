@@ -146,6 +146,41 @@ client.create_manifest("agt_123", {"capabilities": ["search", "summarize"]})
 manifests = client.get_manifests("agt_123")
 ```
 
+## Web Bot Auth (signed agents)
+
+Signs outbound HTTP requests per the IETF Web Bot Auth profile of RFC 9421
+(HTTP Message Signatures, Ed25519), so your agent is cryptographically
+identifiable at the edge (Cloudflare, Google, and other verifiers that
+support the directory). Requires the optional `cryptography` package:
+
+```bash
+pip install veriswarm[webbotauth]
+```
+
+```python
+from veriswarm import WebBotAuthSigner
+
+signer = WebBotAuthSigner(private_key_pem=my_private_key_pem, key_id="key_abc123")
+headers = signer.sign_request("https://example.com/api/resource")
+# headers == {"Signature-Agent": ..., "Signature-Input": ..., "Signature": ...}
+
+# Attach `headers` to the outbound request (merge into your existing
+# headers dict) before sending it with requests/httpx/urllib/etc.
+```
+
+VeriSwarm issues the Ed25519 keypair via
+`POST /v1/suite/passport/webbotauth/keys` and returns the private key
+**exactly once** in that response — VeriSwarm never stores it, so save it
+securely on issuance.
+
+Being listed in VeriSwarm's signature directory is VeriSwarm's own
+verification claim about your agent's identity. Being honored as a signed
+agent by a given edge provider (e.g. Cloudflare) additionally requires that
+provider's own one-time agent-operator registration and ongoing per-agent
+behavioral compliance — respecting `robots.txt` and keeping request rates
+reasonable. Signing a request does not by itself guarantee bypassing any
+block or guarantee access to any site.
+
 ## Vault (Audit Ledger)
 
 ```python
