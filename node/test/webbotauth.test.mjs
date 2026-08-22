@@ -394,10 +394,41 @@ describe("WebBotAuthSigner.fetch", () => {
     const { url, init } = calls[0];
     expect(url).toBe("https://example.com/path");
     expect(init.method).toBe("POST");
-    expect(init.headers["content-type"]).toBe("application/json");
-    expect(init.headers["Signature-Agent"]).toBe('"https://api.veriswarm.ai"');
-    expect(init.headers["Signature-Input"]).toMatch(/^sig1=/);
-    expect(init.headers["Signature"]).toMatch(/^sig1=:[A-Za-z0-9+/=]+:$/);
+    expect(init.headers.get("content-type")).toBe("application/json");
+    expect(init.headers.get("Signature-Agent")).toBe('"https://api.veriswarm.ai"');
+    expect(init.headers.get("Signature-Input")).toMatch(/^sig1=/);
+    expect(init.headers.get("Signature")).toMatch(/^sig1=:[A-Za-z0-9+/=]+:$/);
+  });
+
+  it("preserves caller headers supplied as a standard Headers object", async () => {
+    const { privateKeyPem } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: "k" });
+
+    const calls = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, init });
+      return { ok: true, status: 200 };
+    };
+    try {
+      await signer.fetch("https://example.com/path", {
+        method: "POST",
+        headers: new Headers({
+          "content-type": "application/json",
+          "x-request-id": "req-1",
+        }),
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    expect(calls).toHaveLength(1);
+    const { init } = calls[0];
+    expect(init.headers.get("content-type")).toBe("application/json");
+    expect(init.headers.get("x-request-id")).toBe("req-1");
+    expect(init.headers.get("Signature-Agent")).toBe('"https://api.veriswarm.ai"');
+    expect(init.headers.get("Signature-Input")).toMatch(/^sig1=/);
+    expect(init.headers.get("Signature")).toMatch(/^sig1=:[A-Za-z0-9+/=]+:$/);
   });
 });
 

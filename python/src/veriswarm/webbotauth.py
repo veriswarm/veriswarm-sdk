@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import ipaddress
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -92,12 +93,22 @@ def _derive_authority(url: str) -> str:
     if not parsed.hostname:
         raise ValueError(f"URL has no host to derive an authority from: {url!r}")
 
-    host = parsed.hostname.lower()
+    raw_host = parsed.hostname
+    try:
+        ip = ipaddress.ip_address(raw_host)
+    except ValueError:
+        host = raw_host.encode("idna").decode("ascii").lower()
+    else:
+        host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
     port = parsed.port
     default_port = _DEFAULT_PORTS.get(parsed.scheme)
     if port is not None and port != default_port:
         return f"{host}:{port}"
     return host
+
+
+def _is_integer_seconds(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _build_signature_params(
@@ -145,6 +156,11 @@ def build_signature_base(
     `Signature-Agent`, and `Signature-Input` headers of the request it
     receives, so every byte here is load-bearing.
     """
+    if not _is_integer_seconds(created):
+        raise ValueError("created must be an integer (Unix seconds)")
+    if not _is_integer_seconds(expires):
+        raise ValueError("expires must be an integer (Unix seconds)")
+
     quoted_signature_agent = _quote_string(signature_agent)
     params = _build_signature_params(
         created=created, expires=expires, keyid=keyid, nonce=nonce, tag=tag
@@ -214,12 +230,17 @@ class WebBotAuthSigner:
         """
         if not url or not url.strip():
             raise ValueError("url is required")
-        if expires_in_seconds <= 0:
-            raise ValueError("expires_in_seconds must be positive")
+        if (
+            not _is_integer_seconds(expires_in_seconds)
+            or expires_in_seconds <= 0
+        ):
+            raise ValueError("expires_in_seconds must be a positive integer")
 
         authority = _derive_authority(url)
         if created is None:
             created = int(time.time())
+        elif not _is_integer_seconds(created):
+            raise ValueError("created must be an integer (Unix seconds)")
         expires = created + expires_in_seconds
 
         base = build_signature_base(

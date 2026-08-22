@@ -154,6 +154,9 @@ def test_signature_header_matches_expected_shape():
         ("http://example.com:80/path", "example.com"),
         ("http://example.com:8080/path", "example.com:8080"),
         ("https://EXAMPLE.com/PATH", "example.com"),
+        ("https://[2001:db8::1]/path", "[2001:db8::1]"),
+        ("https://[2001:db8::1]:8443/path", "[2001:db8::1]:8443"),
+        ("https://例え.jp/path", "xn--r8jz45g.jp"),
     ],
 )
 def test_derive_authority(url, expected):
@@ -435,6 +438,39 @@ def test_sign_request_rejects_non_positive_expires_in_seconds():
     signer = WebBotAuthSigner(private_key_pem=pem, key_id="key-1")
     with pytest.raises(ValueError):
         signer.sign_request("https://example.com/", expires_in_seconds=0)
+
+
+def test_sign_request_rejects_non_integer_created():
+    _, pem = _keypair()
+    signer = WebBotAuthSigner(private_key_pem=pem, key_id="key-1")
+    with pytest.raises(ValueError, match="created"):
+        signer.sign_request("https://example.com/", created=1000.5)
+
+
+def test_sign_request_rejects_non_integer_expires_in_seconds():
+    _, pem = _keypair()
+    signer = WebBotAuthSigner(private_key_pem=pem, key_id="key-1")
+    with pytest.raises(ValueError, match="expires_in_seconds"):
+        signer.sign_request("https://example.com/", expires_in_seconds=300.0)
+
+
+def test_build_signature_base_rejects_non_integer_timestamps():
+    with pytest.raises(ValueError, match="created"):
+        build_signature_base(
+            authority="example.com",
+            signature_agent=DEFAULT_SIGNATURE_AGENT,
+            created=1000.5,
+            expires=1300,
+            keyid="key-1",
+        )
+    with pytest.raises(ValueError, match="expires"):
+        build_signature_base(
+            authority="example.com",
+            signature_agent=DEFAULT_SIGNATURE_AGENT,
+            created=1000,
+            expires=1300.5,
+            keyid="key-1",
+        )
 
 
 # ---------------------------------------------------------------------------
