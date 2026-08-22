@@ -58,9 +58,15 @@ function buildSignatureParams({ created, expires, nonce = null, keyid, tag = TAG
 /**
  * Build the RFC 9421 signature base for the Web Bot Auth profile.
  *
+ * `signatureAgent` is the RAW directory origin (e.g. `https://api.veriswarm.ai`)
+ * — callers never pre-quote it. This function does the RFC 8941 String
+ * quoting/escaping internally (same as it already does for `keyid`/`nonce`),
+ * so the origin appears quoted exactly once in the returned base, matching
+ * what a verifier reconstructs from the `Signature-Agent` header.
+ *
  * @param {object} options
  * @param {string} options.authority - request host[:port], lowercase, from deriveAuthority().
- * @param {string} options.signatureAgent - the RFC 8941 quoted directory origin, e.g. `"https://api.veriswarm.ai"`.
+ * @param {string} options.signatureAgent - the RAW directory origin, e.g. `https://api.veriswarm.ai` (not pre-quoted).
  * @param {number} options.created - integer Unix seconds.
  * @param {number} options.expires - integer Unix seconds.
  * @param {string} options.keyid - the signer's key id.
@@ -70,14 +76,16 @@ function buildSignatureParams({ created, expires, nonce = null, keyid, tag = TAG
  */
 export function buildSignatureBase({ authority, signatureAgent, created, expires, keyid, nonce = null, tag = TAG }) {
   if (!authority) throw new Error("authority is required");
-  if (!signatureAgent) throw new Error("signatureAgent is required");
+  if (!signatureAgent || !String(signatureAgent).trim()) {
+    throw new Error("signatureAgent is required");
+  }
   if (!Number.isInteger(created)) throw new Error("created must be an integer (Unix seconds)");
   if (!Number.isInteger(expires)) throw new Error("expires must be an integer (Unix seconds)");
   if (!keyid) throw new Error("keyid is required");
   const params = buildSignatureParams({ created, expires, nonce, keyid, tag });
   return [
     `"@authority": ${authority}`,
-    `"signature-agent": ${signatureAgent}`,
+    `"signature-agent": ${quoteString(signatureAgent)}`,
     `"@signature-params": ${params}`,
   ].join("\n");
 }
@@ -130,21 +138,25 @@ export class WebBotAuthSigner {
 
     const authority = deriveAuthority(url);
     const expires = created + expiresInSeconds;
-    const quotedAgent = quoteString(this.signatureAgent);
 
+    // Pass the RAW origin — buildSignatureBase does the RFC 8941 quoting
+    // internally. Passing an already-quoted value here would double-quote it.
     const base = buildSignatureBase({
       authority,
-      signatureAgent: quotedAgent,
+      signatureAgent: this.signatureAgent,
       created,
       expires,
       keyid: this.keyId,
       nonce,
     });
 
-    // Extract the params substring directly from the base we just signed,
-    // rather than recomputing it, so Signature-Input is byte-identical to
-    // "@signature-params" by construction — never by coincidence.
+    // Extract the quoted signature-agent and the params substring directly
+    // from the base we just signed, rather than recomputing them, so both
+    // Signature-Agent and Signature-Input are byte-identical to what's in
+    // the signed base by construction — never by coincidence.
     const lines = base.split("\n");
+    const agentLinePrefix = '"signature-agent": ';
+    const quotedAgent = lines[1].slice(agentLinePrefix.length);
     const paramsLinePrefix = '"@signature-params": ';
     const params = lines[lines.length - 1].slice(paramsLinePrefix.length);
 

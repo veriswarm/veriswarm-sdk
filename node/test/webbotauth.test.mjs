@@ -77,8 +77,9 @@ describe("WebBotAuthSigner.signRequest — known-answer round trip", () => {
     const headers = signer.signRequest({ url: "https://api.test:9443/x", created });
 
     const base = buildSignatureBase({
+      // RAW origin, per contract — buildSignatureBase quotes internally.
       authority: "api.test:9443",
-      signatureAgent: headers["Signature-Agent"],
+      signatureAgent: "https://api.veriswarm.ai",
       created,
       expires,
       keyid: "key-2",
@@ -103,8 +104,9 @@ describe("WebBotAuthSigner.signRequest — Signature-Input round-trips into the 
     });
 
     const base = buildSignatureBase({
+      // RAW origin (signer default), per contract.
       authority: "example.com",
-      signatureAgent: headers["Signature-Agent"],
+      signatureAgent: "https://api.veriswarm.ai",
       created: 1_700_000_200,
       expires: 1_700_000_500,
       keyid: "key-3",
@@ -336,8 +338,9 @@ describe("quoting / escaping of caller-supplied keyid and nonce", () => {
     });
 
     const base = buildSignatureBase({
+      // RAW origin (signer default), per contract.
       authority: "example.com",
-      signatureAgent: headers["Signature-Agent"],
+      signatureAgent: "https://api.veriswarm.ai",
       created: 1,
       expires: 301,
       keyid: 'k"1',
@@ -440,10 +443,10 @@ describe("constructor validation", () => {
 });
 
 describe("buildSignatureBase", () => {
-  it("produces the exact three-line base with the exact param order", () => {
+  it("takes a RAW signatureAgent and quotes it internally (does not double-quote)", () => {
     const base = buildSignatureBase({
       authority: "example.com",
-      signatureAgent: '"https://api.veriswarm.ai"',
+      signatureAgent: "https://api.veriswarm.ai", // raw, not pre-quoted
       created: 1,
       expires: 301,
       keyid: "k1",
@@ -461,13 +464,66 @@ describe("buildSignatureBase", () => {
   it("omits nonce from params when not provided", () => {
     const base = buildSignatureBase({
       authority: "example.com",
-      signatureAgent: '"https://api.veriswarm.ai"',
+      signatureAgent: "https://api.veriswarm.ai",
       created: 1,
       expires: 301,
       keyid: "k1",
     });
     expect(base).toContain(
       '"@signature-params": ("@authority" "signature-agent");created=1;expires=301;keyid="k1";tag="web-bot-auth"'
+    );
+  });
+
+  it("rejects an empty signatureAgent", () => {
+    expect(() =>
+      buildSignatureBase({
+        authority: "example.com",
+        signatureAgent: "",
+        created: 1,
+        expires: 301,
+        keyid: "k1",
+      })
+    ).toThrow(/signatureAgent/);
+  });
+
+  // Cross-SDK parity vector — captured from a live run of both the Node and
+  // Python SDKs signing with the same Ed25519 key. If this value ever needs
+  // to change, `python/tests/test_webbotauth.py` and the API server's
+  // verifier MUST change in lockstep, or the two SDKs and the server will
+  // silently disagree on the wire format.
+  it("matches the cross-SDK golden vector", () => {
+    const base = buildSignatureBase({
+      authority: "example.com",
+      signatureAgent: "https://api.veriswarm.ai", // RAW origin
+      created: 1000,
+      expires: 1300,
+      keyid: 'k"1',
+      nonce: 'n"2',
+    });
+
+    expect(base).toBe(
+      [
+        '"@authority": example.com',
+        '"signature-agent": "https://api.veriswarm.ai"',
+        '"@signature-params": ("@authority" "signature-agent");created=1000;expires=1300;nonce="n\\"2";keyid="k\\"1";tag="web-bot-auth"',
+      ].join("\n")
+    );
+  });
+
+  it("golden vector: WebBotAuthSigner emits the matching Signature-Input and Signature-Agent", () => {
+    const { privateKeyPem } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: 'k"1' });
+
+    const headers = signer.signRequest({
+      url: "https://example.com/",
+      created: 1000,
+      expiresInSeconds: 300,
+      nonce: 'n"2',
+    });
+
+    expect(headers["Signature-Agent"]).toBe('"https://api.veriswarm.ai"');
+    expect(headers["Signature-Input"]).toBe(
+      'sig1=("@authority" "signature-agent");created=1000;expires=1300;nonce="n\\"2";keyid="k\\"1";tag="web-bot-auth"'
     );
   });
 });
