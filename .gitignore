@@ -19,3 +19,6 @@ node_modules/
 # OS
 .DS_Store
 .serena/
+
+# git worktrees (local scratch — never commit)
+.worktrees/
