@@ -257,6 +257,114 @@ describe("created/expires/nonce handling", () => {
     expect(created).toBeGreaterThanOrEqual(before);
     expect(created).toBeLessThanOrEqual(after);
   });
+
+  it("rejects a zero expiresInSeconds", () => {
+    const { privateKeyPem } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: "k" });
+    expect(() =>
+      signer.signRequest({ url: "https://example.com/", created: 1, expiresInSeconds: 0 })
+    ).toThrow(/expiresInSeconds/);
+  });
+
+  it("rejects a negative expiresInSeconds instead of silently emitting an already-expired signature", () => {
+    const { privateKeyPem } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: "k" });
+    expect(() =>
+      signer.signRequest({ url: "https://example.com/", created: 1000, expiresInSeconds: -10 })
+    ).toThrow(/expiresInSeconds/);
+  });
+});
+
+describe("quoting / escaping of caller-supplied keyid and nonce", () => {
+  it("escapes a double-quote inside keyid so it cannot smuggle extra params into the signed base", () => {
+    const { privateKeyPem, publicKey } = makeKeyPair();
+    const maliciousKeyId = 'k";x="1';
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: maliciousKeyId });
+
+    const headers = signer.signRequest({ url: "https://example.com/", created: 1 });
+
+    // No unescaped-quote breakout: exactly two `keyid=` / injected-param
+    // boundaries should not appear as a bare `x="1"` param.
+    expect(headers["Signature-Input"]).not.toContain('x="1"');
+    expect(headers["Signature-Input"]).toContain('keyid="k\\";x=\\"1"');
+
+    // The signature must still verify against the base built from the
+    // *escaped* keyid — the escaping must not have desynced the base from
+    // what actually got signed.
+    const params = paramsFromSignatureInput(headers["Signature-Input"]);
+    const base = [
+      `"@authority": example.com`,
+      `"signature-agent": ${headers["Signature-Agent"]}`,
+      `"@signature-params": ${params}`,
+    ].join("\n");
+    const sigBytes = Buffer.from(headers["Signature"].match(/:(.+):/)[1], "base64");
+    expect(verify(null, Buffer.from(base, "utf8"), publicKey, sigBytes)).toBe(true);
+  });
+
+  it("escapes a double-quote inside nonce so it cannot smuggle extra params into the signed base", () => {
+    const { privateKeyPem, publicKey } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: "k" });
+    const maliciousNonce = 'n";evil="param';
+
+    const headers = signer.signRequest({
+      url: "https://example.com/",
+      created: 1,
+      nonce: maliciousNonce,
+    });
+
+    expect(headers["Signature-Input"]).not.toContain('evil="param"');
+    expect(headers["Signature-Input"]).toContain('nonce="n\\";evil=\\"param"');
+
+    const params = paramsFromSignatureInput(headers["Signature-Input"]);
+    const base = [
+      `"@authority": example.com`,
+      `"signature-agent": ${headers["Signature-Agent"]}`,
+      `"@signature-params": ${params}`,
+    ].join("\n");
+    const sigBytes = Buffer.from(headers["Signature"].match(/:(.+):/)[1], "base64");
+    expect(verify(null, Buffer.from(base, "utf8"), publicKey, sigBytes)).toBe(true);
+  });
+
+  it("keeps Signature-Input byte-identical to @signature-params even with quote-containing keyid and nonce", () => {
+    const { privateKeyPem } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: 'k"1' });
+
+    const headers = signer.signRequest({
+      url: "https://example.com/",
+      created: 1,
+      nonce: 'n"2',
+    });
+
+    const base = buildSignatureBase({
+      authority: "example.com",
+      signatureAgent: headers["Signature-Agent"],
+      created: 1,
+      expires: 301,
+      keyid: 'k"1',
+      nonce: 'n"2',
+    });
+
+    const paramsFromHeader = paramsFromSignatureInput(headers["Signature-Input"]);
+    const paramsInBase = paramsFromBase(base);
+    expect(paramsFromHeader).toBe(paramsInBase);
+  });
+
+  it("escapes a backslash inside keyid", () => {
+    const { privateKeyPem, publicKey } = makeKeyPair();
+    const signer = new WebBotAuthSigner({ privateKeyPem, keyId: "k\\1" });
+    const headers = signer.signRequest({ url: "https://example.com/", created: 1 });
+
+    expect(headers["Signature-Input"]).toContain('keyid="k\\\\1"');
+
+    const params = paramsFromSignatureInput(headers["Signature-Input"]);
+    const base = [
+      `"@authority": example.com`,
+      `"signature-agent": ${headers["Signature-Agent"]}`,
+      `"@signature-params": ${params}`,
+    ].join("\n");
+    const sigBytes = Buffer.from(headers["Signature"].match(/:(.+):/)[1], "base64");
+    expect(verify(null, Buffer.from(base, "utf8"), publicKey, sigBytes)).toBe(true);
+  });
 });
 
 describe("WebBotAuthSigner.fetch", () => {
@@ -314,6 +422,20 @@ describe("constructor validation", () => {
     const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
     const ecPem = privateKey.export({ type: "pkcs8", format: "pem" });
     expect(() => new WebBotAuthSigner({ privateKeyPem: ecPem, keyId: "k" })).toThrow(/Ed25519/);
+  });
+
+  it("throws when signatureAgent is explicitly an empty string", () => {
+    const { privateKeyPem } = makeKeyPair();
+    expect(
+      () => new WebBotAuthSigner({ privateKeyPem, keyId: "k", signatureAgent: "" })
+    ).toThrow(/signatureAgent/);
+  });
+
+  it("throws when signatureAgent is whitespace-only", () => {
+    const { privateKeyPem } = makeKeyPair();
+    expect(
+      () => new WebBotAuthSigner({ privateKeyPem, keyId: "k", signatureAgent: "   " })
+    ).toThrow(/signatureAgent/);
   });
 });
 

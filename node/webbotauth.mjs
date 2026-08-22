@@ -45,8 +45,13 @@ function quoteString(value) {
 
 function buildSignatureParams({ created, expires, nonce = null, keyid, tag = TAG }) {
   let params = `("@authority" "signature-agent");created=${created};expires=${expires}`;
-  if (nonce) params += `;nonce="${nonce}"`;
-  params += `;keyid="${keyid}";tag="${tag}"`;
+  // keyid and nonce are caller-supplied (nonce is fully caller-controlled via
+  // the public signRequest() API) and MUST be quoted as RFC 8941 Strings —
+  // an unescaped `"` would break out of its quoted-string param and let
+  // arbitrary extra params be smuggled into both the signed base and the
+  // Signature-Input header.
+  if (nonce) params += `;nonce=${quoteString(nonce)}`;
+  params += `;keyid=${quoteString(keyid)};tag=${quoteString(tag)}`;
   return params;
 }
 
@@ -87,6 +92,9 @@ export class WebBotAuthSigner {
   constructor({ privateKeyPem, keyId, signatureAgent = DEFAULT_SIGNATURE_AGENT } = {}) {
     if (!privateKeyPem) throw new Error("privateKeyPem is required");
     if (!keyId) throw new Error("keyId is required");
+    if (!signatureAgent || !String(signatureAgent).trim()) {
+      throw new Error("signatureAgent must be a non-empty string");
+    }
     let keyObject;
     try {
       keyObject = createPrivateKey(privateKeyPem);
@@ -116,7 +124,9 @@ export class WebBotAuthSigner {
   signRequest({ url, created = Math.floor(Date.now() / 1000), expiresInSeconds = DEFAULT_EXPIRES_IN_SECONDS, nonce = null } = {}) {
     if (!url) throw new Error("url is required");
     if (!Number.isInteger(created)) throw new Error("created must be an integer (Unix seconds)");
-    if (!Number.isInteger(expiresInSeconds)) throw new Error("expiresInSeconds must be an integer");
+    if (!Number.isInteger(expiresInSeconds) || expiresInSeconds <= 0) {
+      throw new Error("expiresInSeconds must be a positive integer");
+    }
 
     const authority = deriveAuthority(url);
     const expires = created + expiresInSeconds;
