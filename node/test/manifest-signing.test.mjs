@@ -99,6 +99,21 @@ describe("canonicalManifestContent — nested key sorting", () => {
     const content = canonicalManifestContent(reverseOrderInputs);
     expect(content).toBe(GOLDEN_CANONICAL_CONTENT);
   });
+
+  it("escapes non-ASCII strings and keys like Python json.dumps ensure_ascii", () => {
+    const content = canonicalManifestContent({
+      version: "1.0",
+      ai_disclosure: "Caf\u00e9 \u{1f600}",
+      principal_ref: {
+        type: "organization",
+        ["na\u00efve"]: "M\u00fcnchen",
+      },
+    });
+
+    expect(content).toBe(
+      '{"ai_disclosure":"Caf\\u00e9 \\ud83d\\ude00","capabilities":[],"principal_ref":{"na\\u00efve":"M\\u00fcnchen","type":"organization"},"required_tools":[],"version":"1.0"}'
+    );
+  });
 });
 
 describe("canonicalManifestContent — unset fields and array sorting", () => {

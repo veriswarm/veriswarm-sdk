@@ -29,6 +29,50 @@
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 
 /**
+ * Quote a JSON string the way Python's json.dumps(..., ensure_ascii=True)
+ * does. JSON.stringify leaves non-ASCII characters as UTF-8, while the
+ * server-side Python canonicalizer escapes them as \uXXXX sequences.
+ */
+function quotePythonJsonString(value) {
+  const str = String(value);
+  let out = '"';
+  for (let i = 0; i < str.length; i += 1) {
+    const code = str.charCodeAt(i);
+    switch (code) {
+      case 0x08:
+        out += "\\b";
+        break;
+      case 0x09:
+        out += "\\t";
+        break;
+      case 0x0a:
+        out += "\\n";
+        break;
+      case 0x0c:
+        out += "\\f";
+        break;
+      case 0x0d:
+        out += "\\r";
+        break;
+      case 0x22:
+        out += '\\"';
+        break;
+      case 0x5c:
+        out += "\\\\";
+        break;
+      default:
+        if (code < 0x20 || code >= 0x7f) {
+          out += `\\u${code.toString(16).padStart(4, "0")}`;
+        } else {
+          out += str[i];
+        }
+    }
+  }
+  out += '"';
+  return out;
+}
+
+/**
  * Recursively serialize a JSON-compatible value the way Python's
  * `json.dumps(value, sort_keys=True, separators=(",", ":"))` would:
  * object keys sorted ascending at every nesting level, no whitespace.
@@ -40,7 +84,7 @@ import { createPrivateKey, sign as cryptoSign } from "node:crypto";
  */
 function canonicalize(value) {
   if (value === null || value === undefined) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "string") return quotePythonJsonString(value);
   if (typeof value === "number") {
     if (!Number.isFinite(value)) {
       throw new Error("cannot canonicalize a non-finite number (NaN/Infinity)");
@@ -53,7 +97,7 @@ function canonicalize(value) {
   }
   if (typeof value === "object") {
     const keys = Object.keys(value).sort();
-    const entries = keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`);
+    const entries = keys.map((key) => `${quotePythonJsonString(key)}:${canonicalize(value[key])}`);
     return `{${entries.join(",")}}`;
   }
   throw new Error(`cannot canonicalize value of type ${typeof value}`);
