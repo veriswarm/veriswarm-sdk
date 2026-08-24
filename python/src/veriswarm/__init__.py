@@ -13,6 +13,11 @@ Usage:
     )
 """
 from veriswarm.client import VeriSwarmClient, VeriSwarmClientError
+from veriswarm.manifest_signing import (
+    ManifestSigningError,
+    canonical_manifest_content,
+    sign_manifest,
+)
 from veriswarm.webbotauth import WebBotAuthError, WebBotAuthSigner
 
 __version__ = "0.3.0"
@@ -22,5 +27,8 @@ __all__ = [
     "VeriSwarmClientError",
     "WebBotAuthSigner",
     "WebBotAuthError",
+    "sign_manifest",
+    "canonical_manifest_content",
+    "ManifestSigningError",
     "__version__",
 ]

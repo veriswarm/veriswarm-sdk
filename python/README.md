@@ -181,6 +181,63 @@ behavioral compliance — respecting `robots.txt` and keeping request rates
 reasonable. Signing a request does not by itself guarantee bypassing any
 block or guarantee access to any site.
 
+## Manifest signing
+
+Signs the canonical content of a Passport agent manifest with Ed25519, so
+`create_manifest` can verify it was produced by the key holder. Uses the
+same Ed25519 keypair infrastructure as Web Bot Auth above, and requires the
+same optional `cryptography` package:
+
+```bash
+pip install veriswarm[webbotauth]
+```
+
+```python
+from veriswarm import sign_manifest
+
+result = sign_manifest(
+    version="1.0",
+    capabilities=["calendar.read", "email.send"],
+    required_tools=["calendar"],
+    ai_disclosure="You are chatting with an AI assistant operated by Acme Corp.",
+    principal_ref={
+        "type": "organization",
+        "name": "Acme Corp",
+        "identifier": "acme-001",
+        "source": "explicit",
+    },
+    private_key_pem=my_private_key_pem,
+    kid="key_abc123",
+)
+# result == {"signature": "...", "signing_kid": "key_abc123"}
+
+client.create_manifest("agt_123", {
+    "version": "1.0",
+    "capabilities": ["calendar.read", "email.send"],
+    "required_tools": ["calendar"],
+    "ai_disclosure": "You are chatting with an AI assistant operated by Acme Corp.",
+    "principal_ref": {
+        "type": "organization",
+        "name": "Acme Corp",
+        "identifier": "acme-001",
+        "source": "explicit",
+    },
+    "signature": result["signature"],
+    "signing_kid": result["signing_kid"],
+})
+```
+
+VeriSwarm issues the Ed25519 keypair via
+`POST /v1/suite/passport/webbotauth/keys` and returns the private key
+**exactly once** in that response — VeriSwarm never stores it, so save it
+securely on issuance and reuse it for both request signing and manifest
+signing.
+
+Signing a manifest is optional. Submit `signature` and `signing_kid`
+together (both or neither) on `create_manifest` — the server verifies the
+signature against the referenced key and rejects the request if they don't
+match or if the key can't be found.
+
 ## Vault (Audit Ledger)
 
 ```python
