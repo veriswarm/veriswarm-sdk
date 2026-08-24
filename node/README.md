@@ -121,6 +121,36 @@ await client.createManifest("agt_123", { capabilities: ["search", "summarize"] }
 const manifests = await client.getManifests("agt_123");
 ```
 
+## Manifest signing
+
+Sign a Passport manifest's content (`version`, `capabilities`, `required_tools`, `ai_disclosure`, `principal_ref`) with Ed25519 so the VeriSwarm API can verify it on `createManifest`. VeriSwarm issues the Ed25519 signing key via `POST /v1/suite/passport/webbotauth/keys` and returns the private key **exactly once** — VeriSwarm never stores it. Submit the resulting `signature` and `signing_kid` alongside the manifest fields when creating the manifest.
+
+```javascript
+import { signManifest } from "@veriswarm/sdk/manifest-signing.mjs";
+
+const { signature, signing_kid } = signManifest({
+  version: "1.0",
+  capabilities: ["calendar.read", "email.send"],
+  required_tools: ["calendar"],
+  ai_disclosure: "You are chatting with an AI assistant operated by Acme Corp.",
+  principal_ref: { type: "organization", name: "Acme Corp", identifier: "acme-001" },
+  privateKeyPem: process.env.WEBBOTAUTH_PRIVATE_KEY_PEM,
+  kid: "key_abc123", // returned alongside the private key at issuance
+});
+
+await client.createManifest("agt_123", {
+  version: "1.0",
+  capabilities: ["calendar.read", "email.send"],
+  required_tools: ["calendar"],
+  ai_disclosure: "You are chatting with an AI assistant operated by Acme Corp.",
+  principal_ref: { type: "organization", name: "Acme Corp", identifier: "acme-001" },
+  signature,
+  signing_kid,
+});
+```
+
+The signature covers the canonical JSON of those five fields exactly as the server serializes them — object keys sorted recursively, no whitespace — so `signManifest` must be called with the same field values you send to `createManifest`.
+
 ## Web Bot Auth (signed agents)
 
 Sign outbound HTTP requests per the IETF Web Bot Auth profile (RFC 9421 HTTP Message Signatures with Ed25519), so your agent is cryptographically identifiable at the edge (e.g. Cloudflare, Google). VeriSwarm issues the Ed25519 key pair via `POST /v1/suite/passport/webbotauth/keys` and returns the private key **exactly once** in that response — VeriSwarm never stores it. Save it somewhere durable (secret manager, env var) immediately; there is no way to retrieve it again later.

@@ -7,11 +7,14 @@
   "exports": {
     ".": "./veriswarm_client.mjs",
     "./webbotauth": "./webbotauth.mjs",
-    "./webbotauth.mjs": "./webbotauth.mjs"
+    "./webbotauth.mjs": "./webbotauth.mjs",
+    "./manifest-signing": "./manifest-signing.mjs",
+    "./manifest-signing.mjs": "./manifest-signing.mjs"
   },
   "files": [
     "veriswarm_client.mjs",
     "webbotauth.mjs",
+    "manifest-signing.mjs",
     "secret_tripwire.mjs",
     "secret_rules_manifest.json",
     "README.md",
