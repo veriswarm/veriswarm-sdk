@@ -26,6 +26,18 @@ class TestVeriSwarmAPIClient:
         client = self.Client("https://api.veriswarm.ai/", api_key="key123")
         assert client.base_url == "https://api.veriswarm.ai"
 
+    def test_base_url_rejects_external_http(self):
+        with pytest.raises(ValueError, match="base_url must be https://"):
+            self.Client("http://api.veriswarm.ai", api_key="key123")
+
+    def test_base_url_allows_localhost_http_for_dev(self):
+        client = self.Client("http://localhost:8000/", api_key="key123")
+        assert client.base_url == "http://localhost:8000"
+
+    def test_base_url_rejects_relative_urls(self):
+        with pytest.raises(ValueError, match="base_url must be an absolute URL"):
+            self.Client("api.veriswarm.ai", api_key="key123")
+
     def test_headers_with_api_key(self):
         client = self.Client("https://api.veriswarm.ai", api_key="vs_key")
         headers = client._headers(use_agent_key=False)

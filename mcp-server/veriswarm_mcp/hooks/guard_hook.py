@@ -31,6 +31,7 @@ from activity_reporter import (  # noqa: E402
     log_pii_detected,
     log_session_start,
 )
+from veriswarm_mcp.url_security import validate_api_url  # noqa: E402
 
 
 def _load_env_file() -> None:
@@ -48,8 +49,16 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
-API_URL = os.environ.get("VERISWARM_API_URL", "https://api.veriswarm.ai").rstrip("/")
-API_KEY = os.environ.get("VERISWARM_API_KEY", "")
+try:
+    API_URL = validate_api_url(
+        os.environ.get("VERISWARM_API_URL", "https://api.veriswarm.ai"),
+        field_name="VERISWARM_API_URL",
+    )
+except ValueError as exc:
+    print(f"[VeriSwarm Guard] {exc}; API calls disabled", file=sys.stderr)
+    API_URL = ""
+
+API_KEY = os.environ.get("VERISWARM_API_KEY", "") if API_URL else ""
 AGENT_ID = os.environ.get("GUARD_AGENT_ID", "")
 
 # MCP tool prefix

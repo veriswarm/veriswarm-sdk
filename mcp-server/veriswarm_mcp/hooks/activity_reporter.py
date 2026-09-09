@@ -24,6 +24,8 @@ from pathlib import Path
 
 import httpx
 
+from veriswarm_mcp.url_security import validate_api_url
+
 
 # Reap fork()-ed children automatically rather than letting them
 # accumulate as zombies between flushes. Set once at module load —
@@ -67,7 +69,14 @@ def _load_config() -> tuple[str, str, str, str]:
                     elif k == "VERISWARM_AGENT_KEY":
                         agent_key = v
 
-    api_url = (api_url or "https://api.veriswarm.ai").rstrip("/")
+    try:
+        api_url = validate_api_url(
+            api_url or "https://api.veriswarm.ai",
+            field_name="VERISWARM_API_URL",
+        )
+    except ValueError:
+        # Do not risk sending auth headers to a non-HTTPS external endpoint.
+        return "", "", agent_id, ""
     return api_url, api_key, agent_id, agent_key
 
 
