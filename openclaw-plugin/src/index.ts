@@ -199,7 +199,7 @@ interface PluginState {
   sessionScan: boolean;
   blockedTools: Set<string>;
   allowedTools: Set<string> | null;
-  piiSessions: Map<string, string>; // toolName -> sessionId
+  piiSessions: Map<string, string>; // `${conversationId}:${toolName}` -> Guard PII session id
   // Per-conversation outbound-turn counters for Session Sentry.
   // Key: conversation/session id (or "default" when the event carries none).
   // Value: next turn_index to use (pre-increment on each send).
@@ -757,27 +757,30 @@ export const pluginEntry: PluginEntry = {
             type: "string",
             description: "The tool whose output contained the tokens (helps find the right session)",
           },
+          conversation_id: {
+            type: "string",
+            description:
+              "Conversation/session id associated with the tokens. Required when OpenClaw provides conversation ids.",
+          },
         },
         required: ["text"],
       },
       handler: async (params: any) => {
         if (!state.client) return "VeriSwarm not configured";
         try {
-          // Find session ID from the tool name or try all sessions
-          let sessionId = params.tool_name
-            ? state.piiSessions.get(params.tool_name)
-            : undefined;
+          const toolName =
+            typeof params.tool_name === "string" && params.tool_name
+              ? params.tool_name
+              : "__message__";
+          const conversationId =
+            typeof params.conversation_id === "string" && params.conversation_id
+              ? params.conversation_id
+              : undefined;
+          const sessionId = state.piiSessions.get(
+            piiSessionKey(toolName, conversationId)
+          );
 
-          if (!sessionId) {
-            // Try each session until one resolves tokens
-            for (const [, sid] of state.piiSessions) {
-              const result = await state.client.rehydratePii(params.text, sid);
-              if (result.tokens_resolved > 0) {
-                return result.rehydrated_text;
-              }
-            }
-            return params.text; // No tokens resolved
-          }
+          if (!sessionId) return params.text; // No matching session in this conversation/tool scope.
 
           const result = await state.client.rehydratePii(params.text, sessionId);
           return result.rehydrated_text;

@@ -350,3 +350,82 @@ class TestGuardScanSessionValidation:
         assert posted["body"]["turn_index"] == 0
         assert posted["body"]["agent_id"] == "agt_abc123"
         assert "blocked" in parsed
+
+
+class TestGuardPathIdValidation:
+    """Path-interpolated Guard tools must reject traversal-shaped IDs."""
+
+    def _make_client(self):
+        from veriswarm_mcp.client import VeriSwarmAPIClient
+        return VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+
+    def _register_and_get_tools(self, client):
+        from veriswarm_mcp.tools.guard import register
+
+        captured_fn = {}
+
+        class _CaptureTool:
+            def tool(self):
+                def decorator(fn):
+                    captured_fn[fn.__name__] = fn
+                    return fn
+                return decorator
+
+        register(_CaptureTool(), client)
+        return captured_fn
+
+    def test_kill_agent_rejects_path_escape_before_post(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tools = self._register_and_get_tools(client)
+
+        with patch.object(client, "post", side_effect=AssertionError("post called")):
+            result = asyncio.run(tools["kill_agent"]("../admin", "test"))
+
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert parsed["type"] == "ToolValidationError"
+
+    def test_unkill_agent_rejects_path_escape_before_post(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tools = self._register_and_get_tools(client)
+
+        with patch.object(client, "post", side_effect=AssertionError("post called")):
+            result = asyncio.run(tools["unkill_agent"]("../admin"))
+
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert parsed["type"] == "ToolValidationError"
+
+    def test_get_pii_session_rejects_path_escape_before_get(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tools = self._register_and_get_tools(client)
+
+        with patch.object(client, "get", side_effect=AssertionError("get called")):
+            result = asyncio.run(tools["get_pii_session"]("../admin"))
+
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert parsed["type"] == "ToolValidationError"
+
+    def test_revoke_pii_session_rejects_path_escape_before_delete(self):
+        import asyncio
+        import json as _json
+
+        client = self._make_client()
+        tools = self._register_and_get_tools(client)
+
+        with patch.object(client, "delete", side_effect=AssertionError("delete called")):
+            result = asyncio.run(tools["revoke_pii_session"]("../admin"))
+
+        parsed = _json.loads(result)
+        assert "error" in parsed
+        assert parsed["type"] == "ToolValidationError"
