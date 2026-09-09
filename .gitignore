@@ -22,3 +22,4 @@ node_modules/
 
 # git worktrees (local scratch — never commit)
 .worktrees/
+.claude/worktrees/
