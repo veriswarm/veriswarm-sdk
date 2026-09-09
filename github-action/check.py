@@ -594,7 +594,12 @@ def check_ci_exfil():
         "/v1/suite/guard/scan-ci", method="POST", body={"files": payload_files}
     )
     if "error" in result:
-        print(f"::warning::CI exfil scan failed: {result['error']}")
+        msg = f"CI secret-exfiltration scan could not be evaluated: {result['error']}"
+        if FAIL_ON_CI_EXFIL:
+            failures.append(msg)
+            print(f"::error::{msg}")
+        else:
+            print(f"::warning::{msg}")
         return
 
     findings = result.get("findings", [])
