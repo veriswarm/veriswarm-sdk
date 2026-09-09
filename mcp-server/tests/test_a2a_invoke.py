@@ -160,17 +160,21 @@ def test_invoke_polling_does_not_block_event_loop():
         )
         ticker_task = asyncio.create_task(ticker())
         out = await task
-        await ticker_task
-        return out
+        # Sampled *before* awaiting the ticker: if the poll blocked the event
+        # loop, the ticker cannot have resumed while invoke was still running.
+        observed = ticker_ran_during_get.is_set()
+        ticker_task.cancel()
+        await asyncio.gather(ticker_task, return_exceptions=True)
+        return out, observed
 
     get_started_loop = None
     with patch.object(client, "post", side_effect=fake_post), \
          patch.object(client, "get", side_effect=fake_get):
-        out = asyncio.run(run_invoke_and_ticker())
+        out, ticker_ran_before_invoke_returned = asyncio.run(run_invoke_and_ticker())
 
     data = json.loads(out)
     assert data["status"] == "completed"
-    assert ticker_ran_during_get.is_set()
+    assert ticker_ran_before_invoke_returned
 
 
 def test_invoke_rejects_bad_agent_id():
