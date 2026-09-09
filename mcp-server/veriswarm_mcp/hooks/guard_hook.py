@@ -252,7 +252,7 @@ def handle_post_tool_use(event: dict) -> None:
 
 
 def main() -> None:
-    if not API_KEY:
+    if not API_KEY and not SECRETS_DETECTION:
         sys.exit(0)
 
     try:
@@ -264,6 +264,9 @@ def main() -> None:
         sys.exit(0)
 
     hook_event = event.get("hook_event_name", "")
+
+    if not API_KEY and hook_event != "PreToolUse":
+        sys.exit(0)
 
     if hook_event == "SessionStart":
         handle_session_start(event)
