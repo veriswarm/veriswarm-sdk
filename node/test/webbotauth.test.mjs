@@ -277,7 +277,7 @@ describe("created/expires/nonce handling", () => {
   });
 });
 
-describe("quoting / escaping of caller-supplied keyid and nonce", () => {
+describe("quoting / escaping of caller-supplied keyid, nonce, and signatureAgent", () => {
   it("escapes a double-quote inside keyid so it cannot smuggle extra params into the signed base", () => {
     const { privateKeyPem, publicKey } = makeKeyPair();
     const maliciousKeyId = 'k";x="1';
@@ -358,6 +358,49 @@ describe("quoting / escaping of caller-supplied keyid and nonce", () => {
     const headers = signer.signRequest({ url: "https://example.com/", created: 1 });
 
     expect(headers["Signature-Input"]).toContain('keyid="k\\\\1"');
+
+    const params = paramsFromSignatureInput(headers["Signature-Input"]);
+    const base = [
+      `"@authority": example.com`,
+      `"signature-agent": ${headers["Signature-Agent"]}`,
+      `"@signature-params": ${params}`,
+    ].join("\n");
+    const sigBytes = Buffer.from(headers["Signature"].match(/:(.+):/)[1], "base64");
+    expect(verify(null, Buffer.from(base, "utf8"), publicKey, sigBytes)).toBe(true);
+  });
+
+  it("escapes a custom signatureAgent so it cannot smuggle fields into the signed header line", () => {
+    const maliciousSignatureAgent = 'https://agent.example";evil="param\\tail';
+
+    const base = buildSignatureBase({
+      authority: "example.com",
+      signatureAgent: maliciousSignatureAgent,
+      created: 1,
+      expires: 301,
+      keyid: "k",
+    });
+
+    expect(base).not.toContain('evil="param');
+    expect(base.split("\n")[1]).toBe(
+      '"signature-agent": "https://agent.example\\";evil=\\"param\\\\tail"'
+    );
+  });
+
+  it("signs and emits the escaped signatureAgent byte-identically to the reconstructed base", () => {
+    const { privateKeyPem, publicKey } = makeKeyPair();
+    const maliciousSignatureAgent = 'https://agent.example";evil="param\\tail';
+    const signer = new WebBotAuthSigner({
+      privateKeyPem,
+      keyId: "k",
+      signatureAgent: maliciousSignatureAgent,
+    });
+
+    const headers = signer.signRequest({ url: "https://example.com/", created: 1 });
+
+    expect(headers["Signature-Agent"]).toBe(
+      '"https://agent.example\\";evil=\\"param\\\\tail"'
+    );
+    expect(headers["Signature-Agent"]).not.toContain('evil="param');
 
     const params = paramsFromSignatureInput(headers["Signature-Input"]);
     const base = [
