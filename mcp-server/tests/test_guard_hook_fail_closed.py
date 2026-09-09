@@ -127,7 +127,10 @@ def test_guard_hook_allows_localhost_http_for_dev(monkeypatch):
     assert gh.API_KEY == "key123"
 
 
-def test_activity_reporter_drops_keys_for_external_http(monkeypatch):
+def test_activity_reporter_drops_keys_for_external_http(monkeypatch, tmp_path):
+    # Isolate from a developer's real ~/.veriswarm/env, which _load_config()
+    # falls back to whenever the agent key is unset.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("VERISWARM_API_URL", "http://api.veriswarm.ai")
     monkeypatch.setenv("VERISWARM_API_KEY", "key123")
     monkeypatch.delenv("VERISWARM_AGENT_KEY", raising=False)
@@ -140,7 +143,8 @@ def test_activity_reporter_drops_keys_for_external_http(monkeypatch):
     assert agent_key == ""
 
 
-def test_activity_reporter_allows_localhost_http_for_dev(monkeypatch):
+def test_activity_reporter_allows_localhost_http_for_dev(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("VERISWARM_API_URL", "http://127.0.0.1:8787/")
     monkeypatch.setenv("VERISWARM_API_KEY", "key123")
     monkeypatch.delenv("VERISWARM_AGENT_KEY", raising=False)
