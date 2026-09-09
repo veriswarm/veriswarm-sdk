@@ -21,6 +21,10 @@ jobs:
         run: |
           pip install build
           python -m build
+      - name: Install package with test extras
+        run: pip install -e '.[langchain,webbotauth]' pytest
+      - name: Run tests
+        run: python -m pytest -q
 
   node-sdk:
     runs-on: ubuntu-latest
@@ -34,6 +38,10 @@ jobs:
           node-version: '22'
       - name: Verify package
         run: npm pack --dry-run
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
 
   mcp-server:
     runs-on: ubuntu-latest
@@ -49,6 +57,10 @@ jobs:
         run: pip install build
       - name: Verify package builds
         run: python -m build
+      - name: Install package with test deps
+        run: pip install -e . pytest pytest-asyncio
+      - name: Run tests
+        run: python -m pytest -q
 
   openclaw-plugin:
     runs-on: ubuntu-latest
@@ -61,9 +73,41 @@ jobs:
         with:
           node-version: '22'
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Build
         run: npm run build
+      - name: Run tests
+        run: npm test
+
+  cli:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install package with test deps
+        run: pip install -e . pytest
+      - name: Run tests
+        run: python -m pytest -q
+
+  github-action:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: github-action
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test deps
+        run: pip install pytest
+      - name: Run tests
+        run: python -m pytest -q
 
   schemas:
     runs-on: ubuntu-latest

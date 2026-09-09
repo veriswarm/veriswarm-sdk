@@ -1,20 +1,14 @@
 """Tests for VeriSwarm LangChain adapter."""
-import sys
-import os
 import uuid
 from unittest.mock import MagicMock, patch
 import pytest
 
-# Ensure the sdk-python package root is on sys.path so that
-# `veriswarm_client` and `adapters` are importable without installation.
-_SDK_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SDK_ROOT not in sys.path:
-    sys.path.insert(0, _SDK_ROOT)
+pytest.importorskip("langchain_core", reason="requires the veriswarm[langchain] extra")
 
 
 def test_handler_instantiation():
     """Handler can be created with required params."""
-    from adapters.langchain import VeriSwarmCallbackHandler
+    from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
     handler = VeriSwarmCallbackHandler(api_key="test", agent_id="agt_test")
     assert handler.agent_id == "agt_test"
     assert handler.enforce is False
@@ -22,7 +16,7 @@ def test_handler_instantiation():
 
 def test_on_tool_end_reports_event():
     """on_tool_end calls ingest_event with tool.call.success."""
-    from adapters.langchain import VeriSwarmCallbackHandler
+    from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
     handler = VeriSwarmCallbackHandler(api_key="test", agent_id="agt_test")
     handler._client = MagicMock()
 
@@ -39,7 +33,7 @@ def test_on_tool_end_reports_event():
 
 def test_on_tool_error_reports_failure():
     """on_tool_error calls ingest_event with tool.call.failure."""
-    from adapters.langchain import VeriSwarmCallbackHandler
+    from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
     handler = VeriSwarmCallbackHandler(api_key="test", agent_id="agt_test")
     handler._client = MagicMock()
 
@@ -51,7 +45,7 @@ def test_on_tool_error_reports_failure():
 
 def test_event_reporting_never_raises():
     """Event reporting failures are swallowed."""
-    from adapters.langchain import VeriSwarmCallbackHandler
+    from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
     handler = VeriSwarmCallbackHandler(api_key="test", agent_id="agt_test")
     handler._client = MagicMock()
     handler._client.ingest_event.side_effect = Exception("network error")
@@ -62,7 +56,7 @@ def test_event_reporting_never_raises():
 
 def test_enforce_mode_blocks_denied():
     """Enforcement mode raises PermissionError on deny."""
-    from adapters.langchain import VeriSwarmCallbackHandler
+    from veriswarm.adapters.langchain import VeriSwarmCallbackHandler
     handler = VeriSwarmCallbackHandler(api_key="test", agent_id="agt_test", enforce=True, on_deny="raise")
     handler._client = MagicMock()
     handler._client.check_decision.return_value = {"decision": "deny", "reason_code": "restricted"}
