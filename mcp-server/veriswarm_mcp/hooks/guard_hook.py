@@ -134,6 +134,51 @@ def apply_secret_tripwire(text: str) -> str:
     return guarded
 
 
+def _guard_pre_tool_value(value, tool_name: str):
+    """Apply PreToolUse redaction recursively to JSON-like tool arguments."""
+    if isinstance(value, str):
+        if len(value) <= 3:
+            return value, False
+
+        guarded = apply_secret_tripwire(value)
+        changed = guarded != value
+
+        result = _tokenize(guarded)
+        if result and result.get("tokens_created", 0) > 0:
+            tokenized_text = result.get("tokenized_text")
+            if isinstance(tokenized_text, str):
+                guarded = tokenized_text
+                changed = True
+                types_found = sorted({t["type"] for t in result.get("token_manifest", [])})
+                log_pii_detected(
+                    types_found,
+                    result["tokens_created"],
+                    context="pre:" + tool_name,
+                )
+
+        return guarded, changed
+
+    if isinstance(value, dict):
+        updated = {}
+        changed = False
+        for key, child in value.items():
+            guarded_child, child_changed = _guard_pre_tool_value(child, tool_name)
+            updated[key] = guarded_child
+            changed = changed or child_changed
+        return (updated if changed else value), changed
+
+    if isinstance(value, list):
+        updated = []
+        changed = False
+        for child in value:
+            guarded_child, child_changed = _guard_pre_tool_value(child, tool_name)
+            updated.append(guarded_child)
+            changed = changed or child_changed
+        return (updated if changed else value), changed
+
+    return value, False
+
+
 # -- Event Handlers -------------------------------------------------------
 
 
@@ -168,29 +213,7 @@ def handle_pre_tool_use(event: dict) -> None:
     if not tool_name.startswith(MCP_PREFIX):
         sys.exit(0)
 
-    # Scan all string fields in MCP tool args
-    fields_to_scan = {
-        k: v for k, v in tool_input.items()
-        if isinstance(v, str) and len(v) > 3
-    }
-    if not fields_to_scan:
-        sys.exit(0)
-
-    updated = dict(tool_input)
-    changed = False
-
-    for key, value in fields_to_scan.items():
-        guarded = apply_secret_tripwire(value)
-        if guarded != value:
-            updated[key] = guarded
-            changed = True
-            value = guarded
-        result = _tokenize(value)
-        if result and result.get("tokens_created", 0) > 0:
-            updated[key] = result["tokenized_text"]
-            changed = True
-            types_found = sorted({t["type"] for t in result.get("token_manifest", [])})
-            log_pii_detected(types_found, result["tokens_created"], context="pre:" + tool_name)
+    updated, changed = _guard_pre_tool_value(tool_input, tool_name)
 
     if changed:
         output = {
