@@ -179,7 +179,10 @@ export class WebBotAuthSigner {
    */
   async fetch(url, init = {}) {
     const signedHeaders = this.signRequest({ url });
-    const headers = { ...(init.headers || {}), ...signedHeaders };
+    const headers = new Headers(init.headers || undefined);
+    for (const [name, value] of Object.entries(signedHeaders)) {
+      headers.set(name, value);
+    }
     return fetch(url, { ...init, headers });
   }
 }
