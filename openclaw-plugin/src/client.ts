@@ -6,6 +6,8 @@
 
 import type { SecretManifest } from "./secret_tripwire.js";
 
+const REQUEST_TIMEOUT_MS = 10_000;
+
 export interface VeriSwarmConfig {
   apiUrl: string;
   apiKey: string;
@@ -227,12 +229,25 @@ export class VeriSwarmClient {
     // compromised/MITM'd response steal the customer's VeriSwarm API
     // key by 302-ing them to attacker host. (Audit closure 2026-05-08
     // CRIT-D-8.)
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-      redirect: "error",
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        redirect: "error",
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") {
+        throw new Error(`VeriSwarm API request timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
