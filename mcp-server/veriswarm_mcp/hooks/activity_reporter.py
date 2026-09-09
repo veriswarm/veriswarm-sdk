@@ -110,22 +110,79 @@ def buffer_event(event_type: str, metadata: dict | None = None) -> int:
 
 
 def _read_and_clear_buffer() -> list[dict]:
-    """Atomically read all buffered events and truncate the file."""
+    """Atomically drain buffered events without deleting concurrent writes."""
     if not BUFFER_FILE.exists():
         return []
 
+    drained_file = BUFFER_FILE.with_name(
+        f"{BUFFER_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.flush"
+    )
     events = []
     try:
-        with open(BUFFER_FILE) as f:
+        BUFFER_FILE.replace(drained_file)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return []
+
+    try:
+        with open(drained_file) as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    events.append(json.loads(line))
-        BUFFER_FILE.write_text("")
-    except (OSError, json.JSONDecodeError):
+                    try:
+                        events.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+    except OSError:
         pass
+    finally:
+        try:
+            drained_file.unlink()
+        except OSError:
+            pass
 
     return events
+
+
+def _event_payload(event: dict, agent_id: str) -> dict:
+    """Convert both Python reporter and shell hook entries to /v1/events."""
+    metadata = event.get("meta")
+    payload_meta = dict(metadata) if isinstance(metadata, dict) else {}
+
+    # activity_logger.sh writes a compact legacy shape. Preserve its audit
+    # fields instead of dropping the line when the Python schema keys are absent.
+    for key in ("tool", "input_bytes", "output_bytes"):
+        if key in event and key not in payload_meta:
+            payload_meta[key] = event[key]
+
+    session_id = event.get("session_id") or event.get("sid") or ""
+    event_type = event.get("event_type") or event.get("event") or "guard.activity"
+
+    return {
+        "event_id": str(event.get("event_id") or uuid.uuid4().hex[:16]),
+        "agent_id": agent_id or "claude-code-session",
+        "source_type": "guard_hook",
+        "event_type": str(event_type),
+        "occurred_at": str(event.get("ts") or datetime.now(timezone.utc).isoformat()),
+        "payload": {
+            "session_id": session_id,
+            **payload_meta,
+        },
+    }
+
+
+def _requeue_events(events: list[dict]) -> None:
+    """Append unsent events back to the shared buffer."""
+    if not events:
+        return
+    try:
+        BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(BUFFER_FILE, "a") as f:
+            for event in events:
+                f.write(json.dumps(event, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 def flush_to_api() -> None:
@@ -145,27 +202,20 @@ def flush_to_api() -> None:
     else:
         headers["x-api-key"] = api_key
 
+    unsent: list[dict] = []
     for event in events:
         try:
-            payload = {
-                "event_id": event["event_id"],
-                "agent_id": agent_id or "claude-code-session",
-                "source_type": "guard_hook",
-                "event_type": event["event_type"],
-                "occurred_at": event["ts"],
-                "payload": {
-                    "session_id": event.get("session_id", ""),
-                    **event.get("meta", {}),
-                },
-            }
-            httpx.post(
+            response = httpx.post(
                 api_url + "/v1/events",
-                json=payload,
+                json=_event_payload(event, agent_id),
                 headers=headers,
                 timeout=5.0,
             )
+            response.raise_for_status()
         except Exception:
-            pass
+            unsent.append(event)
+
+    _requeue_events(unsent)
 
 
 def maybe_flush(buffer_count: int) -> None:
