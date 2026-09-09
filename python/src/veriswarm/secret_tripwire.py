@@ -78,7 +78,11 @@ def ensure_tripwire(
         return SecretTripwire(vendored)
     try:
         fresh = fetch_manifest()
-        if isinstance(fresh, dict) and isinstance(fresh.get("rules"), list):
+        if (
+            isinstance(fresh, dict)
+            and isinstance(fresh.get("rules"), list)
+            and len(fresh["rules"]) > 0
+        ):
             return SecretTripwire(fresh)
     except Exception:
         pass  # offline fallback to vendored

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SecretTripwire, loadVendoredManifest } from "../secret_tripwire.mjs";
+import { SecretTripwire, ensureTripwire, loadVendoredManifest } from "../secret_tripwire.mjs";
 import { VeriSwarmClient } from "../veriswarm_client.mjs";
 
 const GH = "ghp_" + "A".repeat(36);
@@ -30,6 +30,14 @@ describe("node SecretTripwire", () => {
     expect(m.version).toMatch(/^sha256:/);
     expect(m.rules.some((r) => r.name === "github_pat")).toBe(true);
   });
+
+  it("falls back to vendored rules when fetched manifest is empty", async () => {
+    const tw = await ensureTripwire({
+      fetchManifest: async () => ({ version: "sha256:empty", rules: [] }),
+    });
+    expect(tw.scan(GH).length).toBeGreaterThan(0);
+    expect(tw.version).toMatch(/^sha256:/);
+  });
 });
 
 describe("guardOutboundText", () => {
@@ -57,5 +65,18 @@ describe("guardOutboundText", () => {
     });
     const gh = "ghp_" + "A".repeat(36);
     expect(await c.guardOutboundText(gh)).toBe(gh);
+  });
+
+  it("redacts when tokenize omits tokenized_text after reporting tokens", async () => {
+    const c = new VeriSwarmClient({
+      baseUrl: "https://example.invalid",
+      apiKey: "k",
+      secretsDetection: true,
+    });
+    c.getSecretRules = async () => MANIFEST;
+    c.tokenizePii = async () => ({ tokens_created: 1 });
+
+    const out = await c.guardOutboundText(GH);
+    expect(out).toBe("[VS:GITHUB_TOKEN:offline]");
   });
 });
