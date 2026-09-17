@@ -34,6 +34,22 @@ class TestVeriSwarmAPIClient:
         client = self.Client("http://localhost:8000/", api_key="key123")
         assert client.base_url == "http://localhost:8000"
 
+    def test_base_url_allows_ipv6_localhost_http_for_dev(self):
+        client = self.Client("http://[::1]:8000/", api_key="key123")
+        assert client.base_url == "http://[::1]:8000"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://localhost@evil.example",
+        ],
+    )
+    def test_base_url_rejects_localhost_spoofing_for_http_escape_hatch(self, url):
+        with pytest.raises(ValueError, match="base_url must be https://"):
+            self.Client(url, api_key="key123")
+
     def test_base_url_rejects_relative_urls(self):
         with pytest.raises(ValueError, match="base_url must be an absolute URL"):
             self.Client("api.veriswarm.ai", api_key="key123")
