@@ -29,6 +29,22 @@ class ApiUrlValidationTests(unittest.TestCase):
             validate_api_url("http://127.0.0.1:8000/"),
             "http://127.0.0.1:8000",
         )
+        self.assertEqual(
+            validate_api_url("http://[::1]:8000/"),
+            "http://[::1]:8000",
+        )
+
+    def test_rejects_localhost_spoofing_for_http_escape_hatch(self):
+        for url in (
+            "http://localhost.evil.example",
+            "http://127.0.0.1.evil.example",
+            "http://localhost@evil.example",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(SystemExit) as caught:
+                    validate_api_url(url)
+
+                self.assertIn("must be https://", str(caught.exception))
 
     def test_rejects_relative_urls(self):
         with self.assertRaises(SystemExit) as caught:
