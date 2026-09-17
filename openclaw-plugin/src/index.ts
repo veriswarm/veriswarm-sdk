@@ -95,6 +95,11 @@ interface SecretGuardOutcome {
   modes: Set<SecretGuardMode>;
 }
 
+interface PiiGuardOutcome {
+  value: unknown;
+  changed: boolean;
+}
+
 function emptySecretGuardOutcome(value: unknown): SecretGuardOutcome {
   return {
     value,
@@ -186,6 +191,99 @@ async function guardSecretInput(
   }
 
   return emptySecretGuardOutcome(input);
+}
+
+function emptyPiiGuardOutcome(value: unknown): PiiGuardOutcome {
+  return {
+    value,
+    changed: false,
+  };
+}
+
+async function tokenizePiiValue(
+  value: unknown,
+  state: PluginState,
+  piiKey: string,
+  context: string,
+  seen = new WeakSet<object>()
+): Promise<PiiGuardOutcome> {
+  if (!state.client) return emptyPiiGuardOutcome(value);
+
+  if (typeof value === "string") {
+    if (value.length < 4) return emptyPiiGuardOutcome(value);
+
+    try {
+      const sessionId = state.piiSessions.get(piiKey);
+      const result = await state.client.tokenizePii(value, sessionId);
+      if (result.tokens_created > 0) {
+        if (result.session_id) {
+          state.piiSessions.set(piiKey, result.session_id);
+        }
+        if (typeof result.tokenized_text !== "string") {
+          console.warn(
+            `[VeriSwarm] PII tokenization (${context}) returned tokens without tokenized_text; ` +
+              "leaving content unchanged."
+          );
+          return emptyPiiGuardOutcome(value);
+        }
+        return {
+          value: result.tokenized_text,
+          changed: result.tokenized_text !== value,
+        };
+      }
+    } catch (e) {
+      // Fail open — but observable, not silent. The customer's log
+      // aggregator can alert on this.
+      console.warn(
+        `[VeriSwarm] PII tokenization (${context}) failed; ` +
+          `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+      );
+    }
+    return emptyPiiGuardOutcome(value);
+  }
+
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return emptyPiiGuardOutcome(value);
+    seen.add(value);
+    const next = [...value];
+    let changed = false;
+    for (let i = 0; i < value.length; i++) {
+      const child = await tokenizePiiValue(value[i], state, piiKey, context, seen);
+      if (child.changed) {
+        next[i] = child.value;
+        changed = true;
+      }
+    }
+    return changed ? { value: next, changed: true } : emptyPiiGuardOutcome(value);
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (seen.has(record)) return emptyPiiGuardOutcome(value);
+    seen.add(record);
+    const next: Record<string, unknown> = { ...record };
+    let changed = false;
+    for (const [key, childValue] of Object.entries(record)) {
+      const child = await tokenizePiiValue(childValue, state, piiKey, context, seen);
+      if (child.changed) {
+        next[key] = child.value;
+        changed = true;
+      }
+    }
+    return changed ? { value: next, changed: true } : emptyPiiGuardOutcome(value);
+  }
+
+  return emptyPiiGuardOutcome(value);
+}
+
+function outputLength(value: unknown): number {
+  if (typeof value === "string") return value.length;
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized.length : 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ── Plugin State ────────────────────────────────────────────────────────
@@ -451,24 +549,18 @@ export const pluginEntry: PluginEntry = {
         }
       }
 
-      // PII tokenize tool input
-      if (state.piiEnabled && event.input && typeof event.input === "string") {
+      // PII tokenize tool input, including nested string leaves in JSON args.
+      if (state.piiEnabled && event.input !== undefined && event.input !== null) {
         const convId = event.conversation_id || event.conversationId || event.session_id;
         const key = piiSessionKey(toolName, convId);
-        try {
-          const result = await state.client.tokenizePii(event.input);
-          if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
-            return { input: result.tokenized_text };
-          }
-        } catch (e) {
-          // Fail open — but observable, not silent. The customer's
-          // log aggregator can alert on this.
-          // (Audit 2026-05-08 HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (input) failed for tool=${toolName}; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
+        const pii = await tokenizePiiValue(
+          event.input,
+          state,
+          key,
+          `input for tool=${toolName}`
+        );
+        if (pii.changed) {
+          return { input: pii.value };
         }
       }
 
@@ -480,31 +572,24 @@ export const pluginEntry: PluginEntry = {
       if (!state.client) return {};
       const toolName = event.tool?.name || event.name || "unknown";
       let output = event.output || event.result || "";
-
-      if (typeof output !== "string") return {};
+      let outputChanged = false;
 
       // PII tokenize output
-      if (state.piiEnabled && output.length > 3) {
+      if (state.piiEnabled && output !== undefined && output !== null) {
         const convId = event.conversation_id || event.conversationId || event.session_id;
         const key = piiSessionKey(toolName, convId);
-        try {
-          const sessionId = state.piiSessions.get(key);
-          const result = await state.client.tokenizePii(output, sessionId);
-          if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
-            output = result.tokenized_text;
-          }
-        } catch (e) {
-          // Fail open — but observable. (HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (output) failed for tool=${toolName}; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
-        }
+        const pii = await tokenizePiiValue(
+          output,
+          state,
+          key,
+          `output for tool=${toolName}`
+        );
+        output = pii.value;
+        outputChanged ||= pii.changed;
       }
 
       // Injection scan
-      if (state.injectionScan) {
+      if (state.injectionScan && typeof output === "string") {
         const detected = scanForInjection(output);
         if (detected.length > 0) {
           await logEvent("injection.detected", {
@@ -514,6 +599,7 @@ export const pluginEntry: PluginEntry = {
           output =
             `[VeriSwarm Guard: Potential prompt injection detected. ` +
             `Patterns: ${detected.join(", ")}]\n\n${output}`;
+          outputChanged = true;
         }
       }
 
@@ -521,11 +607,11 @@ export const pluginEntry: PluginEntry = {
       if (state.auditEnabled) {
         await logEvent("tool.call.success", {
           tool_name: toolName,
-          output_length: output.length,
+          output_length: outputLength(output),
         });
       }
 
-      return { output };
+      return outputChanged ? { output } : {};
     });
 
     // Hook: Before message sending — PII tokenize outbound to LLM + Session Sentry
@@ -648,18 +734,14 @@ export const pluginEntry: PluginEntry = {
       // ── PII tokenization (existing) ─────────────────────────────────
       if (state.piiEnabled && scannedContent.length >= 4) {
         const key = piiSessionKey("__message__", rawConvId);
-        try {
-          const result = await state.client.tokenizePii(scannedContent);
-          if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
-            return { content: result.tokenized_text };
-          }
-        } catch (e) {
-          // Fail open — but observable. (HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (outbound message) failed; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
+        const pii = await tokenizePiiValue(
+          scannedContent,
+          state,
+          key,
+          "outbound message"
+        );
+        if (pii.changed) {
+          return { content: pii.value };
         }
       }
 
