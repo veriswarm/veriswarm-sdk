@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +44,31 @@ except (AttributeError, ValueError):
 BUFFER_FILE = Path.home() / ".veriswarm" / "activity.jsonl"
 FLUSH_THRESHOLD = 50
 MAX_BUFFER_SIZE = 500
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
+
+def _lock_file() -> Path:
+    return BUFFER_FILE.with_name(f"{BUFFER_FILE.name}.lock")
+
+
+@contextmanager
+def _activity_lock():
+    """Serialize buffer writers and drainers so append-in-flight events survive."""
+    if fcntl is None:
+        yield
+        return
+
+    BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_lock_file(), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _load_config() -> tuple[str, str, str, str]:
@@ -87,8 +113,6 @@ def _session_id() -> str:
 
 def buffer_event(event_type: str, metadata: dict | None = None) -> int:
     """Append an activity event to the local buffer. Returns buffer line count."""
-    BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-
     entry = {
         "event_id": uuid.uuid4().hex[:16],
         "event_type": event_type,
@@ -97,50 +121,53 @@ def buffer_event(event_type: str, metadata: dict | None = None) -> int:
         "meta": metadata or {},
     }
 
-    with open(BUFFER_FILE, "a") as f:
-        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    with _activity_lock():
+        BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(BUFFER_FILE, "a") as f:
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
-    try:
-        with open(BUFFER_FILE) as f:
-            count = sum(1 for _ in f)
-    except OSError:
-        count = 0
+        try:
+            with open(BUFFER_FILE) as f:
+                count = sum(1 for _ in f)
+        except OSError:
+            count = 0
 
     return count
 
 
 def _read_and_clear_buffer() -> list[dict]:
     """Atomically drain buffered events without deleting concurrent writes."""
-    if not BUFFER_FILE.exists():
-        return []
+    with _activity_lock():
+        if not BUFFER_FILE.exists():
+            return []
 
-    drained_file = BUFFER_FILE.with_name(
-        f"{BUFFER_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.flush"
-    )
-    events = []
-    try:
-        BUFFER_FILE.replace(drained_file)
-    except FileNotFoundError:
-        return []
-    except OSError:
-        return []
-
-    try:
-        with open(drained_file) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-    except OSError:
-        pass
-    finally:
+        drained_file = BUFFER_FILE.with_name(
+            f"{BUFFER_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.flush"
+        )
+        events = []
         try:
-            drained_file.unlink()
+            BUFFER_FILE.replace(drained_file)
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return []
+
+        try:
+            with open(drained_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            events.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
         except OSError:
             pass
+        finally:
+            try:
+                drained_file.unlink()
+            except OSError:
+                pass
 
     return events
 
@@ -177,10 +204,11 @@ def _requeue_events(events: list[dict]) -> None:
     if not events:
         return
     try:
-        BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(BUFFER_FILE, "a") as f:
-            for event in events:
-                f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        with _activity_lock():
+            BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(BUFFER_FILE, "a") as f:
+                for event in events:
+                    f.write(json.dumps(event, separators=(",", ":")) + "\n")
     except OSError:
         pass
 
