@@ -58,5 +58,61 @@ class CiExfilErrorHandlingTests(unittest.TestCase):
         self.assertEqual(self.module.failures, [])
 
 
+class GateApiErrorHandlingTests(unittest.TestCase):
+    def setUp(self):
+        self.module = load_check_module()
+        self.module.failures.clear()
+        self.module.summary_lines.clear()
+        self.module.AGENT_ID = "agt_test"
+        self.module.api_request = mock.Mock(return_value={"error": "API 503"})
+
+    def test_score_api_error_fails_when_min_trust_score_enforced(self):
+        self.module.MIN_TRUST_SCORE = 80
+
+        self.module.check_score()
+
+        self.assertEqual(
+            self.module.failures,
+            ["Trust score check could not be evaluated: API 503"],
+        )
+
+    def test_score_api_error_warns_when_min_trust_score_disabled(self):
+        self.module.MIN_TRUST_SCORE = 0
+
+        self.module.check_score()
+
+        self.assertEqual(self.module.failures, [])
+
+    def test_decision_api_error_fails_when_fail_on_deny_enabled(self):
+        self.module.FAIL_ON_DENY = True
+
+        self.module.check_decision()
+
+        self.assertEqual(
+            self.module.failures,
+            ["Trust decision check could not be evaluated: API 503"],
+        )
+
+    def test_security_test_api_error_fails_when_readiness_gate_enabled(self):
+        self.module.FAIL_ON_LOW_SCORE = 70
+
+        self.module.check_test()
+
+        self.assertEqual(
+            self.module.failures,
+            ["Security test check could not be evaluated: API 503"],
+        )
+
+    def test_owasp_api_error_fails_when_coverage_gate_enabled(self):
+        self.module.MIN_OWASP_COVERAGE = 0.9
+
+        self.module.check_owasp()
+
+        self.assertEqual(
+            self.module.failures,
+            ["OWASP attestation check could not be evaluated: API 503"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

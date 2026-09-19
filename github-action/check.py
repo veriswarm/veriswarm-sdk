@@ -153,6 +153,20 @@ failures = []
 summary_lines = []
 
 
+def fail_closed_on_api_error(check_name: str, result: dict, *, enforced: bool) -> bool:
+    """Handle API errors for checks that may or may not be configured as gates."""
+    if "error" not in result:
+        return False
+
+    msg = f"{check_name} could not be evaluated: {result['error']}"
+    if enforced:
+        failures.append(msg)
+        print(f"::error::{msg}")
+    else:
+        print(f"::warning::{msg}")
+    return True
+
+
 def check_score():
     if not AGENT_ID:
         print("::notice::Skipping score check (no agent-id provided)")
@@ -161,8 +175,11 @@ def check_score():
     print(f"Checking trust score for {AGENT_ID}...")
     result = api_request(f"/v1/public/agents/{AGENT_ID}/scores/current")
 
-    if "error" in result:
-        print(f"::warning::Score check failed: {result['error']}")
+    if fail_closed_on_api_error(
+        "Trust score check",
+        result,
+        enforced=MIN_TRUST_SCORE > 0,
+    ):
         return
 
     scores = result.get("scores", {})
@@ -191,7 +208,11 @@ def check_decision():
         "agent_id": AGENT_ID, "action_type": ACTION_TYPE,
     })
 
-    if "error" in result:
+    if fail_closed_on_api_error(
+        "Trust decision check",
+        result,
+        enforced=FAIL_ON_DENY,
+    ):
         return
 
     decision = result.get("decision", "unknown")
@@ -215,7 +236,11 @@ def check_test():
     print(f"Running security tests against {AGENT_ID}...")
     result = api_request(f"/v1/agents/test/{AGENT_ID}", method="POST", body={})
 
-    if "error" in result:
+    if fail_closed_on_api_error(
+        "Security test check",
+        result,
+        enforced=FAIL_ON_LOW_SCORE > 0,
+    ):
         return
 
     readiness = result.get("readiness_score", 0)
@@ -370,7 +395,11 @@ def check_owasp():
     print("Checking OWASP Agentic AI Top 10 attestation...")
     result = api_request("/v1/compliance/owasp-attestation")
 
-    if "error" in result:
+    if fail_closed_on_api_error(
+        "OWASP attestation check",
+        result,
+        enforced=MIN_OWASP_COVERAGE > 0,
+    ):
         return
 
     summary = result.get("summary", {})
