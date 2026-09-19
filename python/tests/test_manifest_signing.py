@@ -188,6 +188,24 @@ def test_canonical_content_sorts_nested_principal_ref_keys():
     assert canonical == GOLDEN_CANONICAL_CONTENT
 
 
+def test_canonical_content_escapes_non_ascii_like_server_json_dumps():
+    canonical = canonical_manifest_content(
+        version="1.0",
+        ai_disclosure="Caf\u00e9 \U0001f600",
+        principal_ref={
+            "type": "organization",
+            "na\u00efve": "M\u00fcnchen",
+        },
+    )
+
+    assert canonical == (
+        '{"ai_disclosure":"Caf\\u00e9 \\ud83d\\ude00",'
+        '"capabilities":[],'
+        '"principal_ref":{"na\\u00efve":"M\\u00fcnchen","type":"organization"},'
+        '"required_tools":[],"version":"1.0"}'
+    )
+
+
 # ---------------------------------------------------------------------------
 # 5. Unset fields render as null; lists are sorted
 # ---------------------------------------------------------------------------
