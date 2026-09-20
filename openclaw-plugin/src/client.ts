@@ -59,6 +59,9 @@ export class VeriSwarmClient {
     } catch {
       throw new Error(`apiUrl is not a valid URL: ${config.apiUrl}`);
     }
+    if (parsed.username || parsed.password) {
+      throw new Error("apiUrl must not include username or password");
+    }
     const isLocalhostHttp =
       parsed.protocol === "http:" &&
       (parsed.hostname === "localhost" ||

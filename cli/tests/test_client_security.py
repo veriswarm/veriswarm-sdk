@@ -36,6 +36,12 @@ class ApiUrlValidationTests(unittest.TestCase):
 
         self.assertIn("must be an absolute URL", str(caught.exception))
 
+    def test_rejects_userinfo_urls(self):
+        with self.assertRaises(SystemExit) as caught:
+            validate_api_url("https://api.veriswarm.ai@attacker.example")
+
+        self.assertIn("must not include username or password", str(caught.exception))
+
     def test_get_config_validates_environment_url_before_request(self):
         with patch.dict(
             os.environ,

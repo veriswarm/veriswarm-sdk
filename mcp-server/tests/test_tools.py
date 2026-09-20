@@ -38,6 +38,10 @@ class TestVeriSwarmAPIClient:
         with pytest.raises(ValueError, match="base_url must be an absolute URL"):
             self.Client("api.veriswarm.ai", api_key="key123")
 
+    def test_base_url_rejects_userinfo_urls(self):
+        with pytest.raises(ValueError, match="base_url must not include username or password"):
+            self.Client("https://api.veriswarm.ai@attacker.example", api_key="key123")
+
     def test_headers_with_api_key(self):
         client = self.Client("https://api.veriswarm.ai", api_key="vs_key")
         headers = client._headers(use_agent_key=False)

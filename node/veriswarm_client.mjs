@@ -30,6 +30,9 @@ export class VeriSwarmClient {
     } catch {
       throw new Error(`baseUrl is not a valid URL: ${baseUrl}`);
     }
+    if (parsedUrl.username || parsedUrl.password) {
+      throw new Error("baseUrl must not include username or password");
+    }
     const isLocalhostHttp = parsedUrl.protocol === "http:"
       && (parsedUrl.hostname === "localhost"
           || parsedUrl.hostname === "127.0.0.1"
