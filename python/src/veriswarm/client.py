@@ -75,10 +75,13 @@ class VeriSwarmClient:
         # exception; explicit and narrow. (Audit 2026-05-08 CRIT-SDK-1.)
         from urllib.parse import urlparse
         parsed = urlparse(self.base_url)
+        if not parsed.scheme or not parsed.netloc:
+            raise ValueError("base_url must be an absolute URL")
         if parsed.scheme != "https":
+            hostname = (parsed.hostname or "").lower()
             allow_http_dev = (
                 parsed.scheme == "http"
-                and parsed.hostname in ("localhost", "127.0.0.1", "::1")
+                and hostname in ("localhost", "127.0.0.1", "::1")
             )
             if not allow_http_dev:
                 raise ValueError(
