@@ -19,6 +19,19 @@ def load_check_module():
     return module
 
 
+class ApiUrlValidationTests(unittest.TestCase):
+    def test_rejects_userinfo_url_on_import(self):
+        with mock.patch.dict(
+            os.environ,
+            {"VERISWARM_API_URL": "https://api.veriswarm.ai@attacker.example"},
+            clear=False,
+        ):
+            with self.assertRaises(SystemExit) as caught:
+                load_check_module()
+
+        self.assertIn("must not include username or password", str(caught.exception))
+
+
 class CiExfilErrorHandlingTests(unittest.TestCase):
     def setUp(self):
         self.module = load_check_module()

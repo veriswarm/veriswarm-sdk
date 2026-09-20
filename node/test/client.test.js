@@ -42,6 +42,13 @@ describe('VeriSwarmClient', () => {
     expect(client.baseUrl).toBe('https://api.test');
   });
 
+  it('should reject baseUrl values with username or password', () => {
+    expect(() => new VeriSwarmClient({
+      baseUrl: 'https://api.veriswarm.ai@attacker.example',
+      apiKey
+    })).toThrow('baseUrl must not include username or password');
+  });
+
   it('should include x-api-key header when apiKey is provided', async () => {
     const client = new VeriSwarmClient({ baseUrl, apiKey });
     fetch.mockResolvedValueOnce(makeFetchResponse({ status: 'ok' }));

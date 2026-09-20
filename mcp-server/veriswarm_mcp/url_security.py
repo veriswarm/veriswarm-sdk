@@ -19,6 +19,8 @@ def validate_api_url(url: str, *, field_name: str = "VERISWARM_API_URL") -> str:
     parsed = urlparse(normalized)
     if not parsed.scheme or not parsed.netloc:
         raise ValueError(f"{field_name} must be an absolute URL")
+    if parsed.username or parsed.password:
+        raise ValueError(f"{field_name} must not include username or password")
 
     is_localhost_http = (
         parsed.scheme == "http"

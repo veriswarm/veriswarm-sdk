@@ -39,6 +39,8 @@ def _validate_api_url(url: str) -> str:
         raise SystemExit(
             f"::error::VERISWARM_API_URL must be https:// (got {parsed.scheme!r})"
         )
+    if parsed.username or parsed.password:
+        raise SystemExit("::error::VERISWARM_API_URL must not include username or password")
     host = (parsed.hostname or "").lower()
     if host not in _ALLOWED_HOSTS:
         raise SystemExit(
