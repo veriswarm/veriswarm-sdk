@@ -324,6 +324,8 @@ def check_scan():
 
     total_pii = 0
     total_injection = 0
+    total_injection_errors = 0
+    first_injection_error = ""
 
     for filepath in files_to_scan[:50]:  # Cap at 50 files
         try:
@@ -337,14 +339,24 @@ def check_scan():
 
         # PII scan
         result = api_request("/v1/demo/pii-scan", method="POST", body={"text": content})
-        entities = result.get("entities_found", 0)
-        if entities > 0:
-            total_pii += entities
-            for e in result.get("entities", []):
-                print(f"::warning file={filepath}::PII detected: {e['type']} (confidence: {e.get('score', 0):.0%})")
+        if "error" in result:
+            print(f"::warning file={filepath}::PII scan could not be evaluated: {result['error']}")
+        else:
+            entities = result.get("entities_found", 0)
+            if entities > 0:
+                total_pii += entities
+                for e in result.get("entities", []):
+                    print(f"::warning file={filepath}::PII detected: {e['type']} (confidence: {e.get('score', 0):.0%})")
 
         # Injection scan
         result = api_request("/v1/demo/injection-scan", method="POST", body={"text": content})
+        if "error" in result:
+            total_injection_errors += 1
+            if not first_injection_error:
+                first_injection_error = str(result["error"])
+            level = "error" if FAIL_ON_INJECTION else "warning"
+            print(f"::{level} file={filepath}::Prompt injection scan could not be evaluated: {result['error']}")
+            continue
         if result.get("is_injection"):
             total_injection += 1
             print(f"::error file={filepath}::Prompt injection pattern detected (confidence: {result.get('confidence', 0):.0%})")
@@ -357,7 +369,18 @@ def check_scan():
     else:
         summary_lines.append(f"PII Scan: ✅ Clean ({len(files_to_scan)} files scanned)")
 
-    if total_injection > 0:
+    if total_injection_errors > 0:
+        summary_lines.append(
+            f"Injection Scan: ❌ **{total_injection_errors} file(s)** could not be evaluated"
+            if FAIL_ON_INJECTION
+            else f"Injection Scan: ⚠️ **{total_injection_errors} file(s)** could not be evaluated"
+        )
+        if FAIL_ON_INJECTION:
+            failures.append(
+                "Prompt injection scan could not be evaluated for "
+                f"{total_injection_errors} file(s): {first_injection_error}"
+            )
+    elif total_injection > 0:
         summary_lines.append(f"Injection Scan: ❌ **{total_injection} files** contain injection patterns")
         if FAIL_ON_INJECTION:
             failures.append(f"Prompt injection detected in {total_injection} file(s)")
