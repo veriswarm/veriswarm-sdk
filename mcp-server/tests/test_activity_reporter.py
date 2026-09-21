@@ -77,3 +77,72 @@ def test_flush_requeues_unsent_events(monkeypatch, tmp_path):
 
     assert buffer_file.exists()
     assert [json.loads(line) for line in buffer_file.read_text().splitlines()] == [event]
+
+
+def test_flush_skips_network_and_preserves_buffer_for_unsafe_api_url(monkeypatch, tmp_path):
+    buffer_file = tmp_path / "activity.jsonl"
+    monkeypatch.setattr(activity_reporter, "BUFFER_FILE", buffer_file)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VERISWARM_API_URL", "http://api.veriswarm.ai")
+    monkeypatch.setenv("VERISWARM_API_KEY", "test-key")
+    monkeypatch.setenv("VERISWARM_AGENT_KEY", "agent-key")
+
+    event = {
+        "event_id": "evt1",
+        "event_type": "agent.session.started",
+        "session_id": "session-1",
+        "ts": "2026-08-17T07:00:00Z",
+        "meta": {"cwd": "/workspace"},
+    }
+    buffer_file.write_text(json.dumps(event) + "\n")
+
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append((args, kwargs))
+        return _OkResponse()
+
+    monkeypatch.setattr(activity_reporter.httpx, "post", fake_post)
+
+    activity_reporter.flush_to_api()
+
+    assert calls == []
+    assert [json.loads(line) for line in buffer_file.read_text().splitlines()] == [event]
+
+
+def test_flush_requeues_only_events_that_fail_to_upload(monkeypatch, tmp_path):
+    buffer_file = tmp_path / "activity.jsonl"
+    monkeypatch.setattr(activity_reporter, "BUFFER_FILE", buffer_file)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("VERISWARM_API_KEY", "test-key")
+    monkeypatch.delenv("VERISWARM_AGENT_KEY", raising=False)
+
+    uploaded_event = {
+        "event_id": "evt1",
+        "event_type": "agent.session.started",
+        "session_id": "session-1",
+        "ts": "2026-08-17T07:00:00Z",
+        "meta": {"cwd": "/workspace"},
+    }
+    failed_event = {
+        "event_id": "evt2",
+        "event_type": "guard.pii.detected",
+        "session_id": "session-1",
+        "ts": "2026-08-17T07:01:00Z",
+        "meta": {"pii_types": ["email"], "pii_count": 1},
+    }
+    buffer_file.write_text(
+        json.dumps(uploaded_event) + "\n" + json.dumps(failed_event) + "\n"
+    )
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        if json["event_id"] == "evt2":
+            raise RuntimeError("network down")
+        return _OkResponse()
+
+    monkeypatch.setattr(activity_reporter.httpx, "post", fake_post)
+
+    activity_reporter.flush_to_api()
+
+    assert buffer_file.exists()
+    assert [json.loads(line) for line in buffer_file.read_text().splitlines()] == [failed_event]
