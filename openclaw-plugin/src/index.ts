@@ -414,6 +414,8 @@ export const pluginEntry: PluginEntry = {
     api.on("before_tool_call", async (event: any) => {
       if (!state.client) return {};
       const toolName = event.tool?.name || event.name || "unknown";
+      let nextInput = event.input;
+      let inputChanged = false;
 
       // Policy check
       if (state.policyEnabled) {
@@ -435,31 +437,33 @@ export const pluginEntry: PluginEntry = {
       if (
         state.secretsDetection &&
         state.tripwire &&
-        event.input !== undefined &&
-        event.input !== null
+        nextInput !== undefined &&
+        nextInput !== null
       ) {
         const convId = event.conversation_id || event.conversationId || event.session_id;
         const key = piiSessionKey(toolName, convId);
-        const guarded = await guardSecretInput(event.input, state, toolName, key);
+        const guarded = await guardSecretInput(nextInput, state, toolName, key);
         if (guarded.changed) {
           await logEvent("secret.tripwire", {
             tool_name: toolName,
             rules: Array.from(guarded.rules),
             mode: guarded.modes.has("offline") ? "offline" : "online",
           }).catch(() => {});
-          return { input: guarded.value };
+          nextInput = guarded.value;
+          inputChanged = true;
         }
       }
 
       // PII tokenize tool input
-      if (state.piiEnabled && event.input && typeof event.input === "string") {
+      if (state.piiEnabled && nextInput && typeof nextInput === "string") {
         const convId = event.conversation_id || event.conversationId || event.session_id;
         const key = piiSessionKey(toolName, convId);
         try {
-          const result = await state.client.tokenizePii(event.input);
+          const result = await state.client.tokenizePii(nextInput);
           if (result.tokens_created > 0) {
             state.piiSessions.set(key, result.session_id);
-            return { input: result.tokenized_text };
+            nextInput = result.tokenized_text;
+            inputChanged = true;
           }
         } catch (e) {
           // Fail open — but observable, not silent. The customer's
@@ -472,7 +476,7 @@ export const pluginEntry: PluginEntry = {
         }
       }
 
-      return {};
+      return inputChanged ? { input: nextInput } : {};
     });
 
     // Hook: After tool call — PII tokenize output + injection scan

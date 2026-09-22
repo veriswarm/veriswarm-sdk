@@ -87,6 +87,53 @@ describe("before_tool_call secret tripwire", () => {
     expect(res).toEqual({});
   });
 
+  it("continues PII tokenization after redacting a secret", async () => {
+    fetchSpy.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.includes("/secret-rules")) {
+        throw new Error("offline manifest refresh");
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const text = String(body.text ?? "");
+      if (text.includes(GH_PAT)) {
+        return new Response(
+          JSON.stringify({
+            tokens_created: 0,
+            tokenized_text: text,
+            session_id: "sid-secret",
+            token_manifest: [],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          tokens_created: text.includes("alice@example.com") ? 1 : 0,
+          tokenized_text: text.replace("alice@example.com", "[VS:email_1]"),
+          session_id: "sid-pii",
+          token_manifest: [],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    });
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+
+    const res = await hooks["before_tool_call"]({
+      name: "http_post",
+      input: `token=${GH_PAT} email=alice@example.com`,
+    });
+
+    expect(res.input).toContain("[VS:");
+    expect(res.input).toContain(":offline]");
+    expect(res.input).toContain("[VS:email_1]");
+    expect(res.input).not.toContain(GH_PAT);
+    expect(res.input).not.toContain("alice@example.com");
+  });
+
   it("does nothing when secretsDetection is off", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, secretsDetection: false });
