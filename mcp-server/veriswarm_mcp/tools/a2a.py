@@ -166,7 +166,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             task_id = safe_id(str(submitted.get("id", "")), "task_id")
 
             deadline = _time.monotonic() + max_wait
-            terminal = {"completed", "failed", "canceled"}
+            terminal = {"completed", "succeeded", "failed", "canceled", "cancelled"}
             task = submitted
             while _time.monotonic() < deadline:
                 try:
