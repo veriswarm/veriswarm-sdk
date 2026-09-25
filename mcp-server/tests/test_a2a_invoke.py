@@ -179,8 +179,10 @@ def test_invoke_polling_does_not_block_event_loop():
     assert ticker_ran_before_invoke_returned
 
 
-@pytest.mark.parametrize("terminal_status", ["failed", "canceled"])
-def test_invoke_returns_terminal_failure_states_without_timing_out(terminal_status):
+@pytest.mark.parametrize(
+    "terminal_status", ["succeeded", "failed", "canceled", "cancelled"]
+)
+def test_invoke_returns_terminal_states_without_timing_out(terminal_status):
     client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
     poll = {"n": 0}
 

@@ -11,6 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -283,6 +284,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         x-veriswarm-transport. Inter-agent messages can then be cryptographically signed.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.post(f"/v1/a2a/{agent_id}/keys")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
