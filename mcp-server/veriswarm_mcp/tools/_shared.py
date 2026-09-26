@@ -75,15 +75,18 @@ def safe_error_response(exc: Exception, *, context: str = "request") -> str:
     })
 
 
-def q_path(value: object) -> str:
-    """Percent-encode a value for safe use as a URL path component.
+def q_path(value: object, field_name: str = "path segment") -> str:
+    """Percent-encode a value for safe use as one URL path component.
 
     Cheaper than safe_id when the caller wants traversal-resistance
     rather than format-validation. A value of `"../admin"` becomes
     `"..%2Fadmin"` and cannot escape the path segment.
     """
     from urllib.parse import quote as _quote
-    return _quote(str(value), safe="")
+    text = str(value)
+    if text in {"", ".", ".."}:
+        raise ToolValidationError(f"{field_name} must be a non-empty path segment")
+    return _quote(text, safe="")
 
 
 def bounded_string(value: str, *, field_name: str, max_chars: int) -> str:

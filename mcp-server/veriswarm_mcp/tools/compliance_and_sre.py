@@ -11,6 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import q_path, safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -50,6 +51,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns pass/warn/fail per control with evidence counts and recommendations.
         """
         try:
+            framework_id = safe_id(framework_id, "framework_id")
             result = client.get(f"/v1/compliance/{framework_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -140,6 +142,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def reset_circuit_breaker(provider: str, model: str) -> str:
         """Manually reset a circuit breaker to closed state (e.g., after fixing a provider outage)."""
         try:
+            provider = q_path(provider, "provider")
+            model = q_path(model, "model")
             result = client.post(f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -283,6 +287,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         x-veriswarm-transport. Inter-agent messages can then be cryptographically signed.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.post(f"/v1/a2a/{agent_id}/keys")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -330,6 +335,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         VeriSwarm agent. No authentication required on the server side.
         """
         try:
+            content_hash = safe_id(content_hash, "content_hash")
             result = client.get(f"/v1/content/provenance/{content_hash}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -347,6 +353,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         and can be referenced in custom policies as principal.<key>.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/agents/{agent_id}/attributes")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -363,6 +370,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Reserved keys (policy_tier, risk_score, is_verified) are silently rejected.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             attrs = json.loads(attributes_json)
             result = client.put(
                 f"/v1/agents/{agent_id}/attributes",
@@ -393,6 +401,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         ttl <= 10min) are auto-approved. Others go to pending for human review.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             body = {"agent_id": agent_id, "action_type": action_type, "ttl_seconds": ttl_seconds}
             if resource_type:
                 body["resource_type"] = resource_type
@@ -427,6 +436,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def revoke_jit_grant(grant_id: str, reason: str = "") -> str:
         """Revoke an approved JIT grant immediately."""
         try:
+            grant_id = safe_id(grant_id, "grant_id")
             body = {"reason": reason} if reason else {}
             result = client.post(f"/v1/passport/jit/{grant_id}/revoke", json=body)
             return json.dumps(result, indent=2)
@@ -445,7 +455,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         try:
             params = {"limit": limit}
             if agent_id:
-                params["agent_id"] = agent_id
+                params["agent_id"] = safe_id(agent_id, "agent_id")
             if status:
                 params["status"] = status
             result = client.get("/v1/passport/jit/grants", params=params)

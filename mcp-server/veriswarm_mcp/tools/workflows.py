@@ -7,6 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import q_path, safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -34,6 +35,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID (starts with wf_)
         """
         try:
+            workflow_id = safe_id(workflow_id, "workflow_id")
             result = client.get(f"/v1/workflows/{workflow_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -73,6 +75,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to run
         """
         try:
+            workflow_id = safe_id(workflow_id, "workflow_id")
             result = client.post(f"/v1/workflows/{workflow_id}/run", json={})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -87,6 +90,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID (starts with wfx_)
         """
         try:
+            execution_id = safe_id(execution_id, "execution_id")
             result = client.get(f"/v1/workflows/executions/{execution_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -101,6 +105,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to activate
         """
         try:
+            workflow_id = safe_id(workflow_id, "workflow_id")
             result = client.post(f"/v1/workflows/{workflow_id}/activate")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -115,6 +120,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to deactivate
         """
         try:
+            workflow_id = safe_id(workflow_id, "workflow_id")
             result = client.post(f"/v1/workflows/{workflow_id}/deactivate")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -140,6 +146,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         template_id: the template ID (e.g., "builtin:content-pipeline-v2" or a custom template ID)
         """
         try:
+            template_id = q_path(template_id, "template_id")
             result = client.post(f"/v1/workflows/templates/{template_id}/deploy")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -168,6 +175,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID to cancel (starts with wfx_)
         """
         try:
+            execution_id = safe_id(execution_id, "execution_id")
             result = client.post(f"/v1/workflows/executions/{execution_id}/cancel")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -182,6 +190,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID to retry (starts with wfx_)
         """
         try:
+            execution_id = safe_id(execution_id, "execution_id")
             result = client.post(f"/v1/workflows/executions/{execution_id}/retry")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:

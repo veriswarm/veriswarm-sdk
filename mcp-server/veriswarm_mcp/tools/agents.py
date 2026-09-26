@@ -7,6 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -40,6 +41,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         agent_id: the agent's unique identifier
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/public/agents/{agent_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -55,6 +57,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         limit: maximum number of timeline entries (default 50)
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(
                 f"/v1/public/agents/{agent_id}/timeline",
                 params={"limit": limit},
@@ -72,6 +75,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         agent_id: the agent's unique identifier
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/public/agents/{agent_id}/flags")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
