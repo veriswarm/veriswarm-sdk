@@ -7,6 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -47,6 +48,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         agent_id: the agent to mark as verified
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.post(f"/v1/suite/passport/verify/{agent_id}")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -64,6 +66,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         scope: optional scope filter, e.g. read, write, admin
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             params = {"agent_id": agent_id}
             if scope:
                 params["scope"] = scope

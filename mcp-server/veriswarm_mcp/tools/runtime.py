@@ -11,6 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -28,6 +29,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         escalation rate, cost, and grade distribution.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/suite/analytics/agent/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -47,6 +49,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         KB improvements, prompt optimization, and security reviews.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/suite/analytics/cost-recommendations/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -186,6 +189,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def verify_deletion(record_id: str) -> str:
         """Verify a GDPR deletion record exists and return its cryptographic proof."""
         try:
+            record_id = safe_id(record_id, "record_id")
             result = client.get(f"/v1/suite/compliance/deletion-records/{record_id}/verify")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -207,6 +211,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         interaction counts, and per-platform breakdown.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/suite/a2a/reputation/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -226,6 +231,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         role: 'requesting' (outbound) or 'receiving' (inbound)
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/suite/a2a/history/{agent_id}", params={"role": role, "limit": limit})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -246,6 +252,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns scores, pass rates, and promote/review/block recommendations.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/suite/benchmarks/{agent_id}", params={"limit": limit})
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:

@@ -7,6 +7,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -14,6 +15,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def check_trust(agent_id: str) -> str:
         """Get an agent's current trust scores, policy tier, and risk band."""
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/public/agents/{agent_id}/scores/current")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -58,6 +60,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_score_history(agent_id: str, limit: int = 10) -> str:
         """Get score history over time for an agent."""
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(
                 f"/v1/public/agents/{agent_id}/scores/history",
                 params={"limit": limit},
@@ -72,6 +75,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_score_breakdown(agent_id: str) -> str:
         """Get detailed score breakdown with contributing factors for an agent."""
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/public/agents/{agent_id}/scores/breakdown")
             return json.dumps(result, indent=2)
         except httpx.HTTPStatusError as exc:
@@ -83,6 +87,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def explain_score(agent_id: str) -> str:
         """Get a human-readable explanation of an agent's current trust scores."""
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             result = client.get(f"/v1/public/agents/{agent_id}/scores/current")
             explanations = result.get("explanations", [])
             return "\n".join(explanations) if explanations else "No score explanations available."
