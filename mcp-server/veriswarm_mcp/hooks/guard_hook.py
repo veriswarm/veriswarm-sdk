@@ -4,7 +4,7 @@
 Handles three hook events:
   - SessionStart:  Log session metadata, flush previous session's events
   - PreToolUse:    Tokenize PII in MCP tool arguments (matcher: ^mcp__)
-  - PostToolUse:   Flag PII in MCP tool responses (matcher: ^mcp__)
+  - PostToolUse:   Tokenize/redact MCP tool responses (matcher: ^mcp__)
 
 Activity logging for ALL tools (including built-in Read/Grep/Edit/Bash)
 is handled by the companion activity_logger.sh shell script, which runs
@@ -143,14 +143,16 @@ def apply_secret_tripwire(text: str) -> str:
     return guarded
 
 
-def _guard_pre_tool_value(value, tool_name: str):
-    """Apply PreToolUse redaction recursively to JSON-like tool arguments."""
+def _guard_value(value):
+    """Apply Guard redaction recursively to JSON-like tool payloads."""
     if isinstance(value, str):
         if len(value) <= 3:
-            return value, False
+            return value, False, set(), 0
 
         guarded = apply_secret_tripwire(value)
         changed = guarded != value
+        pii_types: set[str] = set()
+        pii_count = 0
 
         result = _tokenize(guarded)
         if result and result.get("tokens_created", 0) > 0:
@@ -158,34 +160,54 @@ def _guard_pre_tool_value(value, tool_name: str):
             if isinstance(tokenized_text, str):
                 guarded = tokenized_text
                 changed = True
-                types_found = sorted({t["type"] for t in result.get("token_manifest", [])})
-                log_pii_detected(
-                    types_found,
-                    result["tokens_created"],
-                    context="pre:" + tool_name,
-                )
+                pii_types = {t["type"] for t in result.get("token_manifest", [])}
+                pii_count = int(result["tokens_created"])
 
-        return guarded, changed
+        return guarded, changed, pii_types, pii_count
 
     if isinstance(value, dict):
         updated = {}
         changed = False
+        pii_types: set[str] = set()
+        pii_count = 0
         for key, child in value.items():
-            guarded_child, child_changed = _guard_pre_tool_value(child, tool_name)
+            guarded_child, child_changed, child_types, child_count = _guard_value(child)
             updated[key] = guarded_child
             changed = changed or child_changed
-        return (updated if changed else value), changed
+            pii_types.update(child_types)
+            pii_count += child_count
+        return (updated if changed else value), changed, pii_types, pii_count
 
     if isinstance(value, list):
         updated = []
         changed = False
+        pii_types: set[str] = set()
+        pii_count = 0
         for child in value:
-            guarded_child, child_changed = _guard_pre_tool_value(child, tool_name)
+            guarded_child, child_changed, child_types, child_count = _guard_value(child)
             updated.append(guarded_child)
             changed = changed or child_changed
-        return (updated if changed else value), changed
+            pii_types.update(child_types)
+            pii_count += child_count
+        return (updated if changed else value), changed, pii_types, pii_count
 
-    return value, False
+    return value, False, set(), 0
+
+
+def _guard_pre_tool_value(value, tool_name: str):
+    """Apply PreToolUse redaction recursively to JSON-like tool arguments."""
+    updated, changed, pii_types, pii_count = _guard_value(value)
+    if pii_count:
+        log_pii_detected(sorted(pii_types), pii_count, context="pre:" + tool_name)
+    return updated, changed
+
+
+def _guard_post_tool_value(value, tool_name: str):
+    """Apply PostToolUse redaction recursively to JSON-like tool results."""
+    updated, changed, pii_types, pii_count = _guard_value(value)
+    if pii_count:
+        log_pii_detected(sorted(pii_types), pii_count, context="post:" + tool_name)
+    return updated, changed, sorted(pii_types), pii_count
 
 
 # -- Event Handlers -------------------------------------------------------
@@ -238,10 +260,10 @@ def handle_pre_tool_use(event: dict) -> None:
 
 
 def handle_post_tool_use(event: dict) -> None:
-    """Flag MCP tool responses containing PII.
+    """Tokenize/redact MCP tool responses containing PII or obvious secrets.
 
-    Only fires for MCP tools (matcher: ^mcp__). Cannot rewrite tool output
-    (tool already executed). Injects context warning instead.
+    Only fires for MCP tools (matcher: ^mcp__). The tool has already executed,
+    but updatedToolOutput replaces the result before Claude sees it.
     """
     tool_name = event.get("tool_name", "")
     tool_result = event.get("tool_result", "")
@@ -249,33 +271,31 @@ def handle_post_tool_use(event: dict) -> None:
     if not tool_name.startswith(MCP_PREFIX):
         sys.exit(0)
 
-    if isinstance(tool_result, dict):
-        text = json.dumps(tool_result)
-    elif isinstance(tool_result, str):
-        text = tool_result
-    else:
+    if not isinstance(tool_result, (dict, list, str)):
         sys.exit(0)
 
-    if not text or len(text) < 4:
+    if not tool_result:
         sys.exit(0)
 
-    scan_text = text[:4000]
-    result = _tokenize(scan_text)
-    if result and result.get("tokens_created", 0) > 0:
-        types_found = sorted({t["type"] for t in result.get("token_manifest", [])})
-        count = result["tokens_created"]
-        type_list = ", ".join(types_found)
+    updated, changed, types_found, count = _guard_post_tool_value(tool_result, tool_name)
 
-        log_pii_detected(types_found, count, context="post:" + tool_name)
-
-        output = {
-            "additionalContext": (
-                "[VeriSwarm Guard] Warning: " + str(count) + " PII item(s) detected in "
-                "tool response (" + type_list + "). Use the tokenize_pii tool before "
-                "storing or forwarding this data."
-            )
+    if changed:
+        hook_output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "updatedToolOutput": updated,
+            }
         }
-        json.dump(output, sys.stdout)
+        if count > 0:
+            type_list = ", ".join(types_found)
+            hook_output["hookSpecificOutput"]["additionalContext"] = (
+                "[VeriSwarm Guard] Redacted "
+                + str(count)
+                + " PII item(s) in tool response ("
+                + type_list
+                + ")."
+            )
+        json.dump(hook_output, sys.stdout)
 
     sys.exit(0)
 
@@ -297,7 +317,7 @@ def main() -> None:
 
     hook_event = event.get("hook_event_name", "")
 
-    if not API_KEY and hook_event != "PreToolUse":
+    if not API_KEY and hook_event not in ("PreToolUse", "PostToolUse"):
         sys.exit(0)
 
     if hook_event == "SessionStart":
