@@ -105,6 +105,67 @@ def test_pre_tool_use_redacts_nested_tool_arguments(monkeypatch, capsys):
     assert updated["unchanged"] == "safe"
 
 
+def test_post_tool_use_redacts_secret_without_api_key(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    gh = _reload_hook(monkeypatch, enabled=True, api_key="")
+    monkeypatch.setattr(gh, "_tokenize", lambda text: None)
+
+    event = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "mcp__vault__read_secret",
+        "tool_result": {
+            "content": [{"type": "text", "text": "token " + GH}],
+            "unchanged": "safe",
+        },
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+
+    with pytest.raises(SystemExit) as exc:
+        gh.main()
+
+    assert exc.value.code == 0
+    output = json.loads(capsys.readouterr().out)
+    updated = output["hookSpecificOutput"]["updatedToolOutput"]
+    assert updated["content"][0]["text"] == "token [VS:GITHUB_TOKEN:offline]"
+    assert updated["unchanged"] == "safe"
+
+
+def test_post_tool_use_tokenizes_nested_pii_output(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, enabled=False)
+    monkeypatch.setattr(gh, "log_pii_detected", lambda *args, **kwargs: None)
+
+    def _tokenize(text):
+        if "alice@example.com" not in text:
+            return None
+        return {
+            "tokens_created": 1,
+            "tokenized_text": text.replace("alice@example.com", "[VS_TOKEN_1]"),
+            "token_manifest": [{"type": "EMAIL"}],
+        }
+
+    monkeypatch.setattr(gh, "_tokenize", _tokenize)
+
+    event = {
+        "tool_name": "mcp__crm__get_contact",
+        "tool_result": {
+            "content": [{"type": "text", "text": "Email alice@example.com"}],
+            "metadata": {"ok": True},
+        },
+    }
+
+    with pytest.raises(SystemExit) as exc:
+        gh.handle_post_tool_use(event)
+
+    assert exc.value.code == 0
+    output = json.loads(capsys.readouterr().out)
+    hook_output = output["hookSpecificOutput"]
+    assert hook_output["hookEventName"] == "PostToolUse"
+    assert hook_output["updatedToolOutput"]["content"][0]["text"] == "Email [VS_TOKEN_1]"
+    assert hook_output["updatedToolOutput"]["metadata"] == {"ok": True}
+    assert "additionalContext" in hook_output
+    assert "additionalContext" not in output
+
+
 def test_guard_hook_disables_api_calls_for_external_http(monkeypatch):
     monkeypatch.setenv("VERISWARM_API_URL", "http://api.veriswarm.ai")
     monkeypatch.setenv("VERISWARM_API_KEY", "key123")
