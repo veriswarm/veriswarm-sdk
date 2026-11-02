@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from veriswarm_client import VeriSwarmClient, VeriSwarmClientError
+from veriswarm.client import VeriSwarmClient, VeriSwarmClientError
 
 logger = logging.getLogger("veriswarm.guard")
 
