@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import functools
 import json
+import math
+import socket
 import time
+from http.client import HTTPException
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as _q, urlencode as _qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from veriswarm._version import __version__
 from veriswarm.secret_tripwire import SecretTripwire, ensure_tripwire
+
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+_USER_AGENT = f"veriswarm-python-sdk/{__version__}"
 
 
 # Path-component encoder. quote(..., safe="") percent-encodes every
@@ -137,7 +144,7 @@ class VeriSwarmClient:
     """
     base_url: str
     api_key: str | None = None
-    timeout_seconds: int = 15
+    timeout_seconds: float = 15
     secrets_detection: bool = False
     account_token: str | None = field(default=None, repr=False)
     _tripwire: "SecretTripwire | None" = field(default=None, init=False, repr=False)
@@ -148,6 +155,13 @@ class VeriSwarmClient:
             raise ValueError("base_url is required")
         if not self.api_key and not self.account_token:
             raise ValueError("api_key or account_token is required")
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive, finite number")
         self.base_url = self.base_url.rstrip("/")
         # Reject non-https base_url. The SDK ships x-api-key on every
         # request; an http base_url would transmit it in plaintext where
@@ -1443,7 +1457,7 @@ class VeriSwarmClient:
     def _headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": "veriswarm-python-sdk/0.4.0",
+            "User-Agent": _USER_AGENT,
         }
         if self.api_key:
             headers["x-api-key"] = self.api_key
@@ -1466,23 +1480,31 @@ class VeriSwarmClient:
             method=method,
             headers=self._headers(),
         )
+        status, raw_bytes = self._send(request)
+        # Cap the read at 10 MiB. A compromised or MITM'd endpoint
+        # returning a multi-hundred-MB body would otherwise OOM the
+        # customer's process. Real API responses are well under this cap.
+        if len(raw_bytes) > _MAX_RESPONSE_BYTES:
+            raise VeriSwarmClientError(
+                f"VeriSwarm response exceeded {_MAX_RESPONSE_BYTES} bytes",
+                status=status,
+                code="RESPONSE_TOO_LARGE",
+            )
+        if not raw_bytes:
+            return {}
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise VeriSwarmClientError(
+                "VeriSwarm API returned invalid JSON", status=status, code="INVALID_RESPONSE"
+            ) from exc
+
+    def _send(self, request: Request) -> tuple[int, bytes]:
+        """Perform the request; every transport failure becomes VeriSwarmClientError."""
         try:
             with _OPENER.open(request, timeout=self.timeout_seconds) as response:
-                # Cap the read at 10 MiB. A compromised or MITM'd
-                # endpoint returning a multi-hundred-MB body would
-                # otherwise OOM the customer's process. Real API
-                # responses are well under this cap; if a legitimate
-                # response ever exceeds it, the API has a different
-                # bug we'd want surfaced anyway. (Audit 2026-05-08
-                # CRIT-SDK-2.)
-                _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
                 raw_bytes = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(raw_bytes) > _MAX_RESPONSE_BYTES:
-                    raise VeriSwarmClientError(
-                        f"VeriSwarm response exceeded {_MAX_RESPONSE_BYTES} bytes"
-                    )
-                raw = raw_bytes.decode("utf-8")
-                return json.loads(raw) if raw else {}
+                return getattr(response, "status", 200), raw_bytes
         except HTTPError as exc:
             # Cap embedded details. Some logging frameworks emit
             # exception messages to structured aggregators; an unbounded
@@ -1494,6 +1516,23 @@ class VeriSwarmClient:
                 details = raw_details[:500]
             except Exception:
                 details = str(exc)[:500]
-            raise VeriSwarmClientError(f"VeriSwarm API {exc.code}: {details}") from exc
+            raise VeriSwarmClientError(
+                f"VeriSwarm API {exc.code}: {details}", status=exc.code
+            ) from exc
         except URLError as exc:
-            raise VeriSwarmClientError(f"VeriSwarm request failed: {exc.reason}") from exc
+            if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+                raise self._timeout_error() from exc
+            raise VeriSwarmClientError(
+                f"VeriSwarm request failed: {exc.reason}", code="NETWORK_ERROR"
+            ) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            raise self._timeout_error() from exc
+        except (OSError, HTTPException) as exc:
+            raise VeriSwarmClientError(
+                f"VeriSwarm request failed: {exc}", code="NETWORK_ERROR"
+            ) from exc
+
+    def _timeout_error(self) -> VeriSwarmClientError:
+        return VeriSwarmClientError(
+            f"VeriSwarm request timed out after {self.timeout_seconds}s", code="TIMEOUT"
+        )

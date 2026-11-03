@@ -7,7 +7,8 @@
  *   const client = new VeriSwarmClient({ baseUrl: "https://api.veriswarm.ai", apiKey: "vsk_..." });
  *   const decision = await client.checkDecision({ agentId: "agt_123", actionType: "post_message" });
  */
-import { SecretTripwire, ensureTripwire } from "./secret_tripwire.mjs";
+import { readFileSync } from "node:fs";
+import { ensureTripwire } from "./secret_tripwire.mjs";
 
 /**
  * Encode one caller-supplied value as a single URL path segment.
@@ -44,6 +45,83 @@ export class VeriSwarmError extends Error {
 
 // How long to keep built-in-only tripwire rules before retrying the fetch.
 const TRIPWIRE_RETRY_MS = 60_000;
+
+// Cap response bodies at 10 MiB. A compromised or MITM'd endpoint
+// returning a multi-hundred-MB body would otherwise OOM the customer's
+// Node process. Real API responses are well under the cap.
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+const MAX_TIMEOUT_MS = 2 ** 31 - 1; // setTimeout's maximum delay
+const LOCAL_HTTP_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/** SDK version for the User-Agent, read from this package's package.json. */
+function readSdkVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+    // Guard against a vendored copy of this file picking up the host
+    // project's package.json.
+    return pkg.name === "@veriswarm/sdk" && typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+const USER_AGENT = `veriswarm-node-sdk/${readSdkVersion()}`;
+
+function tooLarge(status) {
+  return new VeriSwarmError(`VeriSwarm response exceeded ${MAX_RESPONSE_BYTES} bytes`, {
+    status,
+    code: "RESPONSE_TOO_LARGE",
+  });
+}
+
+/**
+ * Read the body as UTF-8 text, aborting as soon as more than `maxBytes`
+ * arrive (a declared Content-Length over the cap is refused up front).
+ */
+async function readBodyCapped(response, maxBytes) {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw tooLarge(response.status);
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge(response.status);
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks, total));
+}
+
+function isJsonContentType(contentType) {
+  const mediaType = contentType.split(";")[0].trim().toLowerCase();
+  return mediaType === "application/json" || mediaType.endsWith("+json");
+}
+
+/** Parse a JSON body; non-JSON content types are returned as text. */
+function parseBody(text, response) {
+  if (!isJsonContentType(response.headers.get("content-type") || "")) return text;
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    // An error status keeps its status; the unparsed text rides on payload.
+    if (!response.ok) return text;
+    throw new VeriSwarmError("VeriSwarm API returned invalid JSON", {
+      status: response.status,
+      code: "INVALID_RESPONSE",
+      cause: err,
+    });
+  }
+}
 
 /** Join a CIDR list (array or comma/newline-separated string) into the server's format. */
 function normalizeCidrs(cidrs) {
@@ -108,15 +186,16 @@ export class VeriSwarmClient {
     } catch {
       throw new Error(`baseUrl is not a valid URL: ${baseUrl}`);
     }
-    const isLocalhostHttp = parsedUrl.protocol === "http:"
-      && (parsedUrl.hostname === "localhost"
-          || parsedUrl.hostname === "127.0.0.1"
-          || parsedUrl.hostname === "::1");
+    // WHATWG URL keeps the brackets on IPv6 hostnames ("[::1]").
+    const isLocalhostHttp = parsedUrl.protocol === "http:" && LOCAL_HTTP_HOSTS.has(parsedUrl.hostname);
     if (parsedUrl.protocol !== "https:" && !isLocalhostHttp) {
       throw new Error(
         `baseUrl must be https:// (got ${parsedUrl.protocol}). ` +
-        "Only http://localhost is permitted as a dev escape hatch."
+        "Only http://localhost, http://127.0.0.1 and http://[::1] are permitted as a dev escape hatch."
       );
+    }
+    if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TIMEOUT_MS) {
+      throw new Error(`timeoutMs must be a finite number between 1 and ${MAX_TIMEOUT_MS}`);
     }
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
@@ -1268,56 +1347,13 @@ export class VeriSwarmClient {
   }
 
   async #request(path, { method = "GET", body = null, query = null } = {}) {
-    const pathWithQuery = withQuery(path, query);
+    const url = `${this.baseUrl}${withQuery(path, query)}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "veriswarm-node-sdk/0.4.0",
-      };
-      if (this.apiKey) headers["x-api-key"] = this.apiKey;
-      if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
-      if (this.accountToken) headers["x-account-access-token"] = this.accountToken;
-
-      // redirect:'error' refuses to follow any 3xx. fetch's default
-      // would re-attach headers including x-api-key on the redirected
-      // request — a compromised/MITM'd response from baseUrl could 302
-      // to attacker host and steal the API key. Real APIs don't 302
-      // their JSON endpoints; treating a redirect as an error is the
-      // safe default. (Audit closure 2026-05-08 CRIT-D-8.)
-      const response = await fetch(`${this.baseUrl}${pathWithQuery}`, {
-        method,
-        headers,
-        body: body == null ? undefined : JSON.stringify(body),
-        signal: controller.signal,
-        redirect: "error",
-      });
-      // Cap response body size at 10 MiB. A compromised or MITM'd
-      // endpoint returning a multi-hundred-MB body would otherwise
-      // OOM the customer's Node process. Real API responses are well
-      // under the cap. (Audit 2026-05-08 HIGH-SDK-6.)
-      const _MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
-      const contentLengthHeader = response.headers.get("content-length");
-      if (contentLengthHeader && Number(contentLengthHeader) > _MAX_RESPONSE_BYTES) {
-        throw new Error(
-          `VeriSwarm response exceeded ${_MAX_RESPONSE_BYTES} bytes`
-        );
-      }
-      const contentType = response.headers.get("content-type") || "";
-      // Read as bytes first to enforce the cap even when the server
-      // omits Content-Length. arrayBuffer() reads the whole stream;
-      // we then check size before parsing.
-      const ab = await response.arrayBuffer();
-      if (ab.byteLength > _MAX_RESPONSE_BYTES) {
-        throw new Error(
-          `VeriSwarm response exceeded ${_MAX_RESPONSE_BYTES} bytes`
-        );
-      }
-      const text = new TextDecoder().decode(ab);
-      const payload = contentType.includes("application/json")
-        ? (text ? JSON.parse(text) : {})
-        : text;
+      const response = await this.#send(url, method, body, controller.signal);
+      const text = await readBodyCapped(response, MAX_RESPONSE_BYTES);
+      const payload = parseBody(text, response);
       if (!response.ok) {
         // Do NOT embed the raw response payload in the thrown error.
         // The error rides up through unhandled-rejection logs, Sentry,
@@ -1326,14 +1362,50 @@ export class VeriSwarmClient {
         // Throw with a sanitised summary; surface the payload via
         // a separate property so callers that explicitly want it can
         // opt in. (Audit 2026-05-08 CRIT-SDK-3.)
-        const err = new Error(`VeriSwarm API ${response.status}`);
-        err.status = response.status;
-        err.payload = payload;
-        throw err;
+        throw new VeriSwarmError(`VeriSwarm API ${response.status}`, {
+          status: response.status,
+          payload,
+        });
       }
       return payload;
+    } catch (err) {
+      if (err instanceof VeriSwarmError) throw err;
+      if (controller.signal.aborted) {
+        throw new VeriSwarmError(`VeriSwarm request timed out after ${this.timeoutMs}ms`, {
+          code: "TIMEOUT",
+          cause: err,
+        });
+      }
+      throw new VeriSwarmError(`VeriSwarm request failed: ${err?.message ?? err}`, {
+        code: "NETWORK_ERROR",
+        cause: err,
+      });
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  #send(url, method, body, signal) {
+    const headers = {
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT,
+    };
+    if (this.apiKey) headers["x-api-key"] = this.apiKey;
+    if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
+    if (this.accountToken) headers["x-account-access-token"] = this.accountToken;
+
+    // redirect:'error' refuses to follow any 3xx. fetch's default
+    // would re-attach headers including x-api-key on the redirected
+    // request — a compromised/MITM'd response from baseUrl could 302
+    // to attacker host and steal the API key. Real APIs don't 302
+    // their JSON endpoints; treating a redirect as an error is the
+    // safe default. (Audit closure 2026-05-08 CRIT-D-8.)
+    return fetch(url, {
+      method,
+      headers,
+      body: body == null ? undefined : JSON.stringify(body),
+      signal,
+      redirect: "error",
+    });
   }
 }
