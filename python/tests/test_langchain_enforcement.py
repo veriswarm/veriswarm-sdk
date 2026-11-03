@@ -123,3 +123,17 @@ def test_output_summary_secret_never_sent(monkeypatch):
     assert GH_TOKEN not in api.all_text_sent()
     summaries = [e["payload"].get("output_summary") for e in api.to("/v1/events")]
     assert any(s for s in summaries)
+
+
+def test_secret_straddling_truncation_cut_is_not_leaked_in_output_summary(monkeypatch):
+    api = install(monkeypatch, FakeApi())
+    # 170 chars + " key=" puts the token start at col 175; the 200-char cut would
+    # keep only "ghp_" + 21 of its 36 body chars if truncation ran first.
+    out = "x" * 170 + " key=" + GH_TOKEN + " tail"
+    h = _handler()
+    h.on_tool_end(out, run_id=__import__("uuid").uuid4(), name="t")
+    sent = api.all_text_sent()
+    assert "ghp_" not in sent
+    assert "A" * 10 not in sent
+    summary = api.to("/v1/events")[0]["payload"]["output_summary"]
+    assert len(summary) <= 200

@@ -117,3 +117,26 @@ def test_pii_tokenization_failure_on_input_fails_closed(monkeypatch):
     api.request = failing
     out, ctx = g.guard_before_tool("t", f"mail {EMAIL}")
     assert ctx.blocked
+
+
+def test_secret_straddling_truncation_cut_is_not_leaked_in_error_message(monkeypatch):
+    api = install(monkeypatch, FakeApi())
+    g = _guard(guard_enforce=False)
+    _, ctx = g.guard_before_tool("t", "hello there")
+    err = RuntimeError("x" * 170 + " key=" + GH_TOKEN + " tail")
+    g.guard_on_error("t", err, ctx)
+    sent = api.all_text_sent()
+    assert "ghp_" not in sent
+    assert "A" * 10 not in sent
+    msg = api.to("/v1/events")[0]["payload"]["error_message"]
+    assert len(msg) <= 200
+
+
+def test_offline_tripwire_redacts_whole_token_so_cut_cannot_split_it(monkeypatch):
+    install(monkeypatch, FakeApi())
+    g = _guard(guard_enforce=False)
+    from veriswarm.adapters.guard_mixin import guarded_excerpt
+
+    full = "x" * 170 + " key=" + GH_TOKEN
+    excerpt = guarded_excerpt(g._guard_client, full, 200, agent_id="agt_t")
+    assert "ghp_" not in excerpt and "AAAA" not in excerpt

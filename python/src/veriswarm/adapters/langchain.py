@@ -14,7 +14,7 @@ except ImportError:
 
 from veriswarm.client import VeriSwarmClient
 
-from .guard_mixin import guard_secrets_in, warn_rate_limited
+from .guard_mixin import guard_secrets_in, guarded_excerpt, warn_rate_limited
 
 logger = logging.getLogger("veriswarm.langchain")
 
@@ -97,7 +97,10 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
         self._report_event("tool.call.success", {
             "tool_name": tool_name,
             "duration_ms": duration_ms,
-            "output_summary": str(output)[:200] if output else None,
+            "output_summary": (
+                guarded_excerpt(self._client, output, 200, agent_id=self.agent_id)
+                if output else None
+            ),
         })
 
     def on_tool_error(self, error: BaseException, *, run_id: uuid.UUID, **kwargs: Any) -> None:

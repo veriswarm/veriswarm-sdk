@@ -88,6 +88,17 @@ def guard_secrets_in(
     return map_strings(value, _one)
 
 
+def guarded_excerpt(
+    client: VeriSwarmClient, value: Any, limit: int, *, agent_id: str | None
+) -> str:
+    """Secret-guard the FULL text, then truncate to ``limit`` chars.
+
+    Truncating first can cut a secret below the tripwire's detection threshold
+    and leak its leading characters; guarding first cannot.
+    """
+    return guard_secrets_in(client, str(value), agent_id=agent_id)[:limit]
+
+
 async def run_blocking(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run a blocking (urllib-based) call off the event loop."""
     if hasattr(asyncio, "to_thread"):
@@ -217,7 +228,10 @@ class GuardMixin:
             self._audit_event("tool.call.failure", {
                 "tool_name": tool_name,
                 "error_type": type(error).__name__,
-                "error_message": str(error)[:200],
+                "error_message": (
+                    guarded_excerpt(self._guard_client, error, 200, agent_id=self.agent_id)
+                    if self.guard_secrets else str(error)[:200]
+                ),
             })
 
     def guard_rehydrate(self, text: str, session_id: str | None = None) -> str:
