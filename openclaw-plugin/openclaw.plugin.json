@@ -100,7 +100,7 @@
       },
       "failOpen": {
         "type": "boolean",
-        "description": "Let tool calls and messages through without PII tokenization or Session Sentry when the VeriSwarm API is unreachable or returns an unexpected response, and let them through unchecked when a Guard hook fails unexpectedly. Default false: the tool call is blocked, the message delivery cancelled, or the tool result withheld. Local secret redaction and blocks need no API and are not relaxed by this flag.",
+        "description": "Let tool calls and messages through without PII tokenization or Session Sentry when the VeriSwarm API is unreachable or returns an unexpected response. Default false: the tool call is blocked or the message delivery cancelled. Local secret redaction and blocking are not relaxed by this flag, with one exception: if a Guard hook crashes unexpectedly while failOpen is set, that tool call, message or tool result passes through unchecked.",
         "default": false
       }
     },
