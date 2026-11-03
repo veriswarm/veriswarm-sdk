@@ -29,11 +29,12 @@ Usage:
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 from typing import Any, Callable
 
-from .guard_mixin import GuardMixin, GuardContext
+from .guard_mixin import GuardMixin, GuardContext, run_blocking
 
 logger = logging.getLogger("veriswarm.claude_sdk")
 
@@ -59,10 +60,19 @@ class VeriSwarmClaudeGuard(GuardMixin):
         """Wrap a Claude Agent SDK tool with Guard protection.
 
         Works with:
+        - claude_agent_sdk.SdkMcpTool instances (what ``@tool`` returns)
         - claude_agent_sdk.Tool instances
-        - @tool decorated functions
         - Plain callables
+
+        SdkMcpTool is returned as a new instance (the original is not mutated).
         """
+        try:
+            from claude_agent_sdk import SdkMcpTool
+            if isinstance(tool, SdkMcpTool):
+                return self._wrap_sdk_mcp_tool(tool)
+        except ImportError:
+            pass
+
         # Try Claude Agent SDK Tool class
         try:
             from claude_agent_sdk import Tool as ClaudeTool
@@ -81,6 +91,42 @@ class VeriSwarmClaudeGuard(GuardMixin):
     def wrap_tools(self, tools: list[Any]) -> list[Any]:
         """Wrap a list of tools with Guard protection."""
         return [self.wrap_tool(t) for t in tools]
+
+    def _wrap_sdk_mcp_tool(self, tool: Any) -> Any:
+        """Wrap an SdkMcpTool's async ``handler(args) -> {"content": [...]}``."""
+        guard = self
+        original = tool.handler
+        name = tool.name
+
+        def finish(result: Any, ctx: GuardContext) -> Any:
+            # Guard every text block, then audit once for the whole call.
+            if isinstance(result, dict) and isinstance(result.get("content"), list):
+                blocks = []
+                for block in result["content"]:
+                    if isinstance(block, dict) and isinstance(block.get("text"), str):
+                        block = {**block, "text": guard.guard_output(name, block["text"], ctx)}
+                    blocks.append(block)
+                result = {**result, "content": blocks}
+            guard.guard_audit_success(name, ctx)
+            return result
+
+        @functools.wraps(original)
+        async def guarded_handler(args: Any) -> Any:
+            filtered, ctx = await run_blocking(guard.guard_before_tool, name, args)
+            guard._last_ctx = ctx
+            if ctx.blocked:
+                return {
+                    "content": [{"type": "text", "text": ctx.block_message}],
+                    "is_error": True,
+                }
+            try:
+                result = await original(filtered)
+            except Exception as e:
+                await run_blocking(guard.guard_on_error, name, e, ctx)
+                raise
+            return await run_blocking(finish, result, ctx)
+
+        return dataclasses.replace(tool, handler=guarded_handler)
 
     def _wrap_claude_tool(self, tool: Any) -> Any:
         """Wrap a Claude Agent SDK Tool by intercepting its callable."""
@@ -107,7 +153,7 @@ class VeriSwarmClaudeGuard(GuardMixin):
             @functools.wraps(fn)
             async def guarded_async(*args, **kwargs):
                 input_str = _serialize_args(args, kwargs)
-                filtered_input, ctx = guard.guard_before_tool(name, input_str)
+                filtered_input, ctx = await run_blocking(guard.guard_before_tool, name, input_str)
                 guard._last_ctx = ctx
 
                 if ctx.blocked:
@@ -115,12 +161,12 @@ class VeriSwarmClaudeGuard(GuardMixin):
 
                 try:
                     result = await fn(*args, **kwargs)
-                    if isinstance(result, str):
-                        result = guard.guard_after_tool(name, result, ctx)
-                    return result
                 except Exception as e:
-                    guard.guard_on_error(name, e, ctx)
+                    await run_blocking(guard.guard_on_error, name, e, ctx)
                     raise
+                if isinstance(result, str):
+                    result = await run_blocking(guard.guard_after_tool, name, result, ctx)
+                return result
 
             return guarded_async
         else:

@@ -31,7 +31,7 @@ import functools
 import logging
 from typing import Any, Callable
 
-from .guard_mixin import GuardMixin, GuardContext
+from .guard_mixin import GuardMixin, GuardContext, run_blocking
 
 logger = logging.getLogger("veriswarm.guard.decorator")
 
@@ -103,19 +103,19 @@ def guard_protected(fn: Callable | None = None, *, name: str | None = None) -> C
                 # for audit logging. We cannot remap arbitrary *args/**kwargs with
                 # tokenized values, so input PII detection is for awareness/audit.
                 # Output PII tokenization (guard_after_tool) IS applied to the return value.
-                filtered_input, ctx = guard.guard_before_tool(tool_name, input_str)
+                filtered_input, ctx = await run_blocking(guard.guard_before_tool, tool_name, input_str)
 
                 if ctx.blocked:
                     return ctx.block_message
 
                 try:
                     result = await f(*args, **kwargs)
-                    if isinstance(result, str):
-                        result = guard.guard_after_tool(tool_name, result, ctx)
-                    return result
                 except Exception as e:
-                    guard.guard_on_error(tool_name, e, ctx)
+                    await run_blocking(guard.guard_on_error, tool_name, e, ctx)
                     raise
+                if isinstance(result, str):
+                    result = await run_blocking(guard.guard_after_tool, tool_name, result, ctx)
+                return result
 
             async_wrapper._guard_ctx = None  # type: ignore
             return async_wrapper
