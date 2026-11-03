@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
@@ -99,6 +100,9 @@ class VeriSwarmClientError(RuntimeError):
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
+# How long to keep built-in-only tripwire rules before retrying the fetch.
+_TRIPWIRE_RETRY_SECONDS = 60.0
+
 
 def _requires_account_token(method: _F) -> _F:
     """Fail fast for endpoints whose server route accepts only a session token."""
@@ -137,6 +141,7 @@ class VeriSwarmClient:
     secrets_detection: bool = False
     account_token: str | None = field(default=None, repr=False)
     _tripwire: "SecretTripwire | None" = field(default=None, init=False, repr=False)
+    _tripwire_retry_at: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -322,9 +327,8 @@ class VeriSwarmClient:
         """
         if not self.secrets_detection or not isinstance(text, str) or not text:
             return text
-        if self._tripwire is None:
-            self._tripwire = ensure_tripwire(fetch_manifest=self.get_secret_rules)
-        if not self._tripwire.scan(text):
+        tripwire = self._refresh_tripwire_if_due()
+        if not tripwire.scan(text):
             return text
         try:
             result = self.tokenize_pii(
@@ -335,11 +339,25 @@ class VeriSwarmClient:
                 guarded = result.get("tokenized_text") or text
             # Belt-and-suspenders: the PII tokenizer is not a secret detector,
             # so re-scan and locally redact any provider-prefix span it left.
-            if self._tripwire.scan(guarded):
-                guarded = self._tripwire.redact_offline(guarded)
+            if tripwire.scan(guarded):
+                guarded = tripwire.redact_offline(guarded)
             return guarded
         except Exception:
-            return self._tripwire.redact_offline(text)
+            return tripwire.redact_offline(text)
+
+    def _refresh_tripwire_if_due(self) -> SecretTripwire:
+        """Load the tripwire on first use; if only built-in rules are active
+        (fetch failed or manifest invalid), retry once the interval passes
+        instead of keeping the fallback forever."""
+        current = self._tripwire
+        due = time.monotonic() >= self._tripwire_retry_at
+        if current is not None and (current.source == "remote" or not due):
+            return current
+        fresh = ensure_tripwire(fetch_manifest=self.get_secret_rules)
+        if fresh.source != "remote":
+            self._tripwire_retry_at = time.monotonic() + _TRIPWIRE_RETRY_SECONDS
+        self._tripwire = fresh
+        return fresh
 
     # --- Credentials ---
 

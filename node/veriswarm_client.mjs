@@ -42,6 +42,9 @@ export class VeriSwarmError extends Error {
   }
 }
 
+// How long to keep built-in-only tripwire rules before retrying the fetch.
+const TRIPWIRE_RETRY_MS = 60_000;
+
 /** Join a CIDR list (array or comma/newline-separated string) into the server's format. */
 function normalizeCidrs(cidrs) {
   if (cidrs === null || cidrs === undefined) return "";
@@ -122,6 +125,7 @@ export class VeriSwarmClient {
     this.timeoutMs = timeoutMs;
     this.secretsDetection = secretsDetection === true;
     this._tripwire = null;
+    this._tripwireRetryAt = 0;
   }
 
   // --- Decisions ---
@@ -239,11 +243,7 @@ export class VeriSwarmClient {
     if (!this.secretsDetection || typeof text !== "string" || text.length === 0) {
       return text;
     }
-    if (!this._tripwire) {
-      this._tripwire = await ensureTripwire({
-        fetchManifest: () => this.getSecretRules(),
-      });
-    }
+    await this.#refreshTripwireIfDue();
     if (this._tripwire.scan(text).length === 0) return text;
     try {
       const result = await this.tokenizePii({ text, agentId, sessionId });
@@ -1242,6 +1242,20 @@ export class VeriSwarmClient {
   }
 
   // --- Internal ---
+
+  /**
+   * Load the tripwire on first use. If only the built-in rules are active
+   * (fetch failed or the manifest was invalid), try again once the retry
+   * interval has passed instead of keeping the fallback forever.
+   */
+  async #refreshTripwireIfDue() {
+    const needsRetry = this._tripwire?.source !== "remote" && Date.now() >= this._tripwireRetryAt;
+    if (this._tripwire && !needsRetry) return;
+    this._tripwire = await ensureTripwire({ fetchManifest: () => this.getSecretRules() });
+    if (this._tripwire.source !== "remote") {
+      this._tripwireRetryAt = Date.now() + TRIPWIRE_RETRY_MS;
+    }
+  }
 
   /** Fail fast for endpoints whose server route accepts only a session token. */
   #requireAccountToken(method) {
