@@ -153,6 +153,12 @@ function withQuery(path, query) {
 }
 
 export class VeriSwarmClient {
+  // Credentials live in private fields so util.inspect / console.log /
+  // JSON.stringify of a client never print them.
+  #apiKey;
+  #agentKey;
+  #accountToken;
+
   /**
    * @param {object} options
    * @param {string} options.baseUrl - e.g. https://api.veriswarm.ai
@@ -198,13 +204,48 @@ export class VeriSwarmClient {
       throw new Error(`timeoutMs must be a finite number between 1 and ${MAX_TIMEOUT_MS}`);
     }
     this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.apiKey = apiKey;
-    this.agentKey = agentKey;
-    this.accountToken = accountToken;
+    this.#apiKey = apiKey;
+    this.#agentKey = agentKey;
+    this.#accountToken = accountToken;
     this.timeoutMs = timeoutMs;
     this.secretsDetection = secretsDetection === true;
     this._tripwire = null;
     this._tripwireRetryAt = 0;
+  }
+
+  /** Configured workspace API key (read-only; not enumerable, so never printed). */
+  get apiKey() {
+    return this.#apiKey;
+  }
+
+  /** Configured agent API key (read-only). */
+  get agentKey() {
+    return this.#agentKey;
+  }
+
+  /** Configured account session token (read-only). */
+  get accountToken() {
+    return this.#accountToken;
+  }
+
+  /** Safe summary for logging: credentials reported as present/absent only. */
+  toJSON() {
+    const mark = (value) => (value ? "[redacted]" : null);
+    return {
+      baseUrl: this.baseUrl,
+      timeoutMs: this.timeoutMs,
+      secretsDetection: this.secretsDetection,
+      apiKey: mark(this.#apiKey),
+      agentKey: mark(this.#agentKey),
+      accountToken: mark(this.#accountToken),
+    };
+  }
+
+  // util.inspect / console.log render the redacted summary, whatever the
+  // inspect options (showHidden/getters would otherwise evaluate getters).
+  [Symbol.for("nodejs.util.inspect.custom")](depth, options, inspect) {
+    const summary = this.toJSON();
+    return `VeriSwarmClient ${inspect ? inspect(summary, options) : JSON.stringify(summary)}`;
   }
 
   // --- Decisions ---
@@ -1339,7 +1380,7 @@ export class VeriSwarmClient {
 
   /** Fail fast for endpoints whose server route accepts only a session token. */
   #requireAccountToken(method) {
-    if (this.accountToken) return;
+    if (this.#accountToken) return;
     throw new VeriSwarmError(
       `${method} requires an account session token: pass accountToken to the ` +
         "VeriSwarmClient constructor (this endpoint does not accept API keys)",
@@ -1391,9 +1432,9 @@ export class VeriSwarmClient {
       "Content-Type": "application/json",
       "User-Agent": USER_AGENT,
     };
-    if (this.apiKey) headers["x-api-key"] = this.apiKey;
-    if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
-    if (this.accountToken) headers["x-account-access-token"] = this.accountToken;
+    if (this.#apiKey) headers["x-api-key"] = this.#apiKey;
+    if (this.#agentKey) headers["x-agent-api-key"] = this.#agentKey;
+    if (this.#accountToken) headers["x-account-access-token"] = this.#accountToken;
 
     // redirect:'error' refuses to follow any 3xx. fetch's default
     // would re-attach headers including x-api-key on the redirected

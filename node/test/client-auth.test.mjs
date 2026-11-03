@@ -128,3 +128,36 @@ describe("kill switch and Guard policy CRUD (scoped API key or account token)", 
     expect(sentHeaders()["x-account-access-token"]).toBe("acct_tok");
   });
 });
+
+describe("credentials are not exposed when the client is inspected or serialized", () => {
+  const SECRETS = { apiKey: "vsk_SECRET_api", agentKey: "vak_SECRET_agent", accountToken: "acct_SECRET_tok" };
+
+  it("util.inspect, console-style formatting, JSON.stringify and key listing omit every credential", async () => {
+    const { inspect, format } = await import("node:util");
+    const c = new VeriSwarmClient({ baseUrl: BASE, ...SECRETS });
+    const renderings = [
+      inspect(c, { showHidden: true, depth: Infinity, getters: true }),
+      format("%o", c),
+      JSON.stringify(c),
+      JSON.stringify(Object.keys(c)),
+      JSON.stringify({ ...c }),
+    ];
+    for (const out of renderings) {
+      for (const secret of Object.values(SECRETS)) expect(out).not.toContain(secret);
+    }
+  });
+
+  it("still sends every credential and keeps read-only accessors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const c = new VeriSwarmClient({ baseUrl: BASE, ...SECRETS });
+    await c.getPlatformStatus();
+    expect(sentHeaders()["x-api-key"]).toBe(SECRETS.apiKey);
+    expect(sentHeaders()["x-agent-api-key"]).toBe(SECRETS.agentKey);
+    expect(sentHeaders()["x-account-access-token"]).toBe(SECRETS.accountToken);
+    expect(c.accountToken).toBe(SECRETS.accountToken);
+    expect(() => {
+      "use strict";
+      c.apiKey = "other";
+    }).toThrow();
+  });
+});
