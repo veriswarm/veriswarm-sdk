@@ -76,6 +76,25 @@ admin = VeriSwarmClient(
 Like API keys, the account token is only ever sent over `https://` (plain
 `http://` is allowed for `localhost`, `127.0.0.1`, and `[::1]` only).
 
+## Errors
+
+Every failure raises `VeriSwarmClientError` with:
+
+- `status` — HTTP status when a response arrived, otherwise `None`
+- `code` — local failure class: `ACCOUNT_TOKEN_REQUIRED`, `TIMEOUT`,
+  `NETWORK_ERROR`, `RESPONSE_TOO_LARGE` (bodies are capped at 10 MiB), or
+  `INVALID_RESPONSE`
+
+```python
+from veriswarm import VeriSwarmClientError
+
+try:
+    client.get_agent("agt_123")
+except VeriSwarmClientError as exc:
+    if exc.status == 404:
+        ...  # not found
+```
+
 ## Event Ingestion
 
 ```python

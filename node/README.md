@@ -62,6 +62,29 @@ const admin = new VeriSwarmClient({
 Like API keys, the account token is only ever sent over `https://` (plain
 `http://` is allowed for `localhost`, `127.0.0.1`, and `[::1]` only).
 
+## Errors
+
+Every failure is a `VeriSwarmError` (exported from the package) with:
+
+- `status` — HTTP status when a response arrived, otherwise `null`
+- `code` — local failure class: `ACCOUNT_TOKEN_REQUIRED`, `TIMEOUT`,
+  `NETWORK_ERROR`, `RESPONSE_TOO_LARGE` (bodies are capped at 10 MiB), or
+  `INVALID_RESPONSE`
+- `payload` — the parsed error body, for API errors (kept off the message so
+  it never lands in logs by accident)
+
+```javascript
+import { VeriSwarmClient, VeriSwarmError } from "@veriswarm/sdk";
+
+try {
+  await client.getAgent("agt_123");
+} catch (err) {
+  if (err instanceof VeriSwarmError && err.status === 404) {
+    // not found
+  }
+}
+```
+
 ## Event Ingestion
 
 ```javascript
