@@ -18,6 +18,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,8 +103,58 @@ def _line_count(path: Path) -> int:
         return 0
 
 
+# Warnings are written here rather than to stderr: flushes run in a forked
+# child whose stdio points at /dev/null. The next foreground hook run
+# reports them (surface_pending_warnings) and clears the file.
+WARNINGS_LOG_NAME = "activity_reporter.log"
+WARNINGS_LOG: Path | None = None  # override for tests; default is next to the buffer
+WARNINGS_LOG_MAX_BYTES = 16_384
+
+
+def _warnings_log_path() -> Path:
+    return WARNINGS_LOG or BUFFER_FILE.parent / WARNINGS_LOG_NAME
+
+
 def _warn(message: str) -> None:
-    print(f"[VeriSwarm Guard] {message}", file=sys.stderr)
+    """Record a warning for the next foreground run to report."""
+    log = _warnings_log_path()
+    line = f"{datetime.now(timezone.utc).isoformat()} {message}\n"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a") as f:
+            f.write(line)
+        if log.stat().st_size > WARNINGS_LOG_MAX_BYTES:
+            kept: list[str] = []
+            size = 0
+            for old in reversed(log.read_text().splitlines(keepends=True)):
+                size += len(old)
+                if size > WARNINGS_LOG_MAX_BYTES // 2:
+                    break
+                kept.append(old)
+            log.write_text("".join(reversed(kept)))
+    except OSError:
+        pass
+
+
+def surface_pending_warnings() -> None:
+    """Print a one-line summary of recorded warnings to stderr, then clear them.
+
+    Call from a foreground hook run (never from the flush child).
+    """
+    log = _warnings_log_path()
+    try:
+        lines = [l for l in log.read_text().splitlines() if l.strip()]
+        log.unlink()
+    except OSError:
+        return
+    if not lines:
+        return
+    latest = lines[-1].split(" ", 1)[-1]
+    print(
+        f"[VeriSwarm Guard] {len(lines)} warning(s) from activity upload since the last run; "
+        f"latest: {latest}",
+        file=sys.stderr,
+    )
 
 
 def _read_lines(path: Path) -> list[str]:
@@ -252,10 +303,9 @@ def _warn_missing_agent_id() -> None:
     marker = BUFFER_FILE.parent / NO_AGENT_ID_MARKER
     if marker.exists():
         return
-    print(
-        "[VeriSwarm Guard] Activity upload skipped: no GUARD_AGENT_ID configured. "
-        "Set it in the environment or ~/.veriswarm/env (veriswarm-setup --agent-id).",
-        file=sys.stderr,
+    _warn(
+        "Activity upload skipped: no GUARD_AGENT_ID configured. "
+        "Set it in the environment or ~/.veriswarm/env (veriswarm-setup --agent-id)."
     )
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -309,8 +359,15 @@ def flush_to_api() -> None:
 
 
 def maybe_flush(buffer_count: int) -> None:
-    """If the buffer has enough events, fork a child to flush them."""
+    """If the buffer has enough events, fork a child to flush them.
+
+    Skipped while any other thread is alive (e.g. a timed-out Guard API
+    request): forking a multi-threaded process can deadlock the child on a
+    lock held by that thread. The events stay buffered for the next run.
+    """
     if buffer_count < FLUSH_THRESHOLD:
+        return
+    if threading.active_count() > 1:
         return
 
     try:

@@ -162,7 +162,7 @@ def test_flush_without_agent_id_skips_upload_keeps_buffer_and_warns_once(monkeyp
 
     assert posted == []
     assert [json.loads(l) for l in buffer_file.read_text().splitlines()] == [event]
-    assert capsys.readouterr().err.count("GUARD_AGENT_ID") == 1
+    assert (tmp_path / "activity_reporter.log").read_text().count("GUARD_AGENT_ID") == 1
 
 
 def test_payload_never_uses_a_fake_default_agent_id():
@@ -190,9 +190,9 @@ def test_only_payload_rejections_are_dropped(monkeypatch, tmp_path, capsys, stat
 
     remaining = buffer_file.read_text().splitlines() if buffer_file.exists() else []
     assert (len(remaining) == 1) is requeued
-    err = capsys.readouterr().err
+    log = tmp_path / "activity_reporter.log"
     if not requeued:
-        assert "dropped 1" in err
+        assert "dropped 1" in log.read_text()
 
 
 def test_dropped_count_is_reported_once_per_flush(monkeypatch, tmp_path, capsys):
@@ -204,9 +204,9 @@ def test_dropped_count_is_reported_once_per_flush(monkeypatch, tmp_path, capsys)
 
     activity_reporter.flush_to_api()
 
-    err = capsys.readouterr().err
-    assert err.count("dropped") == 1
-    assert "dropped 2" in err
+    log = (tmp_path / "activity_reporter.log").read_text()
+    assert log.count("dropped") == 1
+    assert "dropped 2" in log
 
 
 def test_config_error_events_survive_until_config_is_fixed(monkeypatch, tmp_path):
@@ -235,7 +235,7 @@ def test_buffer_event_evicts_oldest_past_max_and_warns(monkeypatch, tmp_path, ca
 
     kept = [json.loads(l)["meta"]["i"] for l in buffer_file.read_text().splitlines()]
     assert kept == [7, 8, 9, 10, 11]
-    assert "evicted" in capsys.readouterr().err
+    assert "evicted" in (tmp_path / "activity_reporter.log").read_text()
 
 
 def test_requeue_evicts_oldest_past_max_and_warns(monkeypatch, tmp_path, capsys):
@@ -246,7 +246,7 @@ def test_requeue_evicts_oldest_past_max_and_warns(monkeypatch, tmp_path, capsys)
 
     # Requeued events are older than ones buffered meanwhile; oldest go first.
     assert [json.loads(l)["n"] for l in buffer_file.read_text().splitlines()] == [8, 9, "new"]
-    assert "evicted 8" in capsys.readouterr().err
+    assert "evicted 8" in (tmp_path / "activity_reporter.log").read_text()
 
 
 def test_buffer_event_records_given_session_id(monkeypatch, tmp_path):
@@ -337,3 +337,79 @@ def test_forked_flush_does_not_hold_the_hook_output_pipe(tmp_path, _isolated_hom
 
     assert result.stdout.strip() == "done"
     assert elapsed < 2.0
+
+
+# ── Warnings from the detached flush child ───────────────────────────
+
+import threading
+
+
+def _warnings_log(home):
+    return Path(home) / ".veriswarm" / "activity_reporter.log"
+
+
+def test_drop_warning_reaches_the_log_when_stderr_is_gone(monkeypatch, tmp_path, _isolated_home, capfd):
+    monkeypatch.setenv("VERISWARM_API_KEY", "k")
+    monkeypatch.setenv("GUARD_AGENT_ID", "agt_test")
+    _buffer(monkeypatch, tmp_path, [{"event_id": "e1", "event_type": "x", "meta": {}}])
+    monkeypatch.setattr(activity_reporter, "WARNINGS_LOG", _warnings_log(_isolated_home))
+    _capture_posts(monkeypatch, 422)
+
+    activity_reporter.flush_to_api()
+
+    assert "dropped 1" in _warnings_log(_isolated_home).read_text()
+
+
+def test_eviction_warning_reaches_the_log(monkeypatch, tmp_path, _isolated_home):
+    monkeypatch.setattr(activity_reporter, "MAX_BUFFER_SIZE", 1)
+    monkeypatch.setattr(activity_reporter, "WARNINGS_LOG", _warnings_log(_isolated_home))
+    _buffer(monkeypatch, tmp_path, [{"n": 1}])
+
+    activity_reporter._requeue_events([{"n": 0}])
+
+    assert "evicted 1" in _warnings_log(_isolated_home).read_text()
+
+
+def test_pending_warnings_are_surfaced_once_on_stderr_then_cleared(monkeypatch, _isolated_home, capsys):
+    log = _warnings_log(_isolated_home)
+    monkeypatch.setattr(activity_reporter, "WARNINGS_LOG", log)
+    activity_reporter._warn("Activity upload: dropped 2 event(s) ...")
+    activity_reporter._warn("Activity buffer full; evicted 5 oldest event(s).")
+
+    activity_reporter.surface_pending_warnings()
+    first = capsys.readouterr().err
+    activity_reporter.surface_pending_warnings()
+    second = capsys.readouterr().err
+
+    assert first.count("\n") == 1
+    assert "2 warning(s)" in first and "evicted 5" in first
+    assert second == ""
+    assert not log.exists() or log.read_text() == ""
+
+
+def test_warnings_log_is_size_capped(monkeypatch, _isolated_home):
+    log = _warnings_log(_isolated_home)
+    monkeypatch.setattr(activity_reporter, "WARNINGS_LOG", log)
+    monkeypatch.setattr(activity_reporter, "WARNINGS_LOG_MAX_BYTES", 2_000)
+
+    for i in range(500):
+        activity_reporter._warn(f"warning number {i}")
+
+    assert log.stat().st_size <= 2_000
+    assert "warning number 499" in log.read_text()
+
+
+def test_no_fork_while_another_thread_is_alive(monkeypatch):
+    stop = threading.Event()
+    worker = threading.Thread(target=stop.wait, daemon=True)
+    worker.start()
+
+    def _no_fork():
+        raise AssertionError("forked with a live thread")
+
+    monkeypatch.setattr(activity_reporter.os, "fork", _no_fork)
+    try:
+        activity_reporter.maybe_flush(activity_reporter.FLUSH_THRESHOLD)
+    finally:
+        stop.set()
+        worker.join()
