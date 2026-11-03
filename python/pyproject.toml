@@ -33,6 +33,9 @@ dependencies = []
 [project.optional-dependencies]
 langchain = ["langchain-core>=0.2"]
 webbotauth = ["cryptography>=42"]
+crewai = ["crewai"]
+openai-agents = ["openai-agents"]
+claude-sdk = ["claude-agent-sdk"]
 
 [project.urls]
 Homepage = "https://veriswarm.ai"

@@ -28,6 +28,63 @@ const decision = await client.checkDecision({
 console.log(decision.decision); // "allow", "review", or "deny"
 ```
 
+## Authentication
+
+The client accepts three credentials; pass whichever your integration has:
+
+| Option | Header | Use for |
+|--------|--------|---------|
+| `apiKey` | `x-api-key` | Workspace API key (`vsk_...`) — trust checks, events, Guard scans, workflows, analytics |
+| `agentKey` | `x-agent-api-key` | Individual agent key (`vak_...`) — agent self-service (`getMyScores`, `issueCredential`) |
+| `accountToken` | `x-account-access-token` | Account session token — account administration |
+
+Some endpoints accept **only** an account session token: team and workspace
+management, notifications, IP allowlist, custom domain, scoring profile,
+approval approve/reject, JIT approve/deny, workflow step approval, governance
+credential store/revoke, shadow-discovery scan/dismiss, compliance schedule,
+Passport verify/manifests/delegations, Vault export, Guard finding updates, and
+PII session revocation. Calling one of these without `accountToken` throws a
+`VeriSwarmError` with `code === "ACCOUNT_TOKEN_REQUIRED"` before any request
+is sent.
+
+Kill switch (`killAgent`/`unkillAgent`) and Guard policy CRUD send the API key
+(an API key needs the matching Guard scope on the server) and the account
+token too when one is configured.
+
+```javascript
+const admin = new VeriSwarmClient({
+  baseUrl: "https://api.veriswarm.ai",
+  apiKey: "vsk_your_workspace_key",
+  accountToken: process.env.VERISWARM_ACCOUNT_TOKEN,
+});
+```
+
+Like API keys, the account token is only ever sent over `https://` (plain
+`http://` is allowed for `localhost`, `127.0.0.1`, and `[::1]` only).
+
+## Errors
+
+Every failure is a `VeriSwarmError` (exported from the package) with:
+
+- `status` — HTTP status when a response arrived, otherwise `null`
+- `code` — local failure class: `ACCOUNT_TOKEN_REQUIRED`, `TIMEOUT`,
+  `NETWORK_ERROR`, `RESPONSE_TOO_LARGE` (bodies are capped at 10 MiB), or
+  `INVALID_RESPONSE`
+- `payload` — the parsed error body, for API errors (kept off the message so
+  it never lands in logs by accident)
+
+```javascript
+import { VeriSwarmClient, VeriSwarmError } from "@veriswarm/sdk";
+
+try {
+  await client.getAgent("agt_123");
+} catch (err) {
+  if (err instanceof VeriSwarmError && err.status === 404) {
+    // not found
+  }
+}
+```
+
 ## Event Ingestion
 
 ```javascript
@@ -96,12 +153,12 @@ await client.unkillAgent("agt_123");
 
 // Guard findings
 const findings = await client.listGuardFindings("agt_123");
-await client.updateGuardFinding(1, { status: "resolved" });
+await client.updateGuardFinding(1, { newStatus: "resolved" }); // open | false_positive | mitigated | resolved
 
 // Guard policies
 const policies = await client.listGuardPolicies();
 await client.createGuardPolicy({ name: "block-sql", pattern: "DROP TABLE", action: "block" });
-await client.updateGuardPolicy(1, { enabled: false });
+await client.updateGuardPolicy(1, { isActive: false });
 await client.deleteGuardPolicy(1);
 ```
 
@@ -209,7 +266,8 @@ await client.markAllNotificationsRead();
 
 ```javascript
 const allowlist = await client.getIpAllowlist();
-await client.setIpAllowlist({ cidrs: ["10.0.0.0/8"], enabled: true });
+await client.setIpAllowlist({ cidrs: ["10.0.0.0/8"] });
+await client.setIpAllowlist({ enabled: false }); // disable explicitly; an empty cidrs list is refused
 ```
 
 ## Custom Domains
@@ -245,7 +303,7 @@ const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
 ## Reputation Lookup
 
 ```javascript
-const rep = await client.reputationLookup("my-agent");
+const rep = await client.reputationLookup("my-agent"); // email, URL, slug, or other reference
 ```
 
 ## OpenAI-Compatible LLM Proxy
@@ -299,12 +357,12 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `scanInjection({ text })` | Guard injection scanning |
 | `listGuardPolicies()` | List Guard policies |
 | `createGuardPolicy(policy)` | Create Guard policy |
-| `updateGuardPolicy(id, updates)` | Update Guard policy |
+| `updateGuardPolicy(id, { isActive })` | Activate/deactivate Guard policy |
 | `deleteGuardPolicy(id)` | Delete Guard policy |
 | `killAgent(agentId, reason)` | Activate kill switch |
 | `unkillAgent(agentId)` | Deactivate kill switch |
 | `listGuardFindings(agentId?)` | List Guard findings |
-| `updateGuardFinding(id, updates)` | Update Guard finding |
+| `updateGuardFinding(id, { newStatus })` | Set Guard finding status |
 | `verifyAgentIdentity(agentId)` | Passport identity verification |
 | `createDelegation(delegation)` | Create Passport delegation |
 | `listDelegations()` | List Passport delegations |
@@ -324,7 +382,7 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `markNotificationRead(id)` | Mark notification read |
 | `markAllNotificationsRead()` | Mark all notifications read |
 | `getIpAllowlist()` | Get IP allowlist |
-| `setIpAllowlist({ cidrs, enabled })` | Set IP allowlist |
+| `setIpAllowlist({ cidrs, enabled })` | Set IP allowlist (`enabled: false` disables) |
 | `getCustomDomain()` | Get custom domain config |
 | `setCustomDomain(domain)` | Set custom domain |
 | `verifyCustomDomain()` | Verify custom domain DNS |
@@ -334,7 +392,7 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `removeTeamMember(userId)` | Remove team member |
 | `listWorkspaces()` | List user workspaces |
 | `switchWorkspace(tenantId)` | Switch active workspace |
-| `reputationLookup(slug)` | Shared reputation lookup |
+| `reputationLookup(agentRef)` | Shared reputation lookup |
 | `getBadgeUrl(slug, options?)` | Embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |
 | **Web Bot Auth** (`webbotauth.mjs`, separate entry point) | |

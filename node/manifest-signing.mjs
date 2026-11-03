@@ -103,14 +103,39 @@ function canonicalize(value) {
   throw new Error(`cannot canonicalize value of type ${typeof value}`);
 }
 
+// Fields of the server's closed `PrincipalRef` model (extra fields are
+// rejected there). The server canonicalizes `PrincipalRef.model_dump()`,
+// which always emits every field, with `None` for unset ones.
+const PRINCIPAL_REF_FIELDS = ["type", "name", "identifier", "source"];
+
+/**
+ * Normalize `principal_ref` to exactly what the server hashes: every
+ * PrincipalRef field present, missing/undefined → null. Unknown fields are
+ * rejected because the server would refuse them (and a signature over them
+ * could never verify).
+ */
+function normalizePrincipalRef(principalRef) {
+  if (principalRef === null || principalRef === undefined) return null;
+  if (typeof principalRef !== "object" || Array.isArray(principalRef)) {
+    throw new Error("principal_ref must be an object or null");
+  }
+  const unknown = Object.keys(principalRef).filter((key) => !PRINCIPAL_REF_FIELDS.includes(key));
+  if (unknown.length > 0) {
+    throw new Error(`principal_ref has unsupported field(s): ${unknown.join(", ")}`);
+  }
+  return Object.fromEntries(PRINCIPAL_REF_FIELDS.map((key) => [key, principalRef[key] ?? null]));
+}
+
 /**
  * Build the exact canonical JSON string the VeriSwarm API signs/verifies
  * for a Passport manifest's content fields.
  *
  * `capabilities` and `required_tools` are sorted ascending (string sort)
  * before serialization. `ai_disclosure` and `principal_ref` are emitted as
- * `null` when unset (the keys are always present). Keys inside
- * `principal_ref` (and any other nested object) are sorted recursively.
+ * `null` when unset (the keys are always present). `principal_ref` always
+ * carries all four PrincipalRef fields (`type`, `name`, `identifier`,
+ * `source`), unset ones as `null`, matching the server's `model_dump()`.
+ * Keys are sorted recursively.
  *
  * @param {object} options
  * @param {string} options.version
@@ -138,7 +163,7 @@ export function canonicalManifestContent({
     capabilities: [...capabilities].sort(),
     required_tools: [...required_tools].sort(),
     ai_disclosure: ai_disclosure ?? null,
-    principal_ref: principal_ref ?? null,
+    principal_ref: normalizePrincipalRef(principal_ref),
   };
   return canonicalize(content);
 }
