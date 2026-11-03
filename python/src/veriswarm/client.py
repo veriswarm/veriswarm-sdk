@@ -128,7 +128,7 @@ def _requires_account_token(method: _F) -> _F:
     return wrapper  # type: ignore[return-value]
 
 
-@dataclass(slots=True)
+@dataclass
 class VeriSwarmClient:
     """VeriSwarm Python SDK — trust scoring, event ingestion, and agent management.
 

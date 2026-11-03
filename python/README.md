@@ -8,6 +8,22 @@ Lightweight Python client for the VeriSwarm trust scoring API. Zero external dep
 pip install veriswarm
 ```
 
+The base package has no dependencies and supports Python 3.8+. Optional extras:
+
+| Extra | Installs | For |
+|-------|----------|-----|
+| `webbotauth` | `cryptography` | Web Bot Auth and manifest signing |
+| `langchain` | `langchain-core` | LangChain callback adapter |
+| `crewai` | `crewai` | CrewAI tool adapter |
+| `openai-agents` | `openai-agents` | OpenAI Agents SDK adapter |
+| `claude-sdk` | `claude-agent-sdk` | Claude Agent SDK adapter |
+
+```bash
+pip install "veriswarm[crewai]"
+```
+
+Framework packages set their own minimum Python version (several need 3.10+).
+
 ## Quick Start
 
 ```python
