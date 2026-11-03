@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, safe_error_response
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -14,12 +14,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def platform_status() -> str:
         """Check VeriSwarm platform health, uptime, and active feature flags."""
         try:
-            result = client.get("/v1/public/status")
+            result = await call_api(client.get, "/v1/public/status")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="platform_status")
 
     @server.tool()
     async def get_scoring_profile() -> str:
@@ -27,12 +25,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/suite/scoring/profile")
+            result = await call_api(client.get, "/v1/suite/scoring/profile")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_scoring_profile")
 
     @server.tool()
     async def set_scoring_profile(profile_code: str, weight_overrides: str = "") -> str:
@@ -47,12 +43,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body: dict = {"profile_code": profile_code}
             if weight_overrides:
                 body["weight_overrides"] = json.loads(weight_overrides)
-            result = client.post("/v1/suite/scoring/profile", json=body)
+            result = await call_api(client.post, "/v1/suite/scoring/profile", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="set_scoring_profile")
 
     @server.tool()
     async def list_notifications(limit: int = 20) -> str:
@@ -60,12 +54,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/suite/notifications", params={"limit": limit})
+            result = await call_api(client.get, "/v1/suite/notifications", params={"limit": limit})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_notifications")
 
     @server.tool()
     async def get_ip_allowlist() -> str:
@@ -73,12 +65,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/public/providers/ip-allowlist")
+            result = await call_api(client.get, "/v1/public/providers/ip-allowlist")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_ip_allowlist")
 
     @server.tool()
     async def set_ip_allowlist(cidrs: str, enabled: bool = True) -> str:
@@ -93,14 +83,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             cidr_str = ",".join(c.strip() for c in cidrs.split(",") if c.strip())
             if not enabled:
                 cidr_str = ""
-            result = client.post("/v1/public/providers/ip-allowlist", json={
+            result = await call_api(client.post, "/v1/public/providers/ip-allowlist", json={
                 "ip_allowlist": cidr_str,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="set_ip_allowlist")
 
     @server.tool()
     async def get_custom_domain() -> str:
@@ -108,12 +96,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/public/providers/custom-domain")
+            result = await call_api(client.get, "/v1/public/providers/custom-domain")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_custom_domain")
 
     @server.tool()
     async def set_custom_domain(domain: str) -> str:
@@ -124,12 +110,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         domain: the custom domain, e.g. 'trust.mycompany.com'
         """
         try:
-            result = client.post("/v1/public/providers/custom-domain", json={"domain": domain})
+            result = await call_api(client.post, "/v1/public/providers/custom-domain", json={"domain": domain})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="set_custom_domain")
 
     @server.tool()
     async def list_team_members() -> str:
@@ -137,12 +121,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/public/providers/team")
+            result = await call_api(client.get, "/v1/public/providers/team")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_team_members")
 
     @server.tool()
     async def invite_team_member(email: str, role: str = "member") -> str:
@@ -154,12 +136,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         role: 'admin' or 'member' (default 'member')
         """
         try:
-            result = client.post("/v1/public/providers/team/invite", json={
+            result = await call_api(client.post, "/v1/public/providers/team/invite", json={
                 "email": email,
                 "role": role,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="invite_team_member")

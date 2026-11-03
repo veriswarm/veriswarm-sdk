@@ -10,7 +10,7 @@ Usage:
   veriswarm-setup --uninstall        # Remove hooks and MCP config
 
 Installs:
-  1. VeriSwarm MCP Server (67 tools for trust scoring, Guard, Passport, Vault)
+  1. VeriSwarm MCP Server (102 tools for trust scoring, Guard, Passport, Vault, and more)
   2. Guard Proxy config (wraps other MCP servers for transparent PII interception)
   3. Guard hooks (PII protection for prompts and tool calls)
 """
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -95,85 +96,61 @@ def _write_env_file(api_key: str, api_url: str = "", agent_id: str = "") -> Path
     return env_file
 
 
+# Installed hook timeout (seconds). guard_hook.py keeps its API calls inside
+# HOOK_BUDGET_SECONDS, below this, because Claude Code discards the output
+# of a hook that times out.
+GUARD_HOOK_TIMEOUT = 10
+
+
+def _hook_entry(matcher: str, command: str, timeout: int, *, block_on_failure: bool = False) -> dict:
+    handler = {"type": "command", "command": command, "timeout": timeout}
+    if block_on_failure:
+        # If the guard crashes or times out, block the prompt / tool call
+        # instead of letting it through unchecked (Claude Code v2.1.295+).
+        handler["onFailure"] = "block"
+    return {"matcher": matcher, "hooks": [handler]}
+
+
 def _generate_hooks_config(hook_script: str, api_key: str, agent_id: str = "") -> dict:
     """Generate hooks configuration for Claude Code / compatible platforms.
 
     Two-path architecture:
     - Fast path: bash activity_logger.sh (~25ms) logs ALL tool calls
-    - Slow path: python3 guard_hook.py (~200ms) scans MCP tools for PII
+    - Slow path: guard_hook.py (~200ms) checks prompts and MCP tool
+      arguments/responses for secrets and PII, run with the interpreter
+      veriswarm-mcp is installed in (sys.executable) so the hook can import
+      the package.
 
-    PreToolUse and PostToolUse each get two hook entries. SessionStart gets one.
-    UserPromptSubmit is not hooked (too many false positives on code).
+    UserPromptSubmit and the PreToolUse guard fail closed (onFailure: block).
     """
     logger_script = _activity_logger_path()
-    pii_command = f"python3 {hook_script}"
-    log_command = f"bash {logger_script}"
+    guard_command = f"{shlex.quote(sys.executable)} {shlex.quote(hook_script)}"
+    log_command = f"bash {shlex.quote(logger_script)}"
 
     return {
         "hooks": {
-            "SessionStart": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": pii_command,
-                            "timeout": 10,
-                        }
-                    ]
-                }
+            "SessionStart": [_hook_entry("", guard_command, GUARD_HOOK_TIMEOUT)],
+            "UserPromptSubmit": [
+                _hook_entry("", guard_command, GUARD_HOOK_TIMEOUT, block_on_failure=True),
             ],
             "PreToolUse": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": log_command,
-                            "timeout": 5,
-                        }
-                    ]
-                },
-                {
-                    "matcher": "^mcp__",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": pii_command,
-                            "timeout": 10,
-                        }
-                    ]
-                }
+                _hook_entry("", log_command, 5),
+                _hook_entry("^mcp__", guard_command, GUARD_HOOK_TIMEOUT, block_on_failure=True),
             ],
             "PostToolUse": [
-                {
-                    "matcher": "",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": log_command,
-                            "timeout": 5,
-                        }
-                    ]
-                },
-                {
-                    "matcher": "^mcp__",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": pii_command,
-                            "timeout": 10,
-                        }
-                    ]
-                }
+                _hook_entry("", log_command, 5),
+                _hook_entry("^mcp__", guard_command, GUARD_HOOK_TIMEOUT),
             ],
         }
     }
 
 
 def _generate_mcp_config(api_key: str, agent_key: str = "", api_url: str = "") -> dict:
-    """Generate MCP server configuration."""
-    pkg_dir = _find_package_dir()
+    """Generate MCP server configuration.
+
+    Launches the installed package with the interpreter it is installed in,
+    so the config works from any working directory and inside virtualenvs.
+    """
     env = {}
     if api_url:
         env["VERISWARM_API_URL"] = api_url
@@ -187,9 +164,8 @@ def _generate_mcp_config(api_key: str, agent_key: str = "", api_url: str = "") -
     return {
         "mcpServers": {
             "veriswarm": {
-                "command": "python3",
-                "args": ["-m", "src"],
-                "cwd": str(pkg_dir),
+                "command": sys.executable,
+                "args": ["-m", "veriswarm_mcp"],
                 "env": env,
             }
         }
@@ -257,7 +233,7 @@ def setup(platform: str, api_key: str, agent_key: str = "", api_url: str = "",
     hooks_config = _generate_hooks_config(hook_script, api_key, agent_id)
     merged = _merge_settings(merged, hooks_config)
     _write_settings(settings_path, merged)
-    print(f"         5 hooks installed (SessionStart, PreToolUse x2, PostToolUse x2)")
+    print("         6 hooks installed (SessionStart, UserPromptSubmit, PreToolUse x2, PostToolUse x2)")
 
     # 3. Guard Proxy info
     guard_dir = _guard_proxy_dir()
@@ -273,10 +249,10 @@ def setup(platform: str, api_key: str, agent_key: str = "", api_url: str = "",
     print(f"\n  Setup complete! Restart {plat['name']} to activate.\n")
     print("  Protection enabled:")
     print("    - All tool calls logged locally (activity_logger.sh, ~25ms)")
-    print("    - MCP tool arguments scanned for PII and auto-tokenized")
-    print("    - MCP tool responses scanned for PII (context warning injected)")
+    print("    - Prompts with secrets blocked; prompts with PII blocked (GUARD_BLOCK_PROMPT_PII=0 to allow)")
+    print("    - MCP tool arguments: PII tokenized (you confirm the rewritten call)")
+    print("    - MCP tool responses: PII tokenized before Claude sees them (withheld if the scan fails)")
     print("    - Built-in tools (Read, Write, Edit, Bash, Grep) are logged but NOT scanned")
-    print("    - User prompts are NOT scanned (avoids false positives on code)")
     print("    - Use rehydrate_pii tool to restore real values when needed")
     print()
 

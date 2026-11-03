@@ -18,6 +18,7 @@ import json
 import os
 import signal
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,29 +46,38 @@ FLUSH_THRESHOLD = 50
 MAX_BUFFER_SIZE = 500
 
 
-def _load_config() -> tuple[str, str, str, str]:
-    """Load API URL, API key, agent ID, and agent key from env or ~/.veriswarm/env."""
-    api_url = os.environ.get("VERISWARM_API_URL", "")
-    api_key = os.environ.get("VERISWARM_API_KEY", "")
-    agent_id = os.environ.get("GUARD_AGENT_ID", "")
-    agent_key = os.environ.get("VERISWARM_AGENT_KEY", "")
+_CONFIG_KEYS = ("VERISWARM_API_URL", "VERISWARM_API_KEY", "GUARD_AGENT_ID", "VERISWARM_AGENT_KEY")
 
-    if not api_key or not agent_key:
-        env_file = Path.home() / ".veriswarm" / "env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    k, v = key.strip(), value.strip()
-                    if k == "VERISWARM_API_KEY" and not api_key:
-                        api_key = v
-                    elif k == "VERISWARM_API_URL":
-                        api_url = v
-                    elif k == "GUARD_AGENT_ID":
-                        agent_id = v
-                    elif k == "VERISWARM_AGENT_KEY":
-                        agent_key = v
+# Created after the first "no agent id" warning so later flushes (each in a
+# fresh hook process) stay quiet.
+NO_AGENT_ID_MARKER = ".no-agent-id-warned"
+
+
+def _read_env_file() -> dict[str, str]:
+    env_file = Path.home() / ".veriswarm" / "env"
+    values: dict[str, str] = {}
+    try:
+        text = env_file.read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _load_config() -> tuple[str, str, str, str]:
+    """Load API URL, API key, agent ID, and agent key.
+
+    Each setting comes from its environment variable when set, otherwise
+    from ~/.veriswarm/env.
+    """
+    file_values = _read_env_file()
+    cfg = {k: os.environ.get(k) or file_values.get(k, "") for k in _CONFIG_KEYS}
+    api_url, api_key = cfg["VERISWARM_API_URL"], cfg["VERISWARM_API_KEY"]
+    agent_id, agent_key = cfg["GUARD_AGENT_ID"], cfg["VERISWARM_AGENT_KEY"]
 
     try:
         api_url = validate_api_url(
@@ -80,33 +90,117 @@ def _load_config() -> tuple[str, str, str, str]:
     return api_url, api_key, agent_id, agent_key
 
 
-def _session_id() -> str:
-    """Stable session ID from Claude Code or fallback to parent PID."""
-    return os.environ.get("CLAUDE_SESSION_ID", "local-" + str(os.getppid()))
+def _fallback_session_id() -> str:
+    """Used only when the hook payload carried no session_id."""
+    return "local-" + str(os.getppid())
 
 
-def buffer_event(event_type: str, metadata: dict | None = None) -> int:
-    """Append an activity event to the local buffer. Returns buffer line count."""
+def _line_count(path: Path) -> int:
+    try:
+        with open(path) as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+# Warnings are written here rather than to stderr: flushes run in a forked
+# child whose stdio points at /dev/null. The next foreground hook run
+# reports them (surface_pending_warnings) and clears the file.
+WARNINGS_LOG_NAME = "activity_reporter.log"
+WARNINGS_LOG: Path | None = None  # override for tests; default is next to the buffer
+WARNINGS_LOG_MAX_BYTES = 16_384
+
+
+def _warnings_log_path() -> Path:
+    return WARNINGS_LOG or BUFFER_FILE.parent / WARNINGS_LOG_NAME
+
+
+def _warn(message: str) -> None:
+    """Record a warning for the next foreground run to report."""
+    log = _warnings_log_path()
+    line = f"{datetime.now(timezone.utc).isoformat()} {message}\n"
+    try:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "a") as f:
+            f.write(line)
+        if log.stat().st_size > WARNINGS_LOG_MAX_BYTES:
+            kept: list[str] = []
+            size = 0
+            for old in reversed(log.read_text().splitlines(keepends=True)):
+                size += len(old)
+                if size > WARNINGS_LOG_MAX_BYTES // 2:
+                    break
+                kept.append(old)
+            log.write_text("".join(reversed(kept)))
+    except OSError:
+        pass
+
+
+def surface_pending_warnings() -> None:
+    """Print a one-line summary of recorded warnings to stderr, then clear them.
+
+    Call from a foreground hook run (never from the flush child).
+    """
+    log = _warnings_log_path()
+    try:
+        lines = [l for l in log.read_text().splitlines() if l.strip()]
+        log.unlink()
+    except OSError:
+        return
+    if not lines:
+        return
+    latest = lines[-1].split(" ", 1)[-1]
+    print(
+        f"[VeriSwarm Guard] {len(lines)} warning(s) from activity upload since the last run; "
+        f"latest: {latest}",
+        file=sys.stderr,
+    )
+
+
+def _read_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text().splitlines()
+    except OSError:
+        return []
+
+
+def _rewrite_buffer(lines: list[str]) -> None:
+    """Replace the buffer contents atomically."""
+    tmp = BUFFER_FILE.with_name(f"{BUFFER_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("".join(line + "\n" for line in lines))
+    tmp.replace(BUFFER_FILE)
+
+
+def buffer_event(event_type: str, metadata: dict | None = None, session_id: str = "") -> int:
+    """Append an activity event to the local buffer. Returns buffer line count.
+
+    The buffer holds at most MAX_BUFFER_SIZE events; when full, the oldest
+    events are evicted (with a warning) to make room.
+    """
     BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     entry = {
         "event_id": uuid.uuid4().hex[:16],
         "event_type": event_type,
-        "session_id": _session_id(),
+        "session_id": session_id or _fallback_session_id(),
         "ts": datetime.now(timezone.utc).isoformat(),
         "meta": metadata or {},
     }
+    line = json.dumps(entry, separators=(",", ":"))
+
+    count = _line_count(BUFFER_FILE)
+    if count >= MAX_BUFFER_SIZE:
+        lines = _read_lines(BUFFER_FILE)
+        keep = lines[len(lines) - (MAX_BUFFER_SIZE - 1):] if MAX_BUFFER_SIZE > 1 else []
+        evicted = len(lines) - len(keep)
+        _rewrite_buffer(keep + [line])
+        _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
+        return len(keep) + 1
 
     with open(BUFFER_FILE, "a") as f:
-        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        f.write(line + "\n")
 
-    try:
-        with open(BUFFER_FILE) as f:
-            count = sum(1 for _ in f)
-    except OSError:
-        count = 0
-
-    return count
+    return count + 1
 
 
 def _read_and_clear_buffer() -> list[dict]:
@@ -161,7 +255,7 @@ def _event_payload(event: dict, agent_id: str) -> dict:
 
     return {
         "event_id": str(event.get("event_id") or uuid.uuid4().hex[:16]),
-        "agent_id": agent_id or "claude-code-session",
+        "agent_id": agent_id,
         "source_type": "guard_hook",
         "event_type": str(event_type),
         "occurred_at": str(event.get("ts") or datetime.now(timezone.utc).isoformat()),
@@ -173,14 +267,49 @@ def _event_payload(event: dict, agent_id: str) -> dict:
 
 
 def _requeue_events(events: list[dict]) -> None:
-    """Append unsent events back to the shared buffer."""
+    """Put unsent events back in the buffer ahead of anything buffered since.
+
+    They are the oldest events, so when the total would exceed
+    MAX_BUFFER_SIZE they are evicted first (with a warning).
+    """
     if not events:
         return
     try:
         BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(BUFFER_FILE, "a") as f:
-            for event in events:
-                f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        current = _read_lines(BUFFER_FILE)
+        lines = [json.dumps(e, separators=(",", ":")) for e in events] + current
+        evicted = max(0, len(lines) - MAX_BUFFER_SIZE)
+        _rewrite_buffer(lines[evicted:])
+    except OSError:
+        return
+    if evicted:
+        _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
+
+
+# Rejections of the event itself: resending the same payload cannot succeed.
+# Auth/routing errors (401/403/404) are configuration problems — those events
+# are kept so they are delivered once the configuration is fixed.
+PAYLOAD_REJECTION_STATUSES = frozenset({400, 413, 422})
+
+
+def _is_payload_rejection(exc: Exception) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in PAYLOAD_REJECTION_STATUSES
+    )
+
+
+def _warn_missing_agent_id() -> None:
+    marker = BUFFER_FILE.parent / NO_AGENT_ID_MARKER
+    if marker.exists():
+        return
+    _warn(
+        "Activity upload skipped: no GUARD_AGENT_ID configured. "
+        "Set it in the environment or ~/.veriswarm/env (veriswarm-setup --agent-id)."
+    )
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
     except OSError:
         pass
 
@@ -189,6 +318,11 @@ def flush_to_api() -> None:
     """Send all buffered events to VeriSwarm. Called in a forked child process."""
     api_url, api_key, agent_id, agent_key = _load_config()
     if not api_key and not agent_key:
+        return
+    if not agent_id:
+        # Events must be attributed to a real agent; keep them buffered
+        # (bounded by MAX_BUFFER_SIZE) until one is configured.
+        _warn_missing_agent_id()
         return
 
     events = _read_and_clear_buffer()
@@ -203,6 +337,7 @@ def flush_to_api() -> None:
         headers["x-api-key"] = api_key
 
     unsent: list[dict] = []
+    dropped = 0
     for event in events:
         try:
             response = httpx.post(
@@ -212,21 +347,34 @@ def flush_to_api() -> None:
                 timeout=5.0,
             )
             response.raise_for_status()
-        except Exception:
-            unsent.append(event)
+        except Exception as exc:
+            if _is_payload_rejection(exc):
+                dropped += 1
+            else:
+                unsent.append(event)
 
+    if dropped:
+        _warn(f"Activity upload: dropped {dropped} event(s) the API rejected as invalid (HTTP 400/413/422).")
     _requeue_events(unsent)
 
 
 def maybe_flush(buffer_count: int) -> None:
-    """If the buffer has enough events, fork a child to flush them."""
+    """If the buffer has enough events, fork a child to flush them.
+
+    Skipped while any other thread is alive (e.g. a timed-out Guard API
+    request): forking a multi-threaded process can deadlock the child on a
+    lock held by that thread. The events stay buffered for the next run.
+    """
     if buffer_count < FLUSH_THRESHOLD:
+        return
+    if threading.active_count() > 1:
         return
 
     try:
         pid = os.fork()
         if pid == 0:
             try:
+                _detach_from_hook_io()
                 flush_to_api()
             except Exception:
                 pass
@@ -235,18 +383,38 @@ def maybe_flush(buffer_count: int) -> None:
         pass
 
 
-def log_session_start(cwd: str = "", **kwargs) -> None:
+def _detach_from_hook_io() -> None:
+    """In the flush child: leave the hook's session and release its stdio.
+
+    Claude Code waits for the hook's stdout to close; a child still holding
+    it would stretch the hook to the length of the upload (and past the
+    hook timeout).
+    """
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    if devnull > 2:
+        os.close(devnull)
+
+
+def log_session_start(cwd: str = "", session_id: str = "", **kwargs) -> None:
     """Log a session start event."""
     meta = {"cwd": cwd}
     meta.update(kwargs)
-    count = buffer_event("agent.session.started", meta)
+    count = buffer_event("agent.session.started", meta, session_id=session_id)
     maybe_flush(count)
 
 
-def log_pii_detected(pii_types: list[str], count: int, context: str = "") -> None:
+def log_pii_detected(
+    pii_types: list[str], count: int, context: str = "", session_id: str = ""
+) -> None:
     """Log a PII detection event (types only, never values)."""
     meta = {"pii_types": pii_types, "pii_count": count, "context": context}
-    c = buffer_event("guard.pii.detected", meta)
+    c = buffer_event("guard.pii.detected", meta, session_id=session_id)
     maybe_flush(c)
 
 

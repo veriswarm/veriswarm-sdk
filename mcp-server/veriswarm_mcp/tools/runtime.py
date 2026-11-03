@@ -11,6 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, safe_error_response, safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -28,16 +29,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         escalation rate, cost, and grade distribution.
         """
         try:
-            result = client.get(f"/v1/suite/analytics/agent/{agent_id}", params={"days": days})
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/suite/analytics/agent/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_agent_analytics")
 
     @server.tool()
     async def get_cost_recommendations(agent_id: str, days: int = 30) -> str:
@@ -47,16 +47,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         KB improvements, prompt optimization, and security reviews.
         """
         try:
-            result = client.get(f"/v1/suite/analytics/cost-recommendations/{agent_id}", params={"days": days})
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/suite/analytics/cost-recommendations/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_cost_recommendations")
 
     # ── Security ─────────────────────────────────────────────────────
 
@@ -68,16 +67,14 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         policy boundary, off-topic, and jailbreak.
         """
         try:
-            result = client.get("/v1/suite/security/red-team/attacks")
+            result = await call_api(client.get, "/v1/suite/security/red-team/attacks")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_red_team_attacks")
 
     @server.tool()
     async def check_tool_permission(agent_id: str, tool_name: str) -> str:
@@ -89,19 +86,17 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns whether the tool is allowed based on the agent's trust score.
         """
         try:
-            result = client.post("/v1/suite/security/check-permission", json={
+            result = await call_api(client.post, "/v1/suite/security/check-permission", json={
                 "agent_id": agent_id,
                 "tool_name": tool_name,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="check_tool_permission")
 
     @server.tool()
     async def score_conversation_security(
@@ -117,7 +112,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         resistance, policy adherence, tool authorization, and grounding.
         """
         try:
-            result = client.post("/v1/suite/security/conversation-score", json={
+            result = await call_api(client.post, "/v1/suite/security/conversation-score", json={
                 "conversation_id": conversation_id,
                 "pii_tokens_in_response": pii_tokens_in_response,
                 "injection_attempts_detected": injection_attempts,
@@ -125,14 +120,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 "policy_violations": policy_violations,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="score_conversation_security")
 
     # ── GDPR Compliance ──────────────────────────────────────────────
 
@@ -150,20 +143,18 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         cryptographic deletion proof stored in Vault.
         """
         try:
-            result = client.post("/v1/suite/compliance/forget-contact", json={
+            result = await call_api(client.post, "/v1/suite/compliance/forget-contact", json={
                 "contact_identifier": contact_identifier,
                 "contact_type": contact_type,
                 "dry_run": dry_run,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="forget_contact")
 
     @server.tool()
     async def list_deletion_records() -> str:
@@ -171,31 +162,28 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/suite/compliance/deletion-records")
+            result = await call_api(client.get, "/v1/suite/compliance/deletion-records")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_deletion_records")
 
     @server.tool()
     async def verify_deletion(record_id: str) -> str:
         """Verify a GDPR deletion record exists and return its cryptographic proof."""
         try:
-            result = client.get(f"/v1/suite/compliance/deletion-records/{record_id}/verify")
+            record_id = safe_id(record_id, "record_id")
+            result = await call_api(client.get, f"/v1/suite/compliance/deletion-records/{record_id}/verify")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="verify_deletion")
 
     # ── A2A Trust ────────────────────────────────────────────────────
 
@@ -207,16 +195,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         interaction counts, and per-platform breakdown.
         """
         try:
-            result = client.get(f"/v1/suite/a2a/reputation/{agent_id}", params={"days": days})
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/suite/a2a/reputation/{agent_id}", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_agent_reputation")
 
     @server.tool()
     async def get_a2a_history(agent_id: str, role: str = "requesting", limit: int = 20) -> str:
@@ -226,16 +213,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         role: 'requesting' (outbound) or 'receiving' (inbound)
         """
         try:
-            result = client.get(f"/v1/suite/a2a/history/{agent_id}", params={"role": role, "limit": limit})
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/suite/a2a/history/{agent_id}", params={"role": role, "limit": limit})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_a2a_history")
 
     # ── Benchmarking ─────────────────────────────────────────────────
 
@@ -246,16 +232,15 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns scores, pass rates, and promote/review/block recommendations.
         """
         try:
-            result = client.get(f"/v1/suite/benchmarks/{agent_id}", params={"limit": limit})
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/suite/benchmarks/{agent_id}", params={"limit": limit})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_benchmark_history")
 
     # ── LLM Provider Health ──────────────────────────────────────────
 
@@ -267,13 +252,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         cooldown status, and consecutive failure count.
         """
         try:
-            result = client.get("/v1/suite/llm/provider-health")
+            result = await call_api(client.get, "/v1/suite/llm/provider-health")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             # Catch httpx.ConnectError / httpx.TimeoutException / etc.
             # Without this branch, network failures propagated as
             # unhandled exceptions surfaced internal URLs and tracebacks
             # to the LLM. (Audit 2026-05-08 HIGH-SDK-16.)
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_provider_health")

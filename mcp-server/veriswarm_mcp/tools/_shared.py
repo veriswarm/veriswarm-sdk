@@ -19,9 +19,14 @@ in every tool module:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
+from typing import Any, Callable
+from urllib.parse import quote as _quote
+
+import httpx
 
 logger = logging.getLogger("veriswarm.mcp.tools")
 
@@ -64,10 +69,26 @@ def safe_error_response(exc: Exception, *, context: str = "request") -> str:
     """Return a JSON-string error suitable for the MCP tool result.
 
     Logs the real exception to stderr (logger.error) but never returns
-    its repr or args to the LLM. The LLM context is the user's eyes;
-    raw exception strings can include URLs, hosts, or env fragments
-    that should not surface there.
+    its repr, args, or an HTTP response body to the LLM. The LLM context
+    is the user's eyes; raw exception strings and server error bodies can
+    include URLs, hosts, or env fragments that should not surface there.
+
+    Two shapes carry extra, safe detail:
+    - ToolValidationError: our own message (names the field, no input echo).
+    - httpx.HTTPStatusError: the numeric status code only.
     """
+    if isinstance(exc, ToolValidationError):
+        return json.dumps({"error": str(exc), "type": "ToolValidationError"})
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        logger.error("MCP tool %s failed: HTTP %s", context, status)
+        return json.dumps({
+            "error": f"VeriSwarm {context} failed: API returned HTTP {status}.",
+            "type": "HTTPStatusError",
+            "status_code": status,
+        })
+
     logger.error("MCP tool %s failed: %r", context, exc, exc_info=True)
     return json.dumps({
         "error": f"VeriSwarm {context} failed. Check connectivity / inputs.",
@@ -75,15 +96,29 @@ def safe_error_response(exc: Exception, *, context: str = "request") -> str:
     })
 
 
-def q_path(value: object) -> str:
-    """Percent-encode a value for safe use as a URL path component.
+async def call_api(method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run a sync VeriSwarmAPIClient method in a worker thread.
 
-    Cheaper than safe_id when the caller wants traversal-resistance
-    rather than format-validation. A value of `"../admin"` becomes
-    `"..%2Fadmin"` and cannot escape the path segment.
+    Tool handlers are async and share FastMCP's event loop; calling the
+    sync httpx client directly would stall every other request for up to
+    the client timeout. All tool API calls go through here.
     """
-    from urllib.parse import quote as _quote
-    return _quote(str(value), safe="")
+    return await asyncio.to_thread(method, *args, **kwargs)
+
+
+def q_path(value: object, field_name: str = "path segment") -> str:
+    """Percent-encode a value for safe use as a single URL path segment.
+
+    Use instead of safe_id when legitimate values contain characters the
+    ID allowlist rejects (e.g. model names like ``gpt-4.1``). ``/``, ``?``,
+    ``#`` and ``%`` are encoded so the value cannot leave its segment;
+    the dot segments ``.`` / ``..`` (which encoding leaves intact and
+    clients/servers normalise away) and empty values are rejected.
+    """
+    text = str(value)
+    if text in ("", ".", ".."):
+        raise ToolValidationError(f"{field_name} must be a non-empty value other than '.' or '..'")
+    return _quote(text, safe="")
 
 
 def bounded_string(value: str, *, field_name: str, max_chars: int) -> str:

@@ -7,13 +7,11 @@ role), so they error on api-key-only clients.
 from __future__ import annotations
 
 import json
-from urllib.parse import urlencode
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
-from ._shared import bounded_string, safe_error_response, safe_id, safe_optional_id
+from ._shared import bounded_string, call_api, safe_error_response, safe_id, safe_optional_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -58,10 +56,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             if agent_id_clean:
                 body["agent_id"] = agent_id_clean
 
-            result = client.post("/v1/approvals", json=body)
+            result = await call_api(client.post, "/v1/approvals", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="create_approval")
 
@@ -93,10 +89,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             agent_id_clean = safe_optional_id(agent_id, "agent_id")
             if agent_id_clean:
                 params["agent_id"] = agent_id_clean
-            result = client.get(f"/v1/approvals?{urlencode(params)}")
+            result = await call_api(client.get, "/v1/approvals", params=params)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="list_approvals")
 
@@ -105,10 +99,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         """Get a single approval request by id (`apr_*`)."""
         try:
             approval_id = safe_id(approval_id, "approval_id")
-            result = client.get(f"/v1/approvals/{approval_id}")
+            result = await call_api(client.get, f"/v1/approvals/{approval_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="get_approval")
 
@@ -124,10 +116,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body: dict = {}
             if reason:
                 body["reason"] = bounded_string(reason, field_name="reason", max_chars=2000)
-            result = client.post(f"/v1/approvals/{approval_id}/approve", json=body)
+            result = await call_api(client.post, f"/v1/approvals/{approval_id}/approve", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="approve_approval")
 
@@ -143,9 +133,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body: dict = {}
             if reason:
                 body["reason"] = bounded_string(reason, field_name="reason", max_chars=2000)
-            result = client.post(f"/v1/approvals/{approval_id}/reject", json=body)
+            result = await call_api(client.post, f"/v1/approvals/{approval_id}/reject", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="reject_approval")
