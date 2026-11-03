@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
-from ._shared import bounded_string, safe_error_response, safe_id, safe_optional_id
+from ._shared import bounded_string, call_api, safe_error_response, safe_id, safe_optional_id
 
 # Maximum character budgets for Session Sentry turn text fields.
 # Large prompts are the vector; cap generously enough for real usage
@@ -30,12 +29,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             text = f"Tool: {tool_name}"
             if tool_config:
                 text += f"\nConfig: {tool_config}"
-            result = client.post("/v1/suite/guard/scan", json={"text": text})
+            result = await call_api(client.post, "/v1/suite/guard/scan", json={"text": text})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="scan_tool")
 
     @server.tool()
     async def check_tool_allowed(tool_name: str) -> str:
@@ -43,12 +40,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/suite/guard/policies", params={"tool_name": tool_name})
+            result = await call_api(client.get, "/v1/suite/guard/policies", params={"tool_name": tool_name})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="check_tool_allowed")
 
     @server.tool()
     async def get_findings(agent_id: str = "") -> str:
@@ -57,12 +52,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             params = {}
             if agent_id:
                 params["agent_id"] = agent_id
-            result = client.get("/v1/suite/guard/findings", params=params if params else None)
+            result = await call_api(client.get, "/v1/suite/guard/findings", params=params if params else None)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_findings")
 
     @server.tool()
     async def kill_agent(agent_id: str, reason: str) -> str:
@@ -75,15 +68,14 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         """
         try:
             agent_id = safe_id(agent_id, "agent_id")
-            result = client.post(
+            result = await call_api(
+                client.post,
                 f"/v1/suite/guard/kill/{agent_id}",
                 json={"reason": reason},
             )
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="kill_agent")
 
     @server.tool()
     async def unkill_agent(agent_id: str) -> str:
@@ -92,12 +84,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             agent_id = safe_id(agent_id, "agent_id")
-            result = client.post(f"/v1/suite/guard/unkill/{agent_id}")
+            result = await call_api(client.post, f"/v1/suite/guard/unkill/{agent_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="unkill_agent")
 
     @server.tool()
     async def tokenize_pii(text: str, agent_id: str = "", session_id: str = "") -> str:
@@ -117,12 +107,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 body["agent_id"] = agent_id
             if session_id:
                 body["session_id"] = session_id
-            result = client.post("/v1/suite/guard/pii/tokenize", json=body)
+            result = await call_api(client.post, "/v1/suite/guard/pii/tokenize", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="tokenize_pii")
 
     @server.tool()
     async def scan_injection(text: str) -> str:
@@ -131,24 +119,20 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns is_injection (bool), confidence score, and matched patterns.
         """
         try:
-            result = client.post("/v1/suite/guard/scan", json={"text": text})
+            result = await call_api(client.post, "/v1/suite/guard/scan", json={"text": text})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="scan_injection")
 
     @server.tool()
     async def get_pii_session(session_id: str) -> str:
         """Get details of a PII tokenization session including all tokens created."""
         try:
             session_id = safe_id(session_id, "session_id")
-            result = client.get(f"/v1/suite/guard/pii/sessions/{session_id}")
+            result = await call_api(client.get, f"/v1/suite/guard/pii/sessions/{session_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_pii_session")
 
     @server.tool()
     async def revoke_pii_session(session_id: str) -> str:
@@ -157,12 +141,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
             session_id = safe_id(session_id, "session_id")
-            result = client.delete(f"/v1/suite/guard/pii/sessions/{session_id}")
+            result = await call_api(client.delete, f"/v1/suite/guard/pii/sessions/{session_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="revoke_pii_session")
 
     @server.tool()
     async def list_guard_policies() -> str:
@@ -170,12 +152,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
 
         Requires session auth (x-account-access-token). Not available with API key only."""
         try:
-            result = client.get("/v1/suite/guard/policies")
+            result = await call_api(client.get, "/v1/suite/guard/policies")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_guard_policies")
 
     @server.tool()
     async def rehydrate_pii(text: str, session_id: str) -> str:
@@ -188,15 +168,13 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         session_id: the session ID from the original tokenize_pii call
         """
         try:
-            result = client.post("/v1/suite/guard/pii/rehydrate", json={
+            result = await call_api(client.post, "/v1/suite/guard/pii/rehydrate", json={
                 "text": text,
                 "session_id": session_id,
             })
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="rehydrate_pii")
 
     @server.tool()
     async def guard_scan_session(
@@ -261,8 +239,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         except Exception as exc:
             return json.dumps({"error": str(exc)})
 
-        agent_id_clean = safe_optional_id(agent_id or None, "agent_id")
-        actor_id_clean = safe_optional_id(actor_id or None, "actor_id")
+        try:
+            agent_id_clean = safe_optional_id(agent_id or None, "agent_id")
+            actor_id_clean = safe_optional_id(actor_id or None, "actor_id")
+        except Exception as exc:
+            return safe_error_response(exc, context="guard_scan_session")
 
         # --- API call ---
         body: dict = {
@@ -278,9 +259,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             body["actor_id"] = actor_id_clean
 
         try:
-            result = client.post("/v1/suite/guard/scan-session", json=body)
+            result = await call_api(client.post, "/v1/suite/guard/scan-session", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="guard_scan_session")

@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, safe_error_response
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -21,12 +21,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             params: dict = {"limit": limit}
             if agent_id:
                 params["agent_id"] = agent_id
-            result = client.get("/v1/suite/vault/ledger", params=params)
+            result = await call_api(client.get, "/v1/suite/vault/ledger", params=params)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="query_ledger")
 
     @server.tool()
     async def verify_chain(limit: int = 100) -> str:
@@ -35,12 +33,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         limit: number of recent entries to verify (default 100)
         """
         try:
-            result = client.get("/v1/suite/vault/verify", params={"limit": limit})
+            result = await call_api(client.get, "/v1/suite/vault/verify", params={"limit": limit})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="verify_chain")
 
     @server.tool()
     async def export_vault(export_type: str = "json") -> str:
@@ -49,9 +45,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         export_type: format for the export — json or csv (default json)
         """
         try:
-            result = client.post("/v1/suite/vault/export", json={"export_type": export_type})
+            result = await call_api(client.post, "/v1/suite/vault/export", json={"export_type": export_type})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="export_vault")

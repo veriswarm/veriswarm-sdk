@@ -3,10 +3,10 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, safe_error_response, safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -20,12 +20,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             params: dict = {}
             if is_active is not None:
                 params["is_active"] = str(is_active).lower()
-            result = client.get("/v1/workflows", params=params)
+            result = await call_api(client.get, "/v1/workflows", params=params)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_workflows")
 
     @server.tool()
     async def get_workflow(workflow_id: str) -> str:
@@ -34,12 +32,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID (starts with wf_)
         """
         try:
-            result = client.get(f"/v1/workflows/{workflow_id}")
+            workflow_id = safe_id(workflow_id, "workflow_id")
+            result = await call_api(client.get, f"/v1/workflows/{workflow_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_workflow")
 
     @server.tool()
     async def create_workflow(name: str, slug: str, definition: str, description: str = "") -> str:
@@ -52,7 +49,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         """
         try:
             defn = json.loads(definition)
-            result = client.post("/v1/workflows", json={
+            result = await call_api(client.post, "/v1/workflows", json={
                 "name": name,
                 "slug": slug,
                 "description": description,
@@ -61,10 +58,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             return json.dumps(result, indent=2)
         except json.JSONDecodeError:
             return json.dumps({"error": "Invalid JSON in definition"})
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="create_workflow")
 
     @server.tool()
     async def run_workflow(workflow_id: str) -> str:
@@ -73,12 +68,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to run
         """
         try:
-            result = client.post(f"/v1/workflows/{workflow_id}/run", json={})
+            workflow_id = safe_id(workflow_id, "workflow_id")
+            result = await call_api(client.post, f"/v1/workflows/{workflow_id}/run", json={})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="run_workflow")
 
     @server.tool()
     async def get_execution(execution_id: str) -> str:
@@ -87,12 +81,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID (starts with wfx_)
         """
         try:
-            result = client.get(f"/v1/workflows/executions/{execution_id}")
+            execution_id = safe_id(execution_id, "execution_id")
+            result = await call_api(client.get, f"/v1/workflows/executions/{execution_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_execution")
 
     @server.tool()
     async def activate_workflow(workflow_id: str) -> str:
@@ -101,12 +94,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to activate
         """
         try:
-            result = client.post(f"/v1/workflows/{workflow_id}/activate")
+            workflow_id = safe_id(workflow_id, "workflow_id")
+            result = await call_api(client.post, f"/v1/workflows/{workflow_id}/activate")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="activate_workflow")
 
     @server.tool()
     async def deactivate_workflow(workflow_id: str) -> str:
@@ -115,23 +107,20 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         workflow_id: the workflow ID to deactivate
         """
         try:
-            result = client.post(f"/v1/workflows/{workflow_id}/deactivate")
+            workflow_id = safe_id(workflow_id, "workflow_id")
+            result = await call_api(client.post, f"/v1/workflows/{workflow_id}/deactivate")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="deactivate_workflow")
 
     @server.tool()
     async def list_workflow_templates() -> str:
         """List available workflow templates (both built-in and custom)."""
         try:
-            result = client.get("/v1/workflows/templates")
+            result = await call_api(client.get, "/v1/workflows/templates")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_workflow_templates")
 
     @server.tool()
     async def deploy_template(template_id: str) -> str:
@@ -140,12 +129,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         template_id: the template ID (e.g., "builtin:content-pipeline-v2" or a custom template ID)
         """
         try:
-            result = client.post(f"/v1/workflows/templates/{template_id}/deploy")
+            template_id = safe_id(template_id, "template_id")
+            result = await call_api(client.post, f"/v1/workflows/templates/{template_id}/deploy")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="deploy_template")
 
     @server.tool()
     async def workflow_stats(days: int = 30) -> str:
@@ -154,12 +142,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         days: time period in days (default 30, max 90)
         """
         try:
-            result = client.get("/v1/workflows/stats", params={"days": days})
+            result = await call_api(client.get, "/v1/workflows/stats", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="workflow_stats")
 
     @server.tool()
     async def cancel_workflow_execution(execution_id: str) -> str:
@@ -168,12 +154,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID to cancel (starts with wfx_)
         """
         try:
-            result = client.post(f"/v1/workflows/executions/{execution_id}/cancel")
+            execution_id = safe_id(execution_id, "execution_id")
+            result = await call_api(client.post, f"/v1/workflows/executions/{execution_id}/cancel")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="cancel_workflow_execution")
 
     @server.tool()
     async def retry_workflow_execution(execution_id: str) -> str:
@@ -182,9 +167,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         execution_id: the execution ID to retry (starts with wfx_)
         """
         try:
-            result = client.post(f"/v1/workflows/executions/{execution_id}/retry")
+            execution_id = safe_id(execution_id, "execution_id")
+            result = await call_api(client.post, f"/v1/workflows/executions/{execution_id}/retry")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="retry_workflow_execution")
