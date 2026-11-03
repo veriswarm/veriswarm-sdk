@@ -48,6 +48,10 @@ inputs:
     description: "Fail the check if prompt injection is detected"
     required: false
     default: "true"
+  fail-on-pii:
+    description: "Fail the check if PII is detected in scanned files (scan mode). Scan errors also fail the gate when this or fail-on-injection is true."
+    required: false
+    default: "true"
   fail-on-low-score:
     description: "Fail if security readiness score is below this threshold (0-100)"
     required: false
@@ -85,6 +89,9 @@ outputs:
   pii-found:
     description: "Whether PII was detected in scanned files"
     value: ${{ steps.checks.outputs.pii-found }}
+  pii-count:
+    description: "Number of distinct PII entities detected in scanned files"
+    value: ${{ steps.checks.outputs.pii-count }}
   injection-found:
     description: "Whether prompt injection was detected"
     value: ${{ steps.checks.outputs.injection-found }}
@@ -143,6 +150,7 @@ runs:
         VERISWARM_ACTION_TYPE: ${{ inputs.action-type }}
         VERISWARM_FAIL_ON_DENY: ${{ inputs.fail-on-deny }}
         VERISWARM_FAIL_ON_INJECTION: ${{ inputs.fail-on-injection }}
+        VERISWARM_FAIL_ON_PII: ${{ inputs.fail-on-pii }}
         VERISWARM_FAIL_ON_LOW_SCORE: ${{ inputs.fail-on-low-score }}
         VERISWARM_MIN_TRUST_SCORE: ${{ inputs.min-trust-score }}
         VERISWARM_MIN_OWASP_COVERAGE: ${{ inputs.min-owasp-coverage }}

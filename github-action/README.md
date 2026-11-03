@@ -43,6 +43,7 @@ jobs:
 | `scan-paths` | No | | Glob for files to scan (e.g., `**/*.py`) |
 | `fail-on-deny` | No | `true` | Fail if trust decision is deny |
 | `fail-on-injection` | No | `true` | Fail if injection detected |
+| `fail-on-pii` | No | `true` | Fail if PII is detected in scanned files |
 | `fail-on-low-score` | No | `0` | Min security readiness score (0=disabled) |
 | `min-trust-score` | No | `0` | Min composite trust score, 0-100 (0=disabled). See "Trust score" below. |
 | `min-owasp-coverage` | No | `0` | Min OWASP coverage score (0.0–1.0, 0=disabled) |
@@ -131,6 +132,7 @@ jobs:
 | `decision` | Trust decision for the action |
 | `readiness-score` | Security test readiness (0-100) |
 | `pii-found` | Whether PII was found |
+| `pii-count` | Number of distinct PII entities found |
 | `injection-found` | Whether injection was found |
 | `summary` | Markdown summary of all checks |
 
@@ -154,7 +156,7 @@ When an enforcement input is set, a check that cannot be evaluated fails the run
 | decision | `fail-on-deny` is true (default) | API error, unrecognised decision, or `deny` |
 | test | `fail-on-low-score` > 0 | API error, missing readiness score, or below threshold |
 | owasp | `min-owasp-coverage` > 0 | API error, missing coverage score, or below minimum |
-| scan | `fail-on-injection` is true (default) | any scan request that errored, was rate limited past retries, returned an unexpected shape, or any file that could not be fully scanned; or injection found |
+| scan | `fail-on-injection` / `fail-on-pii` are true (default) | PII found (`fail-on-pii`), injection found (`fail-on-injection`), or, if either is on, any scan request that errored, was rate limited past retries, returned an unexpected shape, or any file that could not be fully scanned |
 | ci-exfil | `fail-on-ci-exfil` is true (default) | API error, malformed response, or `blocked` |
 
 With the enforcement input off, the same problems are logged as warnings only.
@@ -164,7 +166,7 @@ Numeric inputs must be valid numbers; anything else stops the run with a clear e
 ### Scan mode limits
 
 The scan endpoints accept at most 2000 characters per request and 30 requests per minute. The Action splits
-each file into chunks of at most 2000 characters, paces requests, and backs off on HTTP 429; a request that
+each file into chunks of at most 2000 characters (consecutive chunks overlap by 200 so a phrase cannot hide on a boundary), paces requests, and backs off on HTTP 429; a request that
 is still rate limited after retries is a failure, never "clean". Only the first 20,000 characters of each file
 and the first 50 matched files are scanned; anything beyond that is reported and counts as an incomplete scan.
 Files matching a sensitive-name denylist (`.env`, keys, `.git/`) or outside the workspace are skipped.

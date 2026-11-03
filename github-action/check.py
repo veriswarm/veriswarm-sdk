@@ -103,6 +103,7 @@ SCAN_PATHS = os.environ.get("VERISWARM_SCAN_PATHS", "")
 ACTION_TYPE = os.environ.get("VERISWARM_ACTION_TYPE", "deploy")
 FAIL_ON_DENY = os.environ.get("VERISWARM_FAIL_ON_DENY", "true").lower() == "true"
 FAIL_ON_INJECTION = os.environ.get("VERISWARM_FAIL_ON_INJECTION", "true").lower() == "true"
+FAIL_ON_PII = os.environ.get("VERISWARM_FAIL_ON_PII", "true").lower() == "true"
 FAIL_ON_LOW_SCORE = _int_env("VERISWARM_FAIL_ON_LOW_SCORE", "fail-on-low-score")
 MIN_TRUST_SCORE = _int_env("VERISWARM_MIN_TRUST_SCORE", "min-trust-score")
 MIN_OWASP_COVERAGE = _float_env("VERISWARM_MIN_OWASP_COVERAGE", "min-owasp-coverage")
@@ -376,8 +377,16 @@ _sleep = time.sleep
 _last_scan_request = 0.0
 
 
-def _split_chunks(text: str) -> list[str]:
-    """Split text into pieces of at most SCAN_CHUNK_CHARS, preferring line breaks."""
+SCAN_CHUNK_OVERLAP = 200
+
+
+def _split_chunks(text: str) -> list[tuple[int, str]]:
+    """Split text into (offset, chunk) pieces of at most SCAN_CHUNK_CHARS.
+
+    Consecutive chunks overlap by SCAN_CHUNK_OVERLAP chars so a pattern
+    (e.g. an injection phrase) cannot hide by straddling a chunk boundary.
+    Breaks prefer line endings.
+    """
     chunks = []
     start = 0
     while start < len(text):
@@ -388,8 +397,10 @@ def _split_chunks(text: str) -> list[str]:
                 end = nl + 1
         chunk = text[start:end]
         if chunk.strip():
-            chunks.append(chunk)
-        start = end
+            chunks.append((start, chunk))
+        if end >= len(text):
+            break
+        start = end - SCAN_CHUNK_OVERLAP
     return chunks
 
 
@@ -472,15 +483,24 @@ def check_scan():
             scan_errors += 1
 
         file_injection = False
-        for chunk in _split_chunks(content):
+        seen_pii: set[tuple] = set()  # overlap regions are scanned twice; count each entity once
+        for offset, chunk in _split_chunks(content):
             result = _scan_request("/v1/demo/pii-scan", chunk)
             entities = result.get("entities_found") if result else None
             if not isinstance(entities, int) or isinstance(entities, bool) or entities < 0:
                 print(f"::warning file={filepath}::PII scan failed or returned an unexpected response")
                 scan_errors += 1
             elif entities > 0:
-                total_pii += entities
-                for e in result.get("entities", []):
+                found = result.get("entities", [])
+                if not isinstance(found, list) or len(found) != entities:
+                    found = [{} for _ in range(entities)]  # no positions to dedupe on
+                for i, e in enumerate(found):
+                    start = e.get("start")
+                    key = (e.get("type"), offset + start) if isinstance(start, int) else (filepath, offset, i)
+                    if key in seen_pii:
+                        continue
+                    seen_pii.add(key)
+                    total_pii += 1
                     print(f"::warning file={filepath}::PII detected: {e.get('type', '?')} (confidence: {e.get('score', 0):.0%})")
 
             result = _scan_request("/v1/demo/injection-scan", chunk)
@@ -496,9 +516,12 @@ def check_scan():
 
     set_output("pii-found", str(total_pii > 0).lower())
     set_output("injection-found", str(total_injection > 0).lower())
+    set_output("pii-count", str(total_pii))
 
     if total_pii > 0:
-        summary_lines.append(f"PII Scan: ⚠️ **{total_pii} entities** found across {len(files_to_scan)} files")
+        summary_lines.append(f"PII Scan: ❌ **{total_pii} entities** found across {len(files_to_scan)} files")
+        if FAIL_ON_PII:
+            failures.append(f"PII detected in scanned files ({total_pii} entities)")
     elif not scan_errors:
         summary_lines.append(f"PII Scan: ✅ Clean ({len(files_to_scan)} files scanned)")
 
@@ -513,7 +536,7 @@ def check_scan():
         summary_lines.append(f"Scan: ❌ **incomplete** ({scan_errors} request(s)/file(s) could not be scanned)")
         _gate_error(
             f"Scan incomplete: {scan_errors} request(s)/file(s) could not be scanned; not treating as clean",
-            FAIL_ON_INJECTION,
+            FAIL_ON_INJECTION or FAIL_ON_PII,
         )
 
 
