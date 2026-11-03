@@ -5,9 +5,16 @@
   "main": "index.js",
   "files": [
     "*.json",
+    "index.js",
     "README.md"
   ],
-  "keywords": ["veriswarm", "json-schema", "agent", "trust", "ai"],
+  "keywords": [
+    "veriswarm",
+    "json-schema",
+    "agent",
+    "trust",
+    "ai"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -1,0 +1,26 @@
+{
+  "identity": {
+    "score": 90,
+    "confidence": 0.9
+  },
+  "risk": {
+    "score": 5,
+    "confidence": 0.9,
+    "band": "low"
+  },
+  "reliability": {
+    "score": 80,
+    "confidence": 0.9
+  },
+  "autonomy": {
+    "score": 30,
+    "confidence": 0.9,
+    "label": "human_assisted"
+  },
+  "calibration": {
+    "score": 70,
+    "confidence": 0.8
+  },
+  "policy_tier": "tier_x",
+  "explanations": []
+}
