@@ -3,8 +3,9 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.request import Request
 
-from veriswarm_cli.client import get_config, validate_api_url
+from veriswarm_cli.client import _StripAuthRedirectHandler, get_config, validate_api_url
 
 
 class ApiUrlValidationTests(unittest.TestCase):
@@ -68,6 +69,31 @@ class ApiUrlValidationTests(unittest.TestCase):
                     get_config(),
                     ("https://api.veriswarm.ai", "vsk_test"),
                 )
+
+    def test_redirect_strips_auth_headers_but_preserves_safe_headers(self):
+        request = Request(
+            "https://api.veriswarm.ai/v1/check",
+            headers={
+                "x-api-key": "vsk_test",
+                "Authorization": "Bearer session-token",
+                "X-Request-ID": "req-123",
+            },
+        )
+
+        redirected = _StripAuthRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "https://attacker.example/callback",
+        )
+
+        self.assertIsNotNone(redirected)
+        headers = {key.lower(): value for key, value in redirected.header_items()}
+        self.assertNotIn("x-api-key", headers)
+        self.assertNotIn("authorization", headers)
+        self.assertEqual(headers["x-request-id"], "req-123")
 
 
 if __name__ == "__main__":
