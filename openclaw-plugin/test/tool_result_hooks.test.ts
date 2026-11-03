@@ -87,6 +87,51 @@ describe("tool_result_persist injection banner", () => {
   });
 });
 
+describe("tool_result_persist local redaction", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const GH_PAT = "ghp_" + "b".repeat(36);
+  const REDACT_CONFIG = { ...BASE_CONFIG, injectionScan: false, piiEnabled: true, secretsDetection: true };
+
+  it("redacts secrets and structured PII in text blocks, details and keys", () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, REDACT_CONFIG);
+    const message = {
+      ...toolResult([
+        { type: "text", text: `user alice@example.com token ${GH_PAT}` },
+        { type: "image", data: "aGVsbG8gMTkyLjE2OC4xLjE=", mimeType: "image/png" },
+      ]),
+      details: { rows: [{ ssn: "123-45-6789", [GH_PAT]: true }] },
+    };
+
+    const out = persist(hooks, message);
+
+    const serialized = JSON.stringify(out.message);
+    expect(serialized).not.toContain("alice@example.com");
+    expect(serialized).not.toContain("123-45-6789");
+    expect(serialized).not.toContain(GH_PAT);
+    expect(out.message.content[0].text).toContain("[VS:EMAIL:local]");
+    expect(out.message.content[1]).toEqual(message.content[1]); // images untouched
+    expect(message.content[0].text).toContain("alice@example.com"); // not mutated
+  });
+
+  it("redacts structured PII serialized from non-text blocks", () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, REDACT_CONFIG);
+
+    const out = persist(hooks, toolResult([{ type: "json", value: { phone: "415-555-0132" } }]));
+
+    expect(JSON.stringify(out.message)).not.toContain("415-555-0132");
+  });
+
+  it("skips secrets when secretsDetection is off and PII patterns when piiEnabled is off", () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...REDACT_CONFIG, secretsDetection: false, piiEnabled: false });
+
+    expect(persist(hooks, toolResult([{ type: "text", text: `alice@example.com ${GH_PAT}` }]))).toBeUndefined();
+  });
+});
+
 describe("after_tool_call audit", () => {
   afterEach(() => vi.restoreAllMocks());
 

@@ -102,7 +102,7 @@ describe("message_sending — Session Sentry", () => {
     expect(result).toBeUndefined();
   });
 
-  it("fails open and sends message unmodified when API throws", async () => {
+  it("cancels delivery (fail closed) when the API throws", async () => {
     fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("network error"));
@@ -110,13 +110,15 @@ describe("message_sending — Session Sentry", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const result = await send(hooks, "Should pass through on API failure", { sessionKey: "conv-error-test" });
+    const result = await send(hooks, "Should be held on API failure", { sessionKey: "conv-error-test" });
 
-    // Fail-open: no content replacement.
-    expect(result).toBeUndefined();
+    expect(result).toEqual({
+      cancel: true,
+      cancelReason: "Message held by VeriSwarm Guard: session protection is unavailable.",
+    });
   });
 
-  it("fails open and sends message unmodified when API request times out", async () => {
+  it("cancels delivery (fail closed) when the API request times out", async () => {
     vi.useFakeTimers();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
@@ -134,12 +136,12 @@ describe("message_sending — Session Sentry", () => {
       const { api, hooks } = makeApi();
       pluginEntry.register(api as any, BASE_CONFIG);
 
-      const resultPromise = send(hooks, "Should pass through on timeout", { sessionKey: "conv-timeout-test" });
+      const resultPromise = send(hooks, "Should be held on timeout", { sessionKey: "conv-timeout-test" });
 
       await vi.advanceTimersByTimeAsync(10_000);
       const result = await resultPromise;
 
-      expect(result).toBeUndefined();
+      expect(result?.cancel).toBe(true);
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining("Session Sentry scan failed")
       );
@@ -149,7 +151,7 @@ describe("message_sending — Session Sentry", () => {
     }
   });
 
-  it("fails open and sends message unmodified when API returns non-200", async () => {
+  it("cancels delivery (fail closed) when the API returns non-200", async () => {
     fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("Internal Server Error", { status: 500 })
     );
@@ -157,7 +159,41 @@ describe("message_sending — Session Sentry", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const result = await send(hooks, "Should pass through on 500", { sessionKey: "conv-500-test" });
+    const result = await send(hooks, "Should be held on 500", { sessionKey: "conv-500-test" });
+
+    expect(result).toEqual({
+      cancel: true,
+      cancelReason: "Message held by VeriSwarm Guard: session protection is unavailable.",
+    });
+  });
+
+  it("cancels delivery (fail closed) on a malformed scan response", async () => {
+    fetchSpy = mockFetch(() =>
+      new Response(JSON.stringify({ enabled: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    const result = await send(hooks, "no blocked field", { sessionKey: "conv-malformed" });
+
+    expect(result).toEqual({
+      cancel: true,
+      cancelReason: "Message held by VeriSwarm Guard: session protection is unavailable.",
+    });
+  });
+
+  it("sends unmodified on API failure when failOpen is set", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network error"));
+
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, failOpen: true });
+
+    const result = await send(hooks, "Should pass through", { sessionKey: "conv-fail-open" });
 
     expect(result).toBeUndefined();
   });
@@ -276,7 +312,7 @@ describe("message_sending — Session Sentry", () => {
     expect(capturedBodies[0].session_id).toBe("default");
   });
 
-  it("truncates session_id to 64 characters when the raw id is longer", async () => {
+  it("hashes ids longer than 64 chars so shared prefixes stay distinct", async () => {
     const capturedBodies: any[] = [];
     fetchSpy = mockFetch((url, init) => {
       if (url.includes("scan-session")) {
@@ -288,11 +324,18 @@ describe("message_sending — Session Sentry", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const longId = "x".repeat(128);
-    await send(hooks, "msg with long conv id", { sessionKey: longId });
+    const prefix = "agent:main:telegram:group:" + "x".repeat(60);
+    await send(hooks, "first", { sessionKey: `${prefix}:alice` });
+    await send(hooks, "second", { sessionKey: `${prefix}:bob` });
+    await send(hooks, "short", { sessionKey: "short-id" });
 
-    expect(capturedBodies[0].session_id).toHaveLength(64);
-    expect(capturedBodies[0].session_id).toBe(longId.slice(0, 64));
+    const [alice, bob, short] = capturedBodies.map((b) => b.session_id);
+    expect(alice).toMatch(/^[0-9a-f]{64}$/);
+    expect(bob).toMatch(/^[0-9a-f]{64}$/);
+    expect(alice).not.toBe(bob);
+    expect(short).toBe("short-id");
+    // Each hashed id has its own turn counter.
+    expect(capturedBodies.map((b) => b.turn_index)).toEqual([0, 0, 0]);
   });
 
   it("ignores events whose content is not a string", async () => {
@@ -311,7 +354,7 @@ describe("message_sending — Session Sentry", () => {
     expect(calls.filter((u) => u.includes("scan-session"))).toHaveLength(0);
   });
 
-  it("prefers ctx.sessionKey, then ctx.conversationId, then legacy event fields", async () => {
+  it("resolves identity: ctx.sessionKey, learned binding, delivery target, legacy event fields", async () => {
     const capturedBodies: any[] = [];
     fetchSpy = mockFetch((url, init) => {
       if (url.includes("scan-session")) {
@@ -323,20 +366,34 @@ describe("message_sending — Session Sentry", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
+    // 1. Agent-path ctx with a sessionKey wins over everything else.
     await hooks["message_sending"](
       { to: "u", content: "both", conversation_id: "event-conv" },
-      { channelId: "test", sessionKey: "ctx-session-key", conversationId: "ctx-conv" }
+      { channelId: "telegram", sessionKey: "sk-direct", conversationId: "999" }
     );
-    await send(hooks, "ctx conversation id", { conversationId: "ctx-conv-only" });
+    // 2. Deliver-path ctx (no sessionKey) maps through the binding that
+    //    message_received learned for the same channel + conversation.
+    await hooks["message_received"](
+      { from: "telegram:123", content: "hi" },
+      { channelId: "telegram", conversationId: "telegram:123", sessionKey: "sk-bound" }
+    );
     await hooks["message_sending"](
-      { to: "u", content: "legacy host", session_id: "legacy-event-session" },
-      { channelId: "test" }
+      { to: "123", content: "reply" },
+      { channelId: "telegram", accountId: "default", conversationId: "123" }
     );
+    // 3. No binding: channel-scoped delivery target.
+    await hooks["message_sending"](
+      { to: "456", content: "unbound" },
+      { channelId: "telegram", conversationId: "456" }
+    );
+    // 4. Legacy host: identity only on the event.
+    await hooks["message_sending"]({ to: "u", content: "legacy", session_id: "legacy-session" }, {});
 
     expect(capturedBodies.map((body) => body.session_id)).toEqual([
-      "ctx-session-key",
-      "ctx-conv-only",
-      "legacy-event-session",
+      "sk-direct",
+      "sk-bound",
+      "target:telegram:456",
+      "legacy-session",
     ]);
   });
 

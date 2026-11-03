@@ -127,13 +127,99 @@ describe("before_tool_call PII tokenization of params", () => {
     });
   });
 
-  it("fails open (params unchanged) when tokenization errors", async () => {
+  it("blocks the call (fail closed) when tokenization errors", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("down"));
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
 
+    expect(await callTool(hooks, "send_email", { to: "alice@example.com" })).toEqual({
+      block: true,
+      blockReason: "[VeriSwarm Guard] Tool call blocked: PII protection is unavailable.",
+    });
+  });
+
+  it("blocks the call (fail closed) on a malformed tokenization response", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ unexpected: true }));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+
+    expect((await callTool(hooks, "send_email", { to: "alice@example.com" })).block).toBe(true);
+  });
+
+  it("passes params unchanged on tokenization errors when failOpen is set", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("down"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true, failOpen: true });
+
     expect(await callTool(hooks, "send_email", { to: "alice@example.com" })).toBeUndefined();
+  });
+
+  it("tokenizes every occurrence of a value referenced twice", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const text = JSON.parse(String(init?.body)).text as string;
+      return json({ tokenized_text: text.replace("alice@example.com", "[VS:EMAIL:1]"), session_id: "pii-1", tokens_created: text.includes("@") ? 1 : 0 });
+    });
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+    const shared = { email: "alice@example.com" };
+
+    const res = await callTool(hooks, "send_email", { a: shared, b: shared });
+
+    expect(JSON.stringify(res.params)).not.toContain("alice@example.com");
+  });
+});
+
+describe("message_sending PII fail-closed", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const sendMessage = (hooks: Record<string, Hook>) =>
+    hooks["message_sending"]({ to: "u", content: "mail alice@example.com" }, { channelId: "c", sessionKey: "s" });
+
+  it("cancels delivery when outbound tokenization errors", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("down"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+
+    expect(await sendMessage(hooks)).toEqual({
+      cancel: true,
+      cancelReason: "Message held by VeriSwarm Guard: PII protection is unavailable.",
+    });
+  });
+
+  it("sends unmodified when outbound tokenization errors and failOpen is set", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("down"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true, failOpen: true });
+
+    expect(await sendMessage(hooks)).toBeUndefined();
+  });
+});
+
+describe("tool name normalization", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("matches config entries the way the host normalizes tool names", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, blockedTools: [" Bash ", "APPLY-PATCH"] });
+
+    // The host hands hooks normalized names: bash -> exec, apply-patch -> apply_patch.
+    expect((await callTool(hooks, "exec")).block).toBe(true);
+    expect((await callTool(hooks, "apply_patch")).block).toBe(true);
+    expect((await callTool(hooks, "Exec")).block).toBe(true);
+    expect(await callTool(hooks, "read")).toBeUndefined();
+  });
+
+  it("normalizes allowlist entries too", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, allowedTools: ["Bash"] });
+
+    expect(await callTool(hooks, "exec")).toBeUndefined();
+    expect((await callTool(hooks, "write")).block).toBe(true);
   });
 });
 

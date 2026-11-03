@@ -22,8 +22,10 @@ Protect your OpenClaw agent with VeriSwarm's full trust and security suite.
 **Automatic (transparent, no agent action needed):**
 - Strips PII (names, emails, phones, SSNs, addresses, credit cards) from messages before they reach the LLM
 - Tokenizes PII in tool-call parameters before the tool runs
+- Redacts secrets and structured PII (emails, SSNs, phones, cards, IPv4) from tool outputs locally; full NER tokenization applies to tool inputs and messages
 - Scans tool outputs for prompt injection attempts
 - Enforces tool allowlists and blocklists
+- Fails closed: if VeriSwarm is unreachable, tool calls are blocked and messages held (opt out with `failOpen: true`)
 - Logs every action to VeriSwarm's tamper-proof audit ledger
 
 **Tools the agent can use:**

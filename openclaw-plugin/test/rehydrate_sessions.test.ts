@@ -157,17 +157,42 @@ describe("veriswarm_rehydrate session scoping", () => {
     expect(text(result)).toBe("rehydrated via sid-alice");
   });
 
-  it("preserves no-conversation deployments by using the no-conversation key only", async () => {
+  it("does not rehydrate when the calling tool context has no conversation identity", async () => {
     mockApi();
     const { api, hooks, toolFor } = makeApi();
     pluginEntry.register(api as any, config());
 
+    // Neither side has an identity: tokenization still happens, but nothing
+    // is stored in a shared bucket another unidentified caller could read.
     await lookupCustomer(hooks, "Alice", {});
     const result = await toolFor("veriswarm_rehydrate", {}).execute("call-5", {
       text: "Customer [VS:alice]",
       tool_name: "lookup_customer",
     });
 
+    expect(text(result)).toBe("Customer [VS:alice]");
+    expect(rehydrateCalls).toHaveLength(0);
+  });
+
+  it("rehydrates outbound-message tokens for the session bound on the deliver path", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
+
+    await hooks["message_received"](
+      { from: "telegram:42", content: "hello" },
+      { channelId: "telegram", conversationId: "telegram:42", sessionKey: "sk-42" }
+    );
+    // Deliver path: ctx has no sessionKey.
+    const sent = await hooks["message_sending"](
+      { to: "42", content: "Customer Alice" },
+      { channelId: "telegram", conversationId: "42" }
+    );
+    expect(sent).toEqual({ content: "Customer [VS:alice]" });
+
+    const result = await toolFor("veriswarm_rehydrate", { sessionKey: "sk-42" }).execute("call-6", {
+      text: "Customer [VS:alice]",
+    });
     expect(text(result)).toBe("rehydrated via sid-alice");
   });
 });

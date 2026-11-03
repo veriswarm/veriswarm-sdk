@@ -95,8 +95,13 @@
       },
       "sessionScan": {
         "type": "boolean",
-        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. Fail-open: any API error is logged and the message is sent unmodified. Safe to leave on while the platform flag is dormant — the server returns {enabled:false, blocked:false}. Default: true.",
+        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. An API error also cancels delivery unless failOpen is set. Safe to leave on while the platform flag is dormant — the server returns {enabled:false, blocked:false}. Default: true.",
         "default": true
+      },
+      "failOpen": {
+        "type": "boolean",
+        "description": "Let tool calls and messages through when PII tokenization or Session Sentry is unreachable or returns an unexpected response. Default false: the tool call is blocked or the message delivery cancelled. The secret tripwire always falls back to local redaction regardless of this flag.",
+        "default": false
       }
     },
     "required": [

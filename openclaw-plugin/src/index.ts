@@ -6,7 +6,9 @@
  * GUARD (automatic, transparent — OpenClaw plugin hooks):
  *   - before_tool_call: policy enforcement (allowlist/blocklist), secret
  *     tripwire, PII tokenization of tool-call params
- *   - tool_result_persist: prompt-injection banner on tool results
+ *   - tool_result_persist: local secret + structured-PII redaction and a
+ *     prompt-injection banner on tool results
+ *   - message_received: links channel conversations to their session
  *   - after_tool_call: audit logging of tool calls to VeriSwarm Vault
  *   - message_sending: Session Sentry (cancels delivery on block) and PII
  *     tokenization of outbound messages
@@ -43,6 +45,8 @@
 
 import { VeriSwarmClient, type TokenizeResult } from "./client.js";
 import { SecretTripwire, ensureTripwire, loadVendoredManifest } from "./secret_tripwire.js";
+import { mapStringLeavesSync, redactPiiPatterns } from "./local_redaction.js";
+import { createHash } from "node:crypto";
 
 // ── Injection Patterns (BASIC HEURISTIC ONLY) ──────────────────────────
 //
@@ -81,9 +85,8 @@ function scanForInjection(text: string): string[] {
 // Keying by tool name alone collides across concurrent agent
 // conversations using the same tool — leaking PII tokens *across
 // user sessions* in shared deployments. (Audit 2026-05-08 HIGH-SDK-13.)
-function piiSessionKey(toolName: string, conversationId?: string | null): string {
-  const conv = conversationId || "_no_conv";
-  return `${conv}:${toolName}`;
+function piiSessionKey(toolName: string, conversationId: string): string {
+  return `${conversationId}:${toolName}`;
 }
 
 function firstNonEmptyString(...values: unknown[]): string | undefined {
@@ -93,21 +96,64 @@ function firstNonEmptyString(...values: unknown[]): string | undefined {
   return undefined;
 }
 
-// Conversation identity. The host passes it on the hook's second argument
-// (`ctx.sessionKey` / `ctx.sessionId`; message hooks also carry
-// `ctx.conversationId`). Event fields are only a fallback for older hosts.
-// sessionKey comes first because it is the one field present on tool hooks,
-// message hooks and tool factories alike, so all of them agree on the key.
+// Session Sentry bucket when the host gives no conversation identity at all.
+// PII sessions are never stored under it, so nothing is shared through it.
+const NO_CONVERSATION = "default";
+
+// Tool names are compared the way the host normalizes them before running
+// before_tool_call (trim, lowercase, aliases), so `blockedTools: ["Bash"]`
+// matches the host's `exec`.
+const TOOL_NAME_ALIASES: Record<string, string> = {
+  bash: "exec",
+  "apply-patch": "apply_patch",
+};
+
+export function normalizeToolName(name: string): string {
+  const normalized = name.trim().toLowerCase();
+  return TOOL_NAME_ALIASES[normalized] ?? normalized;
+}
+
+// `${channel}:${target}` for a message-hook context, with the same prefix
+// stripping the host applies to inbound conversation ids.
+function deliveryTargetKey(channelId: unknown, target: unknown): string | undefined {
+  const channel = typeof channelId === "string" ? channelId.trim().toLowerCase() : "";
+  if (!channel || typeof target !== "string" || !target.trim()) return undefined;
+  let value = target.trim();
+  const generic = ["channel:", "chat:", "user:"].find((prefix) => value.startsWith(prefix));
+  if (generic) value = value.slice(generic.length);
+  else if (value.startsWith(`${channel}:`)) value = value.slice(channel.length + 1);
+  return `${channel}:${value}`;
+}
+
+// Canonical conversation identity, shared by tool hooks, message hooks and
+// the rehydrate tool. Precedence:
+//   1. ctx.sessionKey, then ctx.sessionId (tool hooks, tool factories,
+//      agent-path message hooks)
+//   2. the sessionKey learned from message_received for the same
+//      channel + conversation (outbound delivery passes no session key)
+//   3. `target:<channel>:<conversation>` from the message ctx
+//   4. legacy event fields from older hosts
 function resolveConversationId(ctx: any, event?: any): string | undefined {
+  const direct = firstNonEmptyString(ctx?.sessionKey, ctx?.sessionId);
+  if (direct) return direct;
+  const target = deliveryTargetKey(ctx?.channelId, ctx?.conversationId);
+  const bound = target ? state.sessionBindings.get(target) : undefined;
+  if (bound) return bound;
+  if (target) return `target:${target}`;
   return firstNonEmptyString(
-    ctx?.sessionKey,
-    ctx?.sessionId,
-    ctx?.conversationId,
     event?.sessionKey,
     event?.conversation_id,
     event?.conversationId,
     event?.session_id
   );
+}
+
+// Session Sentry accepts ids up to 64 chars. Longer ids are hashed (sha256
+// hex is exactly 64 chars) so conversations sharing a long prefix stay apart.
+function sentrySessionId(conversationId: string): string {
+  return conversationId.length <= 64
+    ? conversationId
+    : createHash("sha256").update(conversationId).digest("hex");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -125,44 +171,48 @@ function setBounded<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
   map.set(key, value);
 }
 
-// Rebuild `value` with every string leaf passed through `fn`. Containers are
-// copied only when a leaf changed; the input is never mutated.
+// Rebuild `value` with every string leaf (and, with `keys`, every object key)
+// passed through `fn`. Only the current path is tracked for cycle detection,
+// so a value referenced twice is still visited twice. Never mutates input.
 async function mapStringLeaves(
   value: unknown,
   fn: (text: string) => Promise<string>,
-  seen = new WeakSet<object>()
+  options: { keys?: boolean } = {},
+  ancestors = new Set<object>()
 ): Promise<{ value: unknown; changed: boolean }> {
   if (typeof value === "string") {
     const next = await fn(value);
     return { value: next, changed: next !== value };
   }
-  if (!value || typeof value !== "object" || seen.has(value)) {
+  if (!value || typeof value !== "object" || ancestors.has(value)) {
     return { value, changed: false };
   }
-  seen.add(value);
-  if (Array.isArray(value)) {
-    const next = [...value];
-    let changed = false;
-    for (let i = 0; i < value.length; i++) {
-      const child = await mapStringLeaves(value[i], fn, seen);
-      if (child.changed) {
-        next[i] = child.value;
-        changed = true;
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const next = [...value];
+      let changed = false;
+      for (let i = 0; i < value.length; i++) {
+        const child = await mapStringLeaves(value[i], fn, options, ancestors);
+        if (child.changed) {
+          next[i] = child.value;
+          changed = true;
+        }
       }
+      return changed ? { value: next, changed } : { value, changed };
+    }
+    const next: Record<string, unknown> = {};
+    let changed = false;
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      const nextKey = options.keys ? await fn(key) : key;
+      const mapped = await mapStringLeaves(child, fn, options, ancestors);
+      changed ||= mapped.changed || nextKey !== key;
+      next[nextKey] = mapped.value;
     }
     return changed ? { value: next, changed } : { value, changed };
+  } finally {
+    ancestors.delete(value);
   }
-  const record = value as Record<string, unknown>;
-  const next: Record<string, unknown> = { ...record };
-  let changed = false;
-  for (const [key, child] of Object.entries(record)) {
-    const mapped = await mapStringLeaves(child, fn, seen);
-    if (mapped.changed) {
-      next[key] = mapped.value;
-      changed = true;
-    }
-  }
-  return changed ? { value: next, changed } : { value, changed };
 }
 
 function safeStringify(value: unknown): string {
@@ -193,6 +243,19 @@ function serializeToolOutput(value: unknown): string {
   return typeof value === "object" ? safeStringify(value) : String(value);
 }
 
+// Thrown when a fail-closed Guard dependency (PII tokenization, Session
+// Sentry) errors or answers with an unexpected shape.
+class GuardUnavailableError extends Error {}
+
+function assertTokenizeResult(result: TokenizeResult): TokenizeResult {
+  const ok =
+    isRecord(result) &&
+    typeof result.tokens_created === "number" &&
+    (result.tokens_created === 0 || typeof result.tokenized_text === "string");
+  if (!ok) throw new Error("malformed PII tokenization response");
+  return result;
+}
+
 type SecretGuardMode = "online" | "offline";
 
 interface SecretGuardOutcome {
@@ -202,11 +265,13 @@ interface SecretGuardOutcome {
   modes: Set<SecretGuardMode>;
 }
 
+// `piiKey` is null when the call has no conversation identity; PII sessions
+// are then not recorded (they could never be rehydrated safely).
 async function guardSecretInput(
   input: unknown,
   state: PluginState,
   toolName: string,
-  piiKey: string
+  piiKey: string | null
 ): Promise<SecretGuardOutcome> {
   const rules = new Set<string>();
   const modes = new Set<SecretGuardMode>();
@@ -214,14 +279,16 @@ async function guardSecretInput(
   const tripwire = state.tripwire;
   if (!client || !tripwire) return { value: input, changed: false, rules, modes };
 
-  const mapped = await mapStringLeaves(input, async (text) => {
+  const guardText = async (text: string) => {
     const hits = tripwire.scan(text);
     if (hits.length === 0) return text;
     for (const hit of hits) rules.add(hit.ruleName);
     try {
-      const result = await client.tokenizePii(text, state.piiSessions.get(piiKey));
+      const result = assertTokenizeResult(
+        await client.tokenizePii(text, piiKey ? state.piiSessions.get(piiKey) : undefined)
+      );
       let guarded = result.tokens_created > 0 ? result.tokenized_text || text : text;
-      if (result.tokens_created > 0 && result.session_id) {
+      if (piiKey && result.tokens_created > 0 && result.session_id) {
         setBounded(state.piiSessions, piiKey, result.session_id, MAX_PII_SESSIONS);
       }
       // The PII tokenizer is not a secret detector; fail closed if a
@@ -237,38 +304,91 @@ async function guardSecretInput(
       modes.add("offline");
       return tripwire.redactOffline(text);
     }
-  });
+  };
+  const mapped = await mapStringLeaves(input, guardText, { keys: true });
   return { value: mapped.value, changed: mapped.changed, rules, modes };
 }
 
-// Tokenize PII in every string leaf of the tool params. Fails open (but
-// observably) on API errors, like the other PII paths. (HIGH-SDK-11.)
+// Tokenize PII in every string leaf of the tool params. On an API error or
+// malformed response this throws GuardUnavailableError (fail closed) unless
+// the operator opted into `failOpen`, which passes the text through.
 async function tokenizeParamsPii(
   params: unknown,
   state: PluginState,
   toolName: string,
-  piiKey: string
+  piiKey: string | null
 ): Promise<{ value: unknown; changed: boolean }> {
   const client = state.client;
   if (!client) return { value: params, changed: false };
   return mapStringLeaves(params, async (text) => {
     if (text.length < MIN_PII_TEXT_LENGTH) return text;
     try {
-      const result = await client.tokenizePii(text, state.piiSessions.get(piiKey));
-      if (result.tokens_created > 0 && typeof result.tokenized_text === "string") {
-        if (result.session_id) {
+      const result = assertTokenizeResult(
+        await client.tokenizePii(text, piiKey ? state.piiSessions.get(piiKey) : undefined)
+      );
+      if (result.tokens_created > 0) {
+        if (piiKey && result.session_id) {
           setBounded(state.piiSessions, piiKey, result.session_id, MAX_PII_SESSIONS);
         }
         return result.tokenized_text;
       }
+      return text;
     } catch (e) {
+      const message = (e as Error)?.message ?? String(e);
+      if (!state.failOpen) throw new GuardUnavailableError(message);
       console.warn(
         `[VeriSwarm] PII tokenization (input) failed for tool=${toolName}; ` +
-          `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+          `passing through unredacted (failOpen). Error: ${message}`
       );
+      return text;
     }
-    return text;
   });
+}
+
+// Synchronous redaction of a tool result for tool_result_persist: offline
+// secret rules (when secretsDetection is on) and local PII patterns (when
+// piiEnabled). Image blocks are left alone. Returns null when nothing changed.
+function redactToolResultMessage(
+  message: Record<string, unknown>
+): { message: Record<string, unknown>; entities: Set<string> } | null {
+  const tripwire = state.secretsDetection ? state.tripwire : null;
+  if (!tripwire && !state.piiEnabled) return null;
+  const entities = new Set<string>();
+  const redactText = (text: string) => {
+    let out = text;
+    if (tripwire && tripwire.scan(out).length > 0) {
+      out = tripwire.redactOffline(out);
+      entities.add("SECRET");
+    }
+    if (state.piiEnabled) {
+      const local = redactPiiPatterns(out);
+      for (const entity of local.entities) entities.add(entity);
+      out = local.text;
+    }
+    return out;
+  };
+  const redactValue = (value: unknown) => mapStringLeavesSync(value, redactText, { keys: true });
+
+  let changed = false;
+  let content: unknown = message.content;
+  if (Array.isArray(message.content)) {
+    content = message.content.map((block) => {
+      if (isRecord(block) && block.type === "image") return block;
+      const mapped = redactValue(block);
+      changed ||= mapped.changed;
+      return mapped.value;
+    });
+  } else {
+    const mapped = redactValue(message.content);
+    changed ||= mapped.changed;
+    content = mapped.value;
+  }
+  const details = redactValue(message.details);
+  changed ||= details.changed;
+  if (!changed) return null;
+  const next: Record<string, unknown> = { ...message, content };
+  if (message.details !== undefined) next.details = details.value;
+  return { message: next, entities };
 }
 
 // ── Plugin State ────────────────────────────────────────────────────────
@@ -280,27 +400,41 @@ interface PluginState {
   injectionScan: boolean;
   auditEnabled: boolean;
   sessionScan: boolean;
-  blockedTools: Set<string>;
-  allowedTools: Set<string> | null;
+  // Operator opt-out: let messages/tool calls through when PII tokenization
+  // or Session Sentry is unreachable. Default false (fail closed).
+  failOpen: boolean;
+  blockedTools: Set<string>; // normalized tool names
+  allowedTools: Set<string> | null; // normalized tool names
   piiSessions: Map<string, string>; // `${conversationId}:${toolName}` -> Guard PII session id
   // Per-conversation outbound-turn counters for Session Sentry.
-  // Key: conversation/session id (or "default" when the host supplies none).
-  // Value: next turn_index to use (pre-increment on each send).
+  // Key: Sentry session id. Value: next turn_index to use.
   sessionTurnCounters: Map<string, number>;
+  // `${channel}:${conversation}` -> sessionKey, learned from message_received
+  // so outbound delivery (which carries no session key) maps to the same
+  // conversation as the tool hooks.
+  sessionBindings: Map<string, string>;
   secretsDetection: boolean;
   tripwire: SecretTripwire | null;
 }
 
-// Caps for the per-conversation maps. Both evict the least-recently-written
+// Caps for the per-conversation maps. All evict the least-recently-written
 // entry (see setBounded). For turn counters the only risk is that a long-idle
 // conversation restarts at turn 0 — the server keys turn state by turn_index
 // overwrite, so that under-counts (the fail-safe direction). For PII sessions
 // an evicted conversation simply can no longer rehydrate its oldest tokens.
 export const MAX_SESSION_COUNTERS = 10_000;
 export const MAX_PII_SESSIONS = 10_000;
+export const MAX_SESSION_BINDINGS = 10_000;
 
 // Shortest text worth sending to the PII tokenizer.
 const MIN_PII_TEXT_LENGTH = 4;
+
+// The host runs hooks in descending priority and, for before_tool_call and
+// message_sending, merges `params` / `content` last-defined-wins while every
+// handler sees the ORIGINAL event. Running last means VeriSwarm's rewrite is
+// the one applied: a later plugin cannot undo a redaction. (A plugin that
+// adds sensitive values in its own rewrite is not seen by VeriSwarm.)
+const GUARD_HOOK_PRIORITY = Number.MIN_SAFE_INTEGER;
 
 function initialState(): PluginState {
   return {
@@ -310,17 +444,23 @@ function initialState(): PluginState {
     injectionScan: true,
     auditEnabled: true,
     sessionScan: true,
+    failOpen: false,
     blockedTools: new Set(),
     allowedTools: null,
     piiSessions: new Map(),
     sessionTurnCounters: new Map(),
+    sessionBindings: new Map(),
     secretsDetection: false,
     tripwire: null,
   };
 }
 
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0) : [];
+function toolNameList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((v): v is string => typeof v === "string")
+    .map(normalizeToolName)
+    .filter((v) => v.length > 0);
 }
 
 // Policy verdict for a tool call, or null when allowed. A call the host did
@@ -328,7 +468,8 @@ function stringList(value: unknown): string[] {
 // placeholder name could match (or miss) a list entry and invert the policy.
 function policyBlock(toolName: string | undefined): { reason: string; message: string } | null {
   const hasPolicy = state.blockedTools.size > 0 || state.allowedTools !== null;
-  if (!toolName) {
+  const normalized = toolName ? normalizeToolName(toolName) : "";
+  if (!normalized) {
     return hasPolicy
       ? {
           reason: "unidentified_tool",
@@ -336,10 +477,10 @@ function policyBlock(toolName: string | undefined): { reason: string; message: s
         }
       : null;
   }
-  if (state.blockedTools.has(toolName)) {
+  if (state.blockedTools.has(normalized)) {
     return { reason: "blocklist", message: `[VeriSwarm Guard] Tool '${toolName}' is blocked by policy.` };
   }
-  if (state.allowedTools && !state.allowedTools.has(toolName)) {
+  if (state.allowedTools && !state.allowedTools.has(normalized)) {
     return {
       reason: "not_in_allowlist",
       message: `[VeriSwarm Guard] Tool '${toolName}' is not in the allowlist.`,
@@ -351,6 +492,12 @@ function policyBlock(toolName: string | undefined): { reason: string; message: s
 const SENTRY_CANCEL_REASON =
   "Message blocked by VeriSwarm Guard session protection: " +
   "this conversation has triggered multi-turn data-extraction detection.";
+const SENTRY_UNAVAILABLE_REASON =
+  "Message held by VeriSwarm Guard: session protection is unavailable.";
+const PII_UNAVAILABLE_MESSAGE_REASON =
+  "Message held by VeriSwarm Guard: PII protection is unavailable.";
+const PII_UNAVAILABLE_TOOL_REASON =
+  "[VeriSwarm Guard] Tool call blocked: PII protection is unavailable.";
 
 const NOT_CONFIGURED = "VeriSwarm not configured";
 
@@ -465,11 +612,20 @@ export const pluginEntry: PluginEntry = {
           "Enable Session Sentry multi-turn exfiltration detection. " +
           "Each outbound message is submitted to /v1/suite/guard/scan-session; " +
           "if the conversation-level risk score triggers a block, delivery of the " +
-          "message is cancelled. Fail-open: any API error is logged and " +
-          "the message is sent unmodified. Safe to leave on while the platform " +
+          "message is cancelled. An API error also cancels delivery unless " +
+          "failOpen is set. Safe to leave on while the platform " +
           "flag is dormant — the server returns {enabled:false, blocked:false}. " +
           "Default: true.",
         default: true,
+      },
+      failOpen: {
+        type: "boolean",
+        description:
+          "Let tool calls and messages through when PII tokenization or Session " +
+          "Sentry is unreachable or returns an unexpected response. Default false: " +
+          "the tool call is blocked or the message delivery cancelled. The secret " +
+          "tripwire always falls back to local redaction regardless of this flag.",
+        default: false,
       },
     },
     required: ["apiKey"],
@@ -493,6 +649,7 @@ export const pluginEntry: PluginEntry = {
     if (fingerprint === stateFingerprint) {
       state.piiSessions = previous.piiSessions;
       state.sessionTurnCounters = previous.sessionTurnCounters;
+      state.sessionBindings = previous.sessionBindings;
     }
     stateFingerprint = fingerprint;
 
@@ -518,6 +675,7 @@ export const pluginEntry: PluginEntry = {
     state.injectionScan = cfg.injectionScan ?? true;
     state.auditEnabled = cfg.auditEnabled ?? true;
     state.sessionScan = cfg.sessionScan ?? true;
+    state.failOpen = cfg.failOpen === true;
 
     state.secretsDetection = cfg.secretsDetection === true;
     if (state.secretsDetection) {
@@ -541,15 +699,16 @@ export const pluginEntry: PluginEntry = {
     }
 
     // Always assigned (even when empty) so a previous config's lists never
-    // survive a re-register. An empty allowlist means "allow all".
-    state.blockedTools = new Set(stringList(cfg.blockedTools));
-    const allowed = stringList(cfg.allowedTools);
+    // survive a re-register. An empty allowlist means "allow all". Entries
+    // are normalized like the host normalizes tool names.
+    state.blockedTools = new Set(toolNameList(cfg.blockedTools));
+    const allowed = toolNameList(cfg.allowedTools);
     state.allowedTools = allowed.length > 0 ? new Set(allowed) : null;
 
     console.log(
       `[VeriSwarm] Guard active — PII: ${state.piiEnabled}, Policy: ${state.policyEnabled}, ` +
         `Injection scan: ${state.injectionScan}, Audit: ${state.auditEnabled}, ` +
-        `Session Sentry: ${state.sessionScan}`
+        `Session Sentry: ${state.sessionScan}, Fail open: ${state.failOpen}`
     );
 
     // ── HOOKS: Transparent Protection ─────────────────────────────────
@@ -557,59 +716,77 @@ export const pluginEntry: PluginEntry = {
     // Hook: before_tool_call — policy check, secret tripwire, PII tokenize params.
     // Host event: { toolName, params, toolCallId?, runId? }; ctx carries
     // sessionKey/sessionId. Host result: { block, blockReason } or { params }.
-    api.on("before_tool_call", async (event: any, ctx: any) => {
-      if (!state.client) return;
-      const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName);
+    api.on(
+      "before_tool_call",
+      async (event: any, ctx: any) => {
+        if (!state.client) return;
+        const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName);
 
-      if (state.policyEnabled) {
-        const verdict = policyBlock(toolName);
-        if (verdict) {
-          // Fire-and-forget: the block must not wait on (or fail with) audit I/O.
-          void logEvent("tool.blocked", {
-            tool_name: toolName ?? null,
-            reason: verdict.reason,
-          }).catch(() => {});
-          return { block: true, blockReason: verdict.message };
+        if (state.policyEnabled) {
+          const verdict = policyBlock(toolName);
+          if (verdict) {
+            // Fire-and-forget: the block must not wait on (or fail with) audit I/O.
+            void logEvent("tool.blocked", {
+              tool_name: toolName ?? null,
+              reason: verdict.reason,
+            }).catch(() => {});
+            return { block: true, blockReason: verdict.message };
+          }
         }
-      }
 
-      const params = event?.params;
-      if (!isRecord(params)) return;
-      // An unnamed call still gets its params scanned (under a placeholder
-      // key) rather than skipping the secret tripwire.
-      const scanName = toolName ?? "_unidentified";
-      const key = piiSessionKey(scanName, resolveConversationId(ctx, event));
-      let nextParams: unknown = params;
-      let changed = false;
+        const params = event?.params;
+        if (!isRecord(params)) return;
+        // An unnamed call still gets its params scanned rather than skipping
+        // the secret tripwire.
+        const scanName = toolName ?? "_unidentified";
+        const conversationId = resolveConversationId(ctx, event);
+        const key = conversationId ? piiSessionKey(scanName, conversationId) : null;
+        let nextParams: unknown = params;
+        let changed = false;
 
-      // Secret tripwire — runs ahead of PII tokenization. Catches obvious
-      // provider-prefix secrets (API keys, tokens) in the agent's native
-      // outbound path. On a hit we escalate to authoritative tokenization
-      // when online, and fail closed to local non-recoverable redaction
-      // when offline or when the API leaves any known-prefix span intact.
-      if (state.secretsDetection && state.tripwire) {
-        const guarded = await guardSecretInput(nextParams, state, scanName, key);
-        if (guarded.changed) {
-          void logEvent("secret.tripwire", {
-            tool_name: toolName ?? null,
-            rules: Array.from(guarded.rules),
-            mode: guarded.modes.has("offline") ? "offline" : "online",
-          }).catch(() => {});
-          nextParams = guarded.value;
-          changed = true;
+        // Secret tripwire — runs ahead of PII tokenization. Catches obvious
+        // provider-prefix secrets (API keys, tokens) in values and keys. On a
+        // hit we escalate to authoritative tokenization when online, and fail
+        // closed to local non-recoverable redaction when offline or when the
+        // API leaves any known-prefix span intact.
+        if (state.secretsDetection && state.tripwire) {
+          const guarded = await guardSecretInput(nextParams, state, scanName, key);
+          if (guarded.changed) {
+            void logEvent("secret.tripwire", {
+              tool_name: toolName ?? null,
+              rules: Array.from(guarded.rules),
+              mode: guarded.modes.has("offline") ? "offline" : "online",
+            }).catch(() => {});
+            nextParams = guarded.value;
+            changed = true;
+          }
         }
-      }
 
-      if (state.piiEnabled) {
-        const tokenized = await tokenizeParamsPii(nextParams, state, scanName, key);
-        if (tokenized.changed) {
-          nextParams = tokenized.value;
-          changed = true;
+        if (state.piiEnabled) {
+          try {
+            const tokenized = await tokenizeParamsPii(nextParams, state, scanName, key);
+            if (tokenized.changed) {
+              nextParams = tokenized.value;
+              changed = true;
+            }
+          } catch (e) {
+            if (!(e instanceof GuardUnavailableError)) throw e;
+            console.warn(
+              `[VeriSwarm] PII tokenization (input) failed for tool=${scanName}; ` +
+                `blocking the call. Error: ${e.message}`
+            );
+            void logEvent("guard.unavailable", {
+              tool_name: toolName ?? null,
+              component: "pii_tokenization",
+            }).catch(() => {});
+            return { block: true, blockReason: PII_UNAVAILABLE_TOOL_REASON };
+          }
         }
-      }
 
-      return changed ? { params: nextParams as Record<string, unknown> } : undefined;
-    });
+        return changed ? { params: nextParams as Record<string, unknown> } : undefined;
+      },
+      { priority: GUARD_HOOK_PRIORITY }
+    );
 
     // Hook: after_tool_call — audit only. The host runs this fire-and-forget
     // and ignores its return value, so it cannot change what the model sees.
@@ -625,114 +802,173 @@ export const pluginEntry: PluginEntry = {
 
     // Hook: tool_result_persist — the host's result-rewriting hook. It is
     // SYNCHRONOUS (a returned Promise is ignored by the host), so only local
-    // checks run here: the injection-pattern banner. Async API work such as
-    // PII tokenization of tool output cannot run in this hook.
-    api.on("tool_result_persist", (event: any, ctx: any) => {
-      if (!state.client || !state.injectionScan) return;
-      const message = event?.message;
-      if (!isRecord(message)) return;
-      const detected = scanForInjection(serializeToolOutput(message));
-      if (detected.length === 0) return;
+    // checks run here: offline secret redaction, local PII-pattern redaction
+    // (emails, SSNs, phones, Luhn-valid cards, IPv4) and the injection banner.
+    // API-based NER tokenization applies to tool inputs and outbound messages.
+    api.on(
+      "tool_result_persist",
+      (event: any, ctx: any) => {
+        if (!state.client) return;
+        const original = event?.message;
+        if (!isRecord(original)) return;
+        const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null;
 
-      void logEvent("injection.detected", {
-        tool_name: firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null,
-        patterns: detected,
-      }).catch(() => {});
-      const banner = {
-        type: "text",
-        text:
-          `[VeriSwarm Guard: Potential prompt injection detected. ` +
-          `Patterns: ${detected.join(", ")}]`,
-      };
-      const content = Array.isArray(message.content)
-        ? [banner, ...message.content]
-        : [banner, { type: "text", text: serializeToolOutput(message.content) }];
-      return { message: { ...message, content } };
+        let message = original;
+        const redacted = redactToolResultMessage(original);
+        if (redacted) {
+          message = redacted.message;
+          void logEvent("tool.output.redacted", {
+            tool_name: toolName,
+            entities: Array.from(redacted.entities),
+          }).catch(() => {});
+        }
+
+        if (state.injectionScan) {
+          const detected = scanForInjection(serializeToolOutput(message));
+          if (detected.length > 0) {
+            void logEvent("injection.detected", { tool_name: toolName, patterns: detected }).catch(
+              () => {}
+            );
+            const banner = {
+              type: "text",
+              text:
+                `[VeriSwarm Guard: Potential prompt injection detected. ` +
+                `Patterns: ${detected.join(", ")}]`,
+            };
+            const content = Array.isArray(message.content)
+              ? [banner, ...message.content]
+              : [banner, { type: "text", text: serializeToolOutput(message.content) }];
+            message = { ...message, content };
+          }
+        }
+
+        return message === original ? undefined : { message };
+      },
+      { priority: GUARD_HOOK_PRIORITY }
+    );
+
+    // Hook: message_received — observation only. Learns which sessionKey a
+    // channel conversation belongs to, so outbound delivery (whose ctx has
+    // only channelId + conversationId) resolves to the same conversation.
+    api.on("message_received", (event: any, ctx: any) => {
+      const target = deliveryTargetKey(ctx?.channelId, ctx?.conversationId);
+      const sessionKey = firstNonEmptyString(ctx?.sessionKey, event?.sessionKey);
+      if (target && sessionKey) {
+        setBounded(state.sessionBindings, target, sessionKey, MAX_SESSION_BINDINGS);
+      }
     });
 
     // Hook: message_sending — Session Sentry + PII tokenize outbound content.
-    // Host event: { to, content, ... }; ctx carries sessionKey/conversationId.
-    // Host result: { content } to rewrite, { cancel, cancelReason } to stop
-    // delivery (cancel is terminal; replacement content is not).
-    api.on("message_sending", async (event: any, ctx: any) => {
-      if (!state.client) return;
-      const content = typeof event?.content === "string" ? event.content : "";
-      if (!content) return;
+    // Host event: { to, content, ... }; ctx carries channelId/conversationId
+    // and, on agent paths, sessionKey. Host result: { content } to rewrite,
+    // { cancel, cancelReason } to stop delivery (cancel is terminal).
+    api.on(
+      "message_sending",
+      async (event: any, ctx: any) => {
+        if (!state.client) return;
+        const content = typeof event?.content === "string" ? event.content : "";
+        if (!content) return;
 
-      // When the host supplies no conversation identity, all messages from
-      // this gateway process share the "default" bucket — a known limitation.
-      const rawConvId = resolveConversationId(ctx, event) ?? "default";
+        const conversationId = resolveConversationId(ctx, event);
+        const sessionId = sentrySessionId(conversationId ?? NO_CONVERSATION);
 
-      // Truncate to ≤64 chars. UUIDs and short IDs fit natively; longer ids
-      // keep a 64-char prefix (monotonic, no crypto dependency).
-      const sessionId: string =
-        rawConvId.length <= 64 ? rawConvId : rawConvId.slice(0, 64);
+        // ── Per-conversation turn counter ─────────────────────────────
+        // turn_index is the index of THIS turn; store the next one.
+        const turnIndex = state.sessionTurnCounters.get(sessionId) ?? 0;
+        setBounded(state.sessionTurnCounters, sessionId, turnIndex + 1, MAX_SESSION_COUNTERS);
 
-      // ── Per-conversation turn counter ───────────────────────────────
-      // turn_index is the index of THIS turn; store the next one.
-      const turnIndex = state.sessionTurnCounters.get(sessionId) ?? 0;
-      setBounded(state.sessionTurnCounters, sessionId, turnIndex + 1, MAX_SESSION_COUNTERS);
+        // ── Session Sentry scan ───────────────────────────────────────
+        // Fails CLOSED by default: an API error, timeout or malformed
+        // response cancels delivery unless `failOpen` is set. The dormant
+        // server returns {enabled:false, blocked:false}, which passes.
+        if (state.sessionScan) {
+          let blocked: boolean;
+          let scanResult: any;
+          try {
+            scanResult = await state.client.scanSessionTurn({
+              session_id: sessionId,
+              turn_index: turnIndex,
+              // Only the outbound (agent) side is visible to message_sending.
+              agent_text: content,
+              user_text: "",
+              system_prompt: "",
+              agent_id: agentId,
+            });
+            if (!isRecord(scanResult) || typeof scanResult.blocked !== "boolean") {
+              throw new Error("malformed Session Sentry response");
+            }
+            blocked = scanResult.blocked;
+          } catch (e) {
+            const message = (e as Error)?.message ?? String(e);
+            if (!state.failOpen) {
+              console.warn(
+                `[VeriSwarm] Session Sentry scan failed for session=${sessionId} ` +
+                  `turn=${turnIndex}; cancelling delivery. Error: ${message}`
+              );
+              void logEvent("guard.unavailable", {
+                session_id: sessionId,
+                component: "session_sentry",
+              }).catch(() => {});
+              return { cancel: true, cancelReason: SENTRY_UNAVAILABLE_REASON };
+            }
+            console.warn(
+              `[VeriSwarm] Session Sentry scan failed for session=${sessionId} ` +
+                `turn=${turnIndex}; sending unmodified (failOpen). Error: ${message}`
+            );
+            blocked = false;
+          }
 
-      // ── Session Sentry scan (FAIL-OPEN) ─────────────────────────────
-      // Must never block the message on any failure. Any exception or non-200
-      // is caught and logged. The dormant server returns {enabled:false,
-      // blocked:false} which passes through immediately.
-      if (state.sessionScan) {
-        try {
-          const scanResult = await state.client.scanSessionTurn({
-            session_id: sessionId,
-            turn_index: turnIndex,
-            // Only the outbound (agent) side is visible to message_sending.
-            agent_text: content,
-            user_text: "",
-            system_prompt: "",
-            agent_id: agentId,
-          });
-
-          if (scanResult.blocked === true) {
-            // Fire-and-forget: do NOT await inside the try-block. A synchronous
-            // throw from logEvent would reach the outer catch and FAIL-OPEN past
-            // a legitimate block. Audit loss is acceptable; a leaked message is not.
+          if (blocked) {
+            // Fire-and-forget: audit loss is acceptable; a leaked message is not.
             void logEvent("session.sentry.blocked", {
               session_id: sessionId,
               turn_index: turnIndex,
-              session_score: scanResult.session_score,
-              highest_severity: scanResult.highest_severity,
+              session_score: scanResult?.session_score,
+              highest_severity: scanResult?.highest_severity,
             }).catch(() => {});
             // Only `cancel: true` short-circuits delivery in the host;
             // rewritten content would still be sent.
             return { cancel: true, cancelReason: SENTRY_CANCEL_REASON };
           }
-        } catch (e) {
-          // FAIL-OPEN: any network error, timeout, or unexpected response must
-          // not interrupt message delivery, but stays observable.
-          console.warn(
-            `[VeriSwarm] Session Sentry scan failed for session=${sessionId} ` +
-            `turn=${turnIndex}; sending unmodified. Error: ${(e as Error)?.message ?? e}`
-          );
         }
-      }
 
-      // ── PII tokenization ────────────────────────────────────────────
-      if (state.piiEnabled && content.length >= MIN_PII_TEXT_LENGTH) {
-        const key = piiSessionKey("__message__", rawConvId);
-        try {
-          const result = await state.client.tokenizePii(content);
-          if (result.tokens_created > 0) {
-            setBounded(state.piiSessions, key, result.session_id, MAX_PII_SESSIONS);
-            return { content: result.tokenized_text };
+        // ── PII tokenization ──────────────────────────────────────────
+        if (state.piiEnabled && content.length >= MIN_PII_TEXT_LENGTH) {
+          const key = conversationId ? piiSessionKey("__message__", conversationId) : null;
+          try {
+            const result = assertTokenizeResult(
+              await state.client.tokenizePii(content, key ? state.piiSessions.get(key) : undefined)
+            );
+            if (result.tokens_created > 0) {
+              if (key && result.session_id) {
+                setBounded(state.piiSessions, key, result.session_id, MAX_PII_SESSIONS);
+              }
+              return { content: result.tokenized_text };
+            }
+          } catch (e) {
+            const message = (e as Error)?.message ?? String(e);
+            if (!state.failOpen) {
+              console.warn(
+                `[VeriSwarm] PII tokenization (outbound message) failed; ` +
+                  `cancelling delivery. Error: ${message}`
+              );
+              void logEvent("guard.unavailable", {
+                session_id: sessionId,
+                component: "pii_tokenization",
+              }).catch(() => {});
+              return { cancel: true, cancelReason: PII_UNAVAILABLE_MESSAGE_REASON };
+            }
+            console.warn(
+              `[VeriSwarm] PII tokenization (outbound message) failed; ` +
+                `passing through unredacted (failOpen). Error: ${message}`
+            );
           }
-        } catch (e) {
-          // Fail open — but observable. (HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (outbound message) failed; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
         }
-      }
 
-      return;
-    });
+        return;
+      },
+      { priority: GUARD_HOOK_PRIORITY }
+    );
 
     // ── TOOLS ─────────────────────────────────────────────────────────
     // Host tool contract: `execute(toolCallId, params)` returning
@@ -838,9 +1074,11 @@ export const pluginEntry: PluginEntry = {
           if (!client) return textResult(NOT_CONFIGURED);
           const text = typeof params?.text === "string" ? params.text : "";
           const toolName = firstNonEmptyString(params?.tool_name) ?? "__message__";
-          const sessionId = state.piiSessions.get(
-            piiSessionKey(toolName, resolveConversationId(toolCtx))
-          );
+          // Without a host-provided conversation identity there is no session
+          // to scope to, and no shared fallback bucket exists.
+          const conversationId = resolveConversationId(toolCtx);
+          if (!conversationId) return textResult(text);
+          const sessionId = state.piiSessions.get(piiSessionKey(toolName, conversationId));
           // No PII session for this tool in the calling conversation.
           if (!sessionId) return textResult(text);
           try {
@@ -959,7 +1197,7 @@ export const pluginEntry: PluginEntry = {
     }).catch(() => {});
 
     console.log(
-      `[VeriSwarm] Plugin registered — 11 tools, 4 hooks (incl. Session Sentry). Agent: ${agentId}`
+      `[VeriSwarm] Plugin registered — 11 tools, 5 hooks (incl. Session Sentry). Agent: ${agentId}`
     );
   },
 };

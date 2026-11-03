@@ -111,3 +111,43 @@ describe("before_tool_call secret tripwire — unnamed tool", () => {
     expect(res.params.body).not.toContain(GH_PAT);
   });
 });
+
+describe("before_tool_call secret tripwire — keys and shared references", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("redacts secrets used as object keys", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    const res = await callTool(hooks, "http_post", { headers: { [GH_PAT]: "x" } });
+
+    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
+  });
+
+  it("redacts every occurrence of an object referenced twice", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+    const shared = { token: GH_PAT };
+
+    const res = await callTool(hooks, "http_post", { first: shared, second: shared });
+
+    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
+  });
+
+  it("terminates on cyclic params", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+    const cyclic: Record<string, unknown> = { token: GH_PAT };
+    cyclic.self = cyclic;
+
+    const res = await callTool(hooks, "http_post", cyclic);
+
+    expect(res.params.token).not.toContain(GH_PAT);
+  });
+});
