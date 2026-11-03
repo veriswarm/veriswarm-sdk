@@ -34,8 +34,15 @@ How the guards behave when something goes wrong or needs a decision:
 - **Rewritten tool calls ask for confirmation.** When the Tool Input Guard changes an MCP call's arguments,
   it returns the rewritten call with permission decision `ask`, so you review it before it runs. In headless
   runs (`claude -p`) nobody can answer that prompt, so those calls are denied.
+- **Tool input PII scan fails closed.** If the PII scan of an MCP tool call's arguments can't finish (API
+  unreachable, error or invalid response, or out of time), the tool call is blocked. Set
+  `GUARD_PII_FAIL_OPEN=1` to let such calls run with unscanned arguments instead (secrets are still
+  redacted locally). Without `VERISWARM_API_KEY`, PII scanning is off and only secrets are redacted.
 - **Tool output is withheld, not leaked.** If the PII scan of a tool response can't finish (API unreachable,
-  invalid response, or out of time), the response is replaced with a "withheld" notice.
+  invalid response, or out of time), the response is replaced with a "withheld" notice. One gap: the
+  output guard is installed without `onFailure`, so if the hook process itself is killed by the 10-second
+  hook timeout, Claude Code passes the original tool output through. The guard's 6-second API budget is
+  there to keep it well inside that limit.
 - **Prompt PII check fails open.** If the PII check on a prompt can't finish, the prompt is sent and you see
   a warning. Secrets in prompts are checked locally and always blocked.
 - **Secrets are always redacted locally.** Known-prefix secrets (`ghp_`, `sk-`, `AKIA`, …) are caught without
@@ -82,6 +89,7 @@ If you prefer manual configuration:
 | `GUARD_AGENT_ID` | For activity upload | Agent that Guard hook activity events are attributed to. Without it, events stay in the local buffer and are not uploaded |
 | `GUARD_BLOCK_PROMPT_PII` | No | Block prompts that contain PII (default on). Set to `0` to allow them. Prompts with secrets are always blocked |
 | `GUARD_SECRETS_DETECTION` | No | `1` also sends secrets found in MCP tool arguments to the Guard API for tokenization (recoverable tokens) before falling back to local redaction. Local secret redaction in prompts, tool arguments and tool responses is always on, regardless of this setting |
+| `GUARD_PII_FAIL_OPEN` | No | `1` lets an MCP tool call run with unscanned arguments when the PII scan can't complete. Default off: the call is blocked. Secrets are still redacted locally either way |
 | `GUARD_PII_EXEMPT_PREFIXES` | No | Comma-separated tool-name prefixes (e.g. `mcp__mystore__`) that skip PII tokenization and the PII warning. Empty by default. The secret tripwire still applies |
 
 ## Tools (102 total)
@@ -114,8 +122,8 @@ If you prefer manual configuration:
 | `check_tool_allowed` | Check if a tool is permitted under active Guard policies |
 | `get_findings` | List Guard security findings, optionally filtered by agent |
 | `list_guard_policies` | List all active Guard policies for the workspace |
-| `kill_agent` | Activate kill switch for an agent (blocks all trust decisions) |
-| `unkill_agent` | Deactivate kill switch, restoring normal processing |
+| `kill_agent` | Activate kill switch for an agent (blocks all trust decisions). Needs an account session, or an API key granted the `guard.killswitch.write` scope |
+| `unkill_agent` | Deactivate kill switch, restoring normal processing. Same auth as `kill_agent` |
 | `tokenize_pii` | Remove PII from text, replacing with safe tokens |
 | `rehydrate_pii` | Restore original PII values from VeriSwarm tokens |
 | `get_pii_session` | Get details of a PII tokenization session |

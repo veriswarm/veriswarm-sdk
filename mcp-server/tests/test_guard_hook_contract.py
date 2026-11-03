@@ -83,7 +83,7 @@ def _output(capsys) -> dict | None:
 
 def test_pre_tool_use_modifies_input_without_auto_approving(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch, secrets=False)
-    monkeypatch.setattr(gh, "_tokenize", _fake_pii_tokenizer)
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
 
     code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "contact a@b.com"}))
 
@@ -102,7 +102,7 @@ def test_secret_still_redacted_when_pii_manifest_is_malformed(monkeypatch, capsy
     gh = _reload_hook(monkeypatch)
     # Tokenizer "succeeds" but returns a manifest entry without "type".
     monkeypatch.setattr(
-        gh, "_tokenize",
+        gh, "_tokenize_strict",
         lambda text, **k: {"tokens_created": 1, "tokenized_text": text, "token_manifest": [{}]},
     )
 
@@ -113,27 +113,29 @@ def test_secret_still_redacted_when_pii_manifest_is_malformed(monkeypatch, capsy
     assert updated["body"] == "token [VS:GITHUB_TOKEN:offline]"
 
 
-def test_secret_still_redacted_when_pii_tokenizer_raises(monkeypatch, capsys):
+def test_pii_tokenizer_error_blocks_without_leaking_the_secret(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch)
     calls = {"n": 0}
 
     def _tokenize(text, **k):
         calls["n"] += 1
-        if calls["n"] > 1:
+        if calls["n"] > 1:  # first call is the secret tripwire's tokenize attempt
             raise RuntimeError("tokenizer exploded")
         return None
 
-    monkeypatch.setattr(gh, "_tokenize", _tokenize)
+    monkeypatch.setattr(gh, "_tokenize_strict", _tokenize)
 
     code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
 
-    assert code == 0
-    assert _output(capsys)["hookSpecificOutput"]["updatedInput"]["body"] == "token [VS:GITHUB_TOKEN:offline]"
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out.strip() == ""
+    assert GH not in captured.err
 
 
 def test_secrets_in_dict_keys_are_redacted(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch)
-    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+    monkeypatch.setattr(gh, "_tokenize_strict", lambda text, **k: None)
 
     event = _event("PreToolUse", tool_input={GH: "v", "outer": {"inner": {GH: [GH]}}})
     code = _run_main(gh, monkeypatch, event)
@@ -209,7 +211,7 @@ def test_total_api_time_is_bounded_by_the_hook_deadline(monkeypatch, capsys):
     fields = {f"f{i}": f"value number {i}" for i in range(40)}
     code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input=fields))
 
-    assert code == 0
+    assert code == 2  # the PII scan could not complete: the call is blocked
     assert sum(timeouts) <= gh.HOOK_BUDGET_SECONDS
     assert gh.HOOK_BUDGET_SECONDS < 10  # hook entries are installed with timeout: 10
 
@@ -300,7 +302,7 @@ def test_post_tool_use_redacts_secrets_offline_without_api(monkeypatch, capsys):
 
 def test_no_tools_are_pii_exempt_by_default(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch, secrets=False)
-    monkeypatch.setattr(gh, "_tokenize", _fake_pii_tokenizer)
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
 
     _run_main(gh, monkeypatch, _event("PreToolUse", tool_name="mcp__notes__save", tool_input={"body": "contact a@b.com"}))
 
@@ -480,8 +482,8 @@ def _timed_main(gh, monkeypatch, event):
     return code, time.monotonic() - start
 
 
-def test_pre_tool_use_finishes_within_budget_and_redacts_offline(monkeypatch, capsys, stalling_api):
-    gh = _reload_hook(monkeypatch)
+def test_pre_tool_use_fail_open_finishes_within_budget_and_redacts_offline(monkeypatch, capsys, stalling_api):
+    gh = _reload_hook(monkeypatch, env={"GUARD_PII_FAIL_OPEN": "1"})
     fields = {"secret": "token " + GH, **{f"f{i}": f"value number {i}" for i in range(5)}}
 
     code, elapsed = _timed_main(gh, monkeypatch, _event("PreToolUse", tool_input=fields))
@@ -528,7 +530,7 @@ def test_tripwire_skips_api_when_budget_is_low(monkeypatch):
 
 def test_secrets_redacted_in_tool_input_even_with_detection_off(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch, secrets=False)
-    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+    monkeypatch.setattr(gh, "_tokenize_strict", lambda text, **k: None)
 
     _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
 

@@ -84,7 +84,7 @@ def test_pre_tool_redacts_secret_without_api_key(monkeypatch, tmp_path, capsys):
 
 def test_pre_tool_use_redacts_nested_tool_arguments(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch, enabled=True)
-    monkeypatch.setattr(gh, "_tokenize", lambda text: None)
+    monkeypatch.setattr(gh, "_tokenize_strict", lambda text: None)
 
     event = {
         "tool_name": "mcp__vault__write_secret",

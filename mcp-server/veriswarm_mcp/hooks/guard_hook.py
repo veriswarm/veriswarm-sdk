@@ -27,6 +27,10 @@ Configuration via environment variables:
   GUARD_PII_EXEMPT_PREFIXES  — comma-separated tool-name prefixes that skip
                                PII tokenization (default: none). The secret
                                tripwire still runs on exempt tools.
+  GUARD_PII_FAIL_OPEN        — "1" lets an MCP tool call run with unscanned
+                               arguments when the PII scan cannot complete
+                               (default off: the call is blocked). Secrets
+                               are still redacted locally.
 
 Exit codes: 0 = proceed (stdout may carry decision JSON), 2 = block the
 tool call (PreToolUse only; reason on stderr).
@@ -126,6 +130,10 @@ SECRETS_DETECTION = _env_flag("GUARD_SECRETS_DETECTION", False)
 
 # Prompts containing PII are blocked unless this is turned off.
 BLOCK_PROMPT_PII = _env_flag("GUARD_BLOCK_PROMPT_PII", True)
+
+# Opt-out of fail-closed PreToolUse PII scanning: when on, a scan that cannot
+# complete lets the tool call run with unscanned (secret-redacted) arguments.
+PII_FAIL_OPEN = _env_flag("GUARD_PII_FAIL_OPEN", False)
 
 # Opt-in PII exemption: tools whose names start with one of these prefixes
 # skip PII tokenization and PostToolUse PII handling. Empty by default —
@@ -230,7 +238,8 @@ def _tokenize_strict(text: str) -> dict | None:
 
 def _tokenize(text: str) -> dict | None:
     """Best-effort tokenization: the result when PII was found, else None
-    (including on any failure). Used where PII handling fails open."""
+    (including on any failure). Used only by the secret tripwire, which
+    falls back to local redaction when this returns None."""
     if not API_KEY:
         return None
     try:
@@ -336,8 +345,8 @@ def redact_secrets_offline(text: str) -> str:
 
 
 def _pii_tokenize_string(value: str, tool_name: str) -> str:
-    """Replace PII in one string. Returns the input unchanged on any failure."""
-    result = _tokenize(value)
+    """Replace PII in one string. Raises ScanUnavailable if the scan fails."""
+    result = _tokenize_strict(value)
     if not result:
         return value
     _log_pii(result, "pre:" + tool_name)
@@ -471,10 +480,11 @@ def _check_prompt(event: dict) -> None:
 def handle_pre_tool_use(event: dict) -> None:
     """Redact secrets and tokenize PII in MCP tool arguments before the tool runs.
 
-    Secrets are handled first and fail closed: once the tripwire has
-    redacted a value, the redacted input is emitted even if PII
-    tokenization later fails. A secret that cannot be redacted blocks the
-    call (exit 2). PII tokenization itself fails open.
+    Secrets are handled first, locally, and fail closed: a secret that
+    cannot be redacted blocks the call (exit 2). PII tokenization (when an
+    API key is configured and the tool is not exempt) also fails closed: if
+    the scan cannot complete, the call is blocked unless GUARD_PII_FAIL_OPEN
+    is on, in which case it runs with the secret-redacted arguments.
 
     The modified input is returned with permissionDecision "ask": Claude
     Code applies `updatedInput` together with a decision, and "allow" would
@@ -498,14 +508,25 @@ def handle_pre_tool_use(event: dict) -> None:
             _block("secret detected in tool input and redaction failed")
         updated, changed = tool_input, False
 
-    if not _is_pii_exempt(tool_name):
+    if API_KEY and not _is_pii_exempt(tool_name):
         try:
             updated, pii_changed = _guard_strings(
                 updated, lambda v: _pii_tokenize_string(v, tool_name) if len(v) > 3 else v
             )
             changed = changed or pii_changed
-        except Exception:
-            pass  # PII tokenization fails open; secret redaction above stands
+        except Exception as exc:
+            why = str(exc) if isinstance(exc, ScanUnavailable) else type(exc).__name__
+            if not PII_FAIL_OPEN:
+                _block(
+                    f"the PII scan of this tool call's arguments could not complete ({why}). "
+                    "Retry, check the VeriSwarm API connection, or set GUARD_PII_FAIL_OPEN=1 "
+                    "to allow unscanned tool calls."
+                )
+            print(
+                f"[VeriSwarm Guard] PII scan of tool arguments could not complete ({why}); "
+                "running unscanned because GUARD_PII_FAIL_OPEN is set. Secrets were redacted locally.",
+                file=sys.stderr,
+            )
 
     if _contains_secret(json.dumps(updated)):
         _block("secret remained in tool input after redaction")
