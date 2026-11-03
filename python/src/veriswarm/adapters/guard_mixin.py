@@ -37,6 +37,9 @@ from veriswarm.client import VeriSwarmClient, VeriSwarmClientError  # noqa: F401
 
 logger = logging.getLogger("veriswarm.guard")
 
+# Argument types guard_before_call scans (map_strings recurses into containers).
+_GUARDED_ARG_TYPES = (str, dict, list, tuple)
+
 # Placeholder substituted when a secret/PII guard step itself fails (fail closed).
 GUARD_FAILED_PLACEHOLDER = "[VS:REDACTED:guard_unavailable]"
 _WARN_INTERVAL_SECONDS = 60.0
@@ -189,22 +192,33 @@ class GuardMixin:
     def guard_before_call(
         self, tool_name: str, args: tuple, kwargs: dict
     ) -> tuple[tuple, dict, GuardContext]:
-        """Run guard_before_tool over a call's string arguments.
+        """Run guard_before_tool over a call's text-bearing arguments.
 
-        Returns ``(args, kwargs, ctx)`` with every ``str`` argument (positional
+        Returns ``(args, kwargs, ctx)`` with every ``str`` argument and every
+        string nested in a ``dict`` / ``list`` / ``tuple`` argument (positional
         or keyword) replaced by its secret-redacted, PII-tokenized value, so
-        the wrapped function never receives the raw text. Other argument
-        types are passed through unchanged.
+        the wrapped function never receives the raw text. A container that
+        needed no change is passed as the original object; a changed one is
+        rebuilt as a plain dict / list / tuple. Other argument types are
+        passed through unchanged.
         """
-        strings = {i: a for i, a in enumerate(args) if isinstance(a, str)}
-        strings.update({k: v for k, v in kwargs.items() if isinstance(v, str)})
-        filtered, ctx = self.guard_before_tool(tool_name, strings)
+        guarded = {i: a for i, a in enumerate(args) if isinstance(a, _GUARDED_ARG_TYPES)}
+        guarded.update({k: v for k, v in kwargs.items() if isinstance(v, _GUARDED_ARG_TYPES)})
+        filtered, ctx = self.guard_before_tool(tool_name, guarded)
         if ctx.blocked:
             return args, kwargs, ctx
-        if not isinstance(filtered, dict) or filtered.keys() != strings.keys():
+        if not isinstance(filtered, dict) or filtered.keys() != guarded.keys():
             raise RuntimeError("Guard returned an unexpected argument mapping")
-        new_args = tuple(filtered[i] if i in filtered else a for i, a in enumerate(args))
-        new_kwargs = {k: filtered[k] if k in filtered else v for k, v in kwargs.items()}
+
+        def pick(key: Any, original: Any) -> Any:
+            if key not in filtered:
+                return original
+            value = filtered[key]
+            # Keep the caller's object (and its type) when nothing changed.
+            return original if value == original else value
+
+        new_args = tuple(pick(i, a) for i, a in enumerate(args))
+        new_kwargs = {k: pick(k, v) for k, v in kwargs.items()}
         return new_args, new_kwargs, ctx
 
     def guard_output(self, tool_name: str, tool_output: Any, ctx: GuardContext) -> Any:

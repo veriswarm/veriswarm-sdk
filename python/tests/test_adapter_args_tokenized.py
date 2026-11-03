@@ -122,3 +122,61 @@ def test_method_self_is_passed_through(monkeypatch):
     got_self, note = repo.save(f"mail {EMAIL}")
     assert got_self is repo
     assert note == f"mail {TOKENIZED}"
+
+
+# ---------- container arguments (dict / list / tuple) ----------
+
+@pytest.mark.parametrize("which", sorted(WRAPPERS))
+def test_container_args_are_tokenized(monkeypatch, which):
+    install(monkeypatch, FakeApi())
+    wrap = WRAPPERS[which](monkeypatch)
+    seen = {}
+
+    def tool(payload, items=None):
+        seen.update(payload=payload, items=items)
+        return "done"
+
+    wrapped = wrap(tool)
+    assert wrapped({"email": f"mail {EMAIL}", "n": 2}, items=[f"cc {EMAIL}", (f"key {GH_TOKEN}", 5)]) == "done"
+    assert seen["payload"] == {"email": f"mail {TOKENIZED}", "n": 2}
+    assert seen["items"][0] == f"cc {TOKENIZED}"
+    assert GH_TOKEN not in seen["items"][1][0]
+    assert seen["items"][1][1] == 5
+    assert isinstance(seen["items"][1], tuple)
+
+
+@pytest.mark.parametrize("which", sorted(WRAPPERS))
+def test_tokenizer_outage_with_only_a_container_arg_blocks(monkeypatch, which):
+    api = FakeApi()
+    original = api.request
+
+    def failing(client, path, *, method="GET", body=None):
+        if path == "/v1/suite/guard/pii/tokenize":
+            raise RuntimeError("tokenizer down")
+        return original(client, path, method=method, body=body)
+
+    api.request = failing
+    install(monkeypatch, api)
+    ran = []
+
+    def tool(payload):
+        ran.append(payload)
+        return "done"
+
+    with pytest.raises(PermissionError):
+        WRAPPERS[which](monkeypatch)(tool)({"email": f"mail {EMAIL}"})
+    assert ran == []
+
+
+def test_unchanged_container_keeps_its_identity(monkeypatch):
+    install(monkeypatch, FakeApi())
+    guard_protected = _decorator(monkeypatch)
+    payload = {"note": "nothing personal"}
+    seen = []
+
+    @guard_protected
+    def tool(p):
+        seen.append(p)
+
+    tool(payload)
+    assert seen[0] is payload

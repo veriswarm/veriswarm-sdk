@@ -18,7 +18,8 @@ Usage:
     async def search_records(query: str) -> str:
         return await db.search(query)
 
-    # PII in string arguments and string return values is tokenized.
+    # PII in string arguments (including strings inside dict/list/tuple
+    # arguments) and in string return values is tokenized.
     # Dangerous calls are blocked by policy. Everything is audited.
 
     # To rehydrate PII for writing:
@@ -80,9 +81,10 @@ def _get_guard() -> GuardMixin:
 def guard_protected(fn: Callable | None = None, *, name: str | None = None) -> Callable:
     """Decorator that wraps any function with Guard protection.
 
-    PII in string arguments (positional or keyword) and string return values
-    is tokenized, and secrets are redacted; the function receives the
-    guarded values. Other argument types are passed through unchanged.
+    PII in string arguments (positional or keyword, including strings nested
+    in dict / list / tuple arguments) and in string return values is
+    tokenized, and secrets are redacted; the function receives the guarded
+    values. Other argument types are passed through unchanged.
     Policy decisions are enforced. Tool calls are audited.
 
     Can be used with or without arguments:
