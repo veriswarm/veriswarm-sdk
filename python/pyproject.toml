@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veriswarm"
-version = "0.5.1"
+version = "0.6.0"
 description = "Official VeriSwarm Python SDK — trust scoring, event ingestion, and agent management for AI agents"
 readme = "README.md"
 requires-python = ">=3.8"
