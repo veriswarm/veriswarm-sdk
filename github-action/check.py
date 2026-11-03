@@ -10,8 +10,9 @@ import glob
 import json
 import os
 import sys
+import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 # ── Config ───────────────────────────────────────────────────────────────
@@ -75,18 +76,39 @@ class _StripAuthRedirectHandler(HTTPRedirectHandler):
 
 
 _OPENER = build_opener(_StripAuthRedirectHandler())
+
+
+def _int_env(name: str, input_name: str) -> int:
+    raw = os.environ.get(name, "").strip() or "0"
+    try:
+        return int(raw)
+    except ValueError:
+        raise SystemExit(f"::error::Input '{input_name}' must be an integer (got {raw!r})")
+
+
+def _float_env(name: str, input_name: str) -> float:
+    raw = os.environ.get(name, "").strip() or "0"
+    try:
+        value = float(raw)
+    except ValueError:
+        raise SystemExit(f"::error::Input '{input_name}' must be a number (got {raw!r})")
+    if value != value or value in (float("inf"), float("-inf")):
+        raise SystemExit(f"::error::Input '{input_name}' must be a finite number (got {raw!r})")
+    return value
+
+
 AGENT_ID = os.environ.get("VERISWARM_AGENT_ID", "")
 MODE = os.environ.get("VERISWARM_MODE", "all")
 SCAN_PATHS = os.environ.get("VERISWARM_SCAN_PATHS", "")
 ACTION_TYPE = os.environ.get("VERISWARM_ACTION_TYPE", "deploy")
 FAIL_ON_DENY = os.environ.get("VERISWARM_FAIL_ON_DENY", "true").lower() == "true"
 FAIL_ON_INJECTION = os.environ.get("VERISWARM_FAIL_ON_INJECTION", "true").lower() == "true"
-FAIL_ON_LOW_SCORE = int(os.environ.get("VERISWARM_FAIL_ON_LOW_SCORE", "0"))
-MIN_TRUST_SCORE = int(os.environ.get("VERISWARM_MIN_TRUST_SCORE", "0"))
-MIN_OWASP_COVERAGE = float(os.environ.get("VERISWARM_MIN_OWASP_COVERAGE", "0"))
+FAIL_ON_LOW_SCORE = _int_env("VERISWARM_FAIL_ON_LOW_SCORE", "fail-on-low-score")
+MIN_TRUST_SCORE = _int_env("VERISWARM_MIN_TRUST_SCORE", "min-trust-score")
+MIN_OWASP_COVERAGE = _float_env("VERISWARM_MIN_OWASP_COVERAGE", "min-owasp-coverage")
 FRAMEWORKS_INPUT = os.environ.get("VERISWARM_FRAMEWORKS", "eu-ai-act,nist-ai-rmf,iso-42001")
-MIN_COMPLIANCE_PASS_RATIO = float(
-    os.environ.get("VERISWARM_MIN_COMPLIANCE_PASS_RATIO", "0")
+MIN_COMPLIANCE_PASS_RATIO = _float_env(
+    "VERISWARM_MIN_COMPLIANCE_PASS_RATIO", "min-compliance-pass-ratio"
 )
 FAIL_ON_COMPLIANCE_WARN = (
     os.environ.get("VERISWARM_FAIL_ON_COMPLIANCE_WARN", "false").lower() == "true"
@@ -99,6 +121,11 @@ GITHUB_STEP_SUMMARY = os.environ.get("GITHUB_STEP_SUMMARY", "")
 
 
 def api_request(path: str, method: str = "GET", body: dict | None = None) -> dict:
+    """Call the API. Never raises; failures come back as ``{"error": ..., "status": ...}``.
+
+    Anything that is not a JSON object (HTML error page, array, timeout) is
+    reported as an error so callers fail closed instead of reading it as clean.
+    """
     encoded = None if body is None else json.dumps(body).encode("utf-8")
     req = Request(
         f"{API_URL}{path}", data=encoded, method=method,
@@ -106,7 +133,7 @@ def api_request(path: str, method: str = "GET", body: dict | None = None) -> dic
     )
     try:
         with _OPENER.open(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
+            parsed = json.loads(resp.read().decode("utf-8") or "{}")
     except HTTPError as exc:
         # Print the status code only — the response body can echo back
         # request content (including bytes from scanned files), and
@@ -117,10 +144,17 @@ def api_request(path: str, method: str = "GET", body: dict | None = None) -> dic
         except Exception:
             pass
         print(f"::warning::VeriSwarm API error {exc.code} (response body suppressed in logs)")
-        return {"error": f"API {exc.code}"}
+        return {"error": f"API {exc.code}", "status": exc.code}
     except URLError as exc:
         print(f"::warning::VeriSwarm connection failed: {exc.reason}")
         return {"error": str(exc.reason)}
+    except (OSError, ValueError) as exc:  # timeouts, resets, undecodable/non-JSON body
+        print(f"::warning::VeriSwarm API response unusable: {type(exc).__name__}")
+        return {"error": f"unusable response ({type(exc).__name__})"}
+    if not isinstance(parsed, dict):
+        print("::warning::VeriSwarm API returned a non-object JSON body")
+        return {"error": "unexpected response shape"}
+    return parsed
 
 
 def set_output(name: str, value: str):
@@ -153,33 +187,68 @@ failures = []
 summary_lines = []
 
 
+def _number(value) -> float | None:
+    """Return value if it is a finite real number (not bool), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def _gate_error(message: str, enforced: bool):
+    """Record an unevaluable check: fails the gate when enforcement is on."""
+    if enforced:
+        failures.append(message)
+        print(f"::error::{message}")
+    else:
+        print(f"::warning::{message}")
+
+
 def check_score():
+    """Gate on the agent's composite trust score.
+
+    Reads GET /v1/public/agents/{id}/scores/breakdown, whose
+    ``scores.composite_trust`` is the same composite the server stores on
+    every score snapshot. (``scores/current`` returns only the per-dimension
+    scores, with no composite.)
+    """
     if not AGENT_ID:
         print("::notice::Skipping score check (no agent-id provided)")
         return
 
+    enforced = MIN_TRUST_SCORE > 0
     print(f"Checking trust score for {AGENT_ID}...")
-    result = api_request(f"/v1/public/agents/{AGENT_ID}/scores/current")
+    result = api_request(f"/v1/public/agents/{quote(AGENT_ID, safe='')}/scores/breakdown")
 
     if "error" in result:
-        print(f"::warning::Score check failed: {result['error']}")
+        _gate_error(f"Trust score could not be fetched: {result['error']}", enforced)
+        return
+    scores = result.get("scores")
+    composite = _number(scores.get("composite_trust")) if isinstance(scores, dict) else None
+    if composite is None:
+        reason = result.get("status") or "no composite_trust in response"
+        _gate_error(f"Trust score unavailable for {AGENT_ID} ({reason})", enforced)
         return
 
-    scores = result.get("scores", {})
     tier = result.get("policy_tier", "unknown")
-    composite = scores.get("composite_trust", 0)
-
     set_output("trust-score", str(composite))
-    set_output("policy-tier", tier)
+    set_output("policy-tier", str(tier))
 
-    line = f"Trust Score: **{composite}** | Tier: **{tier}** | Identity: {scores.get('identity', '?')} | Risk: {scores.get('risk', '?')} | Reliability: {scores.get('reliability', '?')}"
+    line = (
+        f"Trust Score: **{composite}** | Tier: **{tier}** | Identity: {scores.get('identity', '?')} | "
+        f"Risk: {scores.get('risk', '?')} | Reliability: {scores.get('reliability', '?')}"
+    )
     summary_lines.append(line)
     print(f"  Score: {composite} | Tier: {tier}")
 
-    if MIN_TRUST_SCORE > 0 and composite < MIN_TRUST_SCORE:
+    if enforced and composite < MIN_TRUST_SCORE:
         msg = f"Trust score {composite} is below minimum {MIN_TRUST_SCORE}"
         failures.append(msg)
         print(f"::error::{msg}")
+
+
+_KNOWN_DECISIONS = ("allow", "review", "deny")
 
 
 def check_decision():
@@ -192,9 +261,13 @@ def check_decision():
     })
 
     if "error" in result:
+        _gate_error(f"Trust decision could not be fetched: {result['error']}", FAIL_ON_DENY)
         return
 
-    decision = result.get("decision", "unknown")
+    decision = result.get("decision")
+    if decision not in _KNOWN_DECISIONS:
+        _gate_error("Trust decision response had no recognised 'decision' value", FAIL_ON_DENY)
+        return
     set_output("decision", decision)
 
     emoji = "✅" if decision == "allow" else "⚠️" if decision == "review" else "❌"
@@ -212,13 +285,18 @@ def check_test():
     if not AGENT_ID:
         return
 
+    enforced = FAIL_ON_LOW_SCORE > 0
     print(f"Running security tests against {AGENT_ID}...")
-    result = api_request(f"/v1/agents/test/{AGENT_ID}", method="POST", body={})
+    result = api_request(f"/v1/agents/test/{quote(AGENT_ID, safe='')}", method="POST", body={})
 
     if "error" in result:
+        _gate_error(f"Security tests could not be run: {result['error']}", enforced)
         return
 
-    readiness = result.get("readiness_score", 0)
+    readiness = _number(result.get("readiness_score"))
+    if readiness is None:
+        _gate_error("Security test response had no numeric readiness_score", enforced)
+        return
     passed = result.get("passed", 0)
     failed = result.get("failed", 0)
     total = result.get("total_tests", 0)
@@ -230,7 +308,7 @@ def check_test():
     summary_lines.append(line)
     print(f"  Readiness: {readiness}/100 | Passed: {passed} | Failed: {failed}")
 
-    if FAIL_ON_LOW_SCORE > 0 and readiness < FAIL_ON_LOW_SCORE:
+    if enforced and readiness < FAIL_ON_LOW_SCORE:
         msg = f"Security readiness score {readiness} is below threshold {FAIL_ON_LOW_SCORE}"
         failures.append(msg)
         print(f"::error::{msg}")
@@ -238,7 +316,7 @@ def check_test():
     # Show failed tests in annotations
     for r in result.get("results", []):
         if r.get("status") == "fail":
-            print(f"::warning::Security test failed: {r['name']} — expected: {r.get('expected', '?')[:80]}")
+            print(f"::warning::Security test failed: {r.get('name', '?')} — expected: {str(r.get('expected', '?'))[:80]}")
 
 
 def _is_under_workspace(filepath: str) -> bool:
@@ -287,6 +365,54 @@ def _is_sensitive_filename(filepath: str) -> bool:
     return False
 
 
+# The demo scan endpoints reject `text` over 2000 chars (HTTP 422) and allow
+# 30 requests/min per client, so files are scanned in chunks at a throttled pace.
+SCAN_CHUNK_CHARS = 2000
+MAX_SCAN_CHARS_PER_FILE = 20_000
+MAX_SCAN_FILES = 50
+SCAN_MIN_INTERVAL = 2.1  # seconds between scan requests (< 30/min)
+_SCAN_RETRY_DELAYS = (10, 20, 40, 60)  # backoff on HTTP 429
+_sleep = time.sleep
+_last_scan_request = 0.0
+
+
+def _split_chunks(text: str) -> list[str]:
+    """Split text into pieces of at most SCAN_CHUNK_CHARS, preferring line breaks."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = min(start + SCAN_CHUNK_CHARS, len(text))
+        if end < len(text):
+            nl = text.rfind("\n", start + SCAN_CHUNK_CHARS // 2, end)
+            if nl != -1:
+                end = nl + 1
+        chunk = text[start:end]
+        if chunk.strip():
+            chunks.append(chunk)
+        start = end
+    return chunks
+
+
+def _scan_request(path: str, text: str) -> dict | None:
+    """POST one chunk to a scan endpoint, throttled, retrying HTTP 429.
+
+    Returns the response dict, or None if it could not be obtained. A 429 that
+    outlasts the retries is a failure, never a clean result.
+    """
+    global _last_scan_request
+    for attempt in range(len(_SCAN_RETRY_DELAYS) + 1):
+        wait = SCAN_MIN_INTERVAL - (time.monotonic() - _last_scan_request)
+        if wait > 0:
+            _sleep(wait)
+        result = api_request(path, method="POST", body={"text": text})
+        _last_scan_request = time.monotonic()
+        if result.get("status") == 429 and attempt < len(_SCAN_RETRY_DELAYS):
+            _sleep(_SCAN_RETRY_DELAYS[attempt])
+            continue
+        return None if "error" in result else result
+    return None
+
+
 def check_scan():
     files_to_scan = []
 
@@ -303,6 +429,8 @@ def check_scan():
     rejected_sensitive = 0
     filtered: list[str] = []
     for fp in files_to_scan:
+        if not os.path.isfile(fp):
+            continue
         if not _is_under_workspace(fp):
             rejected_traversal += 1
             continue
@@ -317,68 +445,97 @@ def check_scan():
         print(f"::warning::Skipped {rejected_sensitive} sensitive file(s) (.env / *.pem / .git / .ssh / etc.)")
 
     if not files_to_scan:
-        print("::notice::No files to scan (set scan-paths to enable PII/injection scanning)")
+        print("::warning::No files to scan (set scan-paths to a glob that matches files)")
         return
 
+    skipped_by_cap = max(0, len(files_to_scan) - MAX_SCAN_FILES)
+    files_to_scan = files_to_scan[:MAX_SCAN_FILES]
     print(f"Scanning {len(files_to_scan)} files for PII and injection patterns...")
 
     total_pii = 0
     total_injection = 0
+    scan_errors = skipped_by_cap
+    if skipped_by_cap:
+        print(f"::warning::{skipped_by_cap} file(s) not scanned (limit {MAX_SCAN_FILES} files per run)")
 
-    for filepath in files_to_scan[:50]:  # Cap at 50 files
+    for filepath in files_to_scan:
         try:
-            with open(filepath) as f:
-                content = f.read()[:5000]  # Cap at 5KB per file
-        except Exception:
+            with open(filepath, encoding="utf-8", errors="replace") as f:
+                content = f.read(MAX_SCAN_CHARS_PER_FILE + 1)
+        except OSError:
+            print(f"::warning file={filepath}::Could not read file for scanning")
+            scan_errors += 1
             continue
+        if len(content) > MAX_SCAN_CHARS_PER_FILE:
+            content = content[:MAX_SCAN_CHARS_PER_FILE]
+            print(f"::warning file={filepath}::Only the first {MAX_SCAN_CHARS_PER_FILE} characters were scanned")
+            scan_errors += 1
 
-        if not content.strip():
-            continue
+        file_injection = False
+        for chunk in _split_chunks(content):
+            result = _scan_request("/v1/demo/pii-scan", chunk)
+            entities = result.get("entities_found") if result else None
+            if not isinstance(entities, int) or isinstance(entities, bool) or entities < 0:
+                print(f"::warning file={filepath}::PII scan failed or returned an unexpected response")
+                scan_errors += 1
+            elif entities > 0:
+                total_pii += entities
+                for e in result.get("entities", []):
+                    print(f"::warning file={filepath}::PII detected: {e.get('type', '?')} (confidence: {e.get('score', 0):.0%})")
 
-        # PII scan
-        result = api_request("/v1/demo/pii-scan", method="POST", body={"text": content})
-        entities = result.get("entities_found", 0)
-        if entities > 0:
-            total_pii += entities
-            for e in result.get("entities", []):
-                print(f"::warning file={filepath}::PII detected: {e['type']} (confidence: {e.get('score', 0):.0%})")
-
-        # Injection scan
-        result = api_request("/v1/demo/injection-scan", method="POST", body={"text": content})
-        if result.get("is_injection"):
+            result = _scan_request("/v1/demo/injection-scan", chunk)
+            flagged = result.get("is_injection") if result else None
+            if not isinstance(flagged, bool):
+                print(f"::warning file={filepath}::Injection scan failed or returned an unexpected response")
+                scan_errors += 1
+            elif flagged:
+                file_injection = True
+                print(f"::error file={filepath}::Prompt injection pattern detected (confidence: {result.get('confidence', 0):.0%})")
+        if file_injection:
             total_injection += 1
-            print(f"::error file={filepath}::Prompt injection pattern detected (confidence: {result.get('confidence', 0):.0%})")
 
     set_output("pii-found", str(total_pii > 0).lower())
     set_output("injection-found", str(total_injection > 0).lower())
 
     if total_pii > 0:
         summary_lines.append(f"PII Scan: ⚠️ **{total_pii} entities** found across {len(files_to_scan)} files")
-    else:
+    elif not scan_errors:
         summary_lines.append(f"PII Scan: ✅ Clean ({len(files_to_scan)} files scanned)")
 
     if total_injection > 0:
         summary_lines.append(f"Injection Scan: ❌ **{total_injection} files** contain injection patterns")
         if FAIL_ON_INJECTION:
             failures.append(f"Prompt injection detected in {total_injection} file(s)")
-    else:
-        summary_lines.append(f"Injection Scan: ✅ Clean")
+    elif not scan_errors:
+        summary_lines.append("Injection Scan: ✅ Clean")
+
+    if scan_errors:
+        summary_lines.append(f"Scan: ❌ **incomplete** ({scan_errors} request(s)/file(s) could not be scanned)")
+        _gate_error(
+            f"Scan incomplete: {scan_errors} request(s)/file(s) could not be scanned; not treating as clean",
+            FAIL_ON_INJECTION,
+        )
 
 
 def check_owasp():
     """Check OWASP Agentic AI Top 10 (2026) compliance coverage."""
     print("Checking OWASP Agentic AI Top 10 attestation...")
+    enforced = MIN_OWASP_COVERAGE > 0
     result = api_request("/v1/compliance/owasp-attestation")
 
     if "error" in result:
+        _gate_error(f"OWASP attestation could not be fetched: {result['error']}", enforced)
         return
 
-    summary = result.get("summary", {})
+    summary = result.get("summary")
+    score = _number(summary.get("coverage_score")) if isinstance(summary, dict) else None
+    if score is None:
+        _gate_error("OWASP attestation response had no numeric coverage_score", enforced)
+        return
     covered = summary.get("covered", 0)
     partial = summary.get("partial", 0)
     gaps = summary.get("gaps", 0)
     total = summary.get("total_risks", 10)
-    score = summary.get("coverage_score", 0.0)
 
     set_output("owasp-coverage", f"{covered}/{total}")
     set_output("owasp-score", f"{score:.2f}")
@@ -387,7 +544,7 @@ def check_owasp():
     summary_lines.append(line)
     print(f"  Coverage: {covered}/{total} ({score:.0%})")
 
-    if MIN_OWASP_COVERAGE > 0 and score < MIN_OWASP_COVERAGE:
+    if enforced and score < MIN_OWASP_COVERAGE:
         msg = f"OWASP coverage score {score:.2f} below minimum {MIN_OWASP_COVERAGE:.2f}"
         failures.append(msg)
         print(f"::error::{msg}")
@@ -439,7 +596,7 @@ def check_compliance():
     worst_ratio = 1.0
     saw_warn = False
     for slug in slugs:
-        result = api_request(f"/v1/compliance/{slug}")
+        result = api_request(f"/v1/compliance/{quote(slug, safe='')}")
         if "error" in result:
             failures.append(
                 f"Compliance framework `{slug}` could not be evaluated: {result.get('error')}"
@@ -498,18 +655,25 @@ _MAX_CI_FILES = 100
 _MAX_CI_FILE_BYTES = 200_000  # matches the API's CiScanFile content/diff cap
 
 
+class BaseRefUnreachable(Exception):
+    """The PR base ref could not be diffed against (shallow clone, bad ref)."""
+
+
 def _git_diff_for(path: str, base_ref: str) -> str | None:
     """Best-effort unified diff of `path` vs the PR base ref.
 
     Layer 2 (exfil-pattern) checks only run on *added* lines, so they need
-    the diff. Returns None when the base ref isn't reachable (shallow
-    checkout, non-PR run) — Layer 1 config checks still run on full content.
+    the diff. Returns None when the file is unchanged. Raises
+    BaseRefUnreachable when the base ref cannot be diffed against (shallow
+    checkout without the base branch) — Layer 1 config checks still run on
+    full content, but the caller must say Layer 2 was skipped.
     The base ref is a GitHub-provided branch name, not attacker free-text,
     but we still pass it as an argv element (never a shell string).
     """
     import subprocess
 
     workspace = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    reachable = False
     for base in (f"origin/{base_ref}", base_ref):
         try:
             out = subprocess.run(
@@ -518,8 +682,12 @@ def _git_diff_for(path: str, base_ref: str) -> str | None:
             )
         except Exception:
             continue
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout[:_MAX_CI_FILE_BYTES]
+        if out.returncode == 0:
+            reachable = True
+            if out.stdout.strip():
+                return out.stdout[:_MAX_CI_FILE_BYTES]
+    if not reachable:
+        raise BaseRefUnreachable(base_ref)
     return None
 
 
@@ -571,6 +739,7 @@ def check_ci_exfil():
     base_ref = os.environ.get("GITHUB_BASE_REF", "")  # set on pull_request events
 
     payload_files: list[dict] = []
+    base_unreachable = False
     for fp in files_to_scan[:_MAX_CI_FILES]:
         rel = os.path.relpath(os.path.realpath(fp), workspace_real)
         try:
@@ -579,8 +748,17 @@ def check_ci_exfil():
         except Exception:
             continue
         entry: dict = {"path": rel, "content": content}
-        if base_ref:
-            diff = _git_diff_for(rel, base_ref)
+        if base_ref and not base_unreachable:
+            try:
+                diff = _git_diff_for(rel, base_ref)
+            except BaseRefUnreachable:
+                base_unreachable = True
+                print(
+                    f"::warning::Base ref '{base_ref}' is not reachable in this checkout "
+                    "(shallow clone?); diff-based exfil checks are SKIPPED. "
+                    "Use fetch-depth: 0 on actions/checkout to enable them."
+                )
+                diff = None
             if diff:
                 entry["diff"] = diff
         payload_files.append(entry)
@@ -600,6 +778,10 @@ def check_ci_exfil():
             print(f"::error::{msg}")
         else:
             print(f"::warning::{msg}")
+        return
+
+    if not isinstance(result.get("findings"), list) or "blocked" not in result:
+        _gate_error("CI secret-exfiltration scan returned an unexpected response", FAIL_ON_CI_EXFIL)
         return
 
     findings = result.get("findings", [])
@@ -645,9 +827,19 @@ def check_ci_exfil():
 
 # ── Main ─────────────────────────────────────────────────────────────────
 
+VALID_MODES = ("score", "decision", "test", "scan", "owasp", "compliance", "ci-exfil")
+AGENT_MODES = ("score", "decision", "test")  # 'all' skips these when agent-id is empty
+
 def main():
     if not API_KEY:
         print("::error::VERISWARM_API_KEY is not set. Add it as a GitHub secret.")
+        sys.exit(1)
+
+    if MODE != "all" and MODE not in VALID_MODES:
+        print(f"::error::Unknown mode {MODE!r}. Valid modes: {', '.join(VALID_MODES)}, all")
+        sys.exit(1)
+    if MODE in AGENT_MODES and not AGENT_ID:
+        print(f"::error::Mode '{MODE}' requires the agent-id input")
         sys.exit(1)
 
     print("🐝 VeriSwarm Trust Check")

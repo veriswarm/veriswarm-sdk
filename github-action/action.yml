@@ -53,7 +53,7 @@ inputs:
     required: false
     default: "0"
   min-trust-score:
-    description: "Minimum composite trust score to pass (0-100)"
+    description: "Minimum composite trust score to pass (0-100): the server composite_trust from scores/breakdown. 0 = no enforcement. API errors or a missing score fail the gate when this is set."
     required: false
     default: "0"
   min-owasp-coverage:
@@ -72,32 +72,46 @@ inputs:
 outputs:
   trust-score:
     description: "Agent's composite trust score"
+    value: ${{ steps.checks.outputs.trust-score }}
   policy-tier:
-    description: "Agent's policy tier (allow/review/deny)"
+    description: "Agent's policy tier (tier_0 to tier_3, or tier_x)"
+    value: ${{ steps.checks.outputs.policy-tier }}
   decision:
     description: "Trust decision for the action"
+    value: ${{ steps.checks.outputs.decision }}
   readiness-score:
     description: "Security test readiness score (0-100)"
+    value: ${{ steps.checks.outputs.readiness-score }}
   pii-found:
     description: "Whether PII was detected in scanned files"
+    value: ${{ steps.checks.outputs.pii-found }}
   injection-found:
     description: "Whether prompt injection was detected"
+    value: ${{ steps.checks.outputs.injection-found }}
   owasp-coverage:
     description: "OWASP Agentic Top 10 coverage (e.g., '10/10')"
+    value: ${{ steps.checks.outputs.owasp-coverage }}
   owasp-score:
     description: "OWASP coverage score (0.0-1.0)"
+    value: ${{ steps.checks.outputs.owasp-score }}
   compliance-pass-ratio:
     description: "Worst per-framework pass ratio observed in 'compliance' mode (0.0-1.0)."
+    value: ${{ steps.checks.outputs.compliance-pass-ratio }}
   compliance-frameworks-checked:
     description: "Comma-separated framework slugs that were actually evaluated."
+    value: ${{ steps.checks.outputs.compliance-frameworks-checked }}
   ci-exfil-blocked:
     description: "Whether the CI exfil scan blocked the build ('true'/'false')."
+    value: ${{ steps.checks.outputs.ci-exfil-blocked }}
   ci-exfil-highest-severity:
     description: "Highest severity finding from the CI exfil scan (critical/high/medium/low/info/none)."
+    value: ${{ steps.checks.outputs.ci-exfil-highest-severity }}
   ci-exfil-findings:
     description: "Number of CI exfil findings detected."
+    value: ${{ steps.checks.outputs.ci-exfil-findings }}
   summary:
     description: "Human-readable summary of all checks"
+    value: ${{ steps.checks.outputs.summary }}
 
 runs:
   using: "composite"
@@ -118,6 +132,7 @@ runs:
         fi
 
     - name: Run VeriSwarm checks
+      id: checks
       shell: bash
       env:
         VERISWARM_API_KEY: ${{ inputs.api-key }}
