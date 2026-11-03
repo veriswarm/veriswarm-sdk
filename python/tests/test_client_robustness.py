@@ -95,3 +95,22 @@ def test_accepts_local_http(url):
 def test_rejects_non_local_http(url):
     with pytest.raises(ValueError, match="https"):
         VeriSwarmClient(base_url=url, api_key="k")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.veriswarm.ai@attacker.example",
+        "https://user:pass@api.veriswarm.ai",
+        "http://localhost@attacker.example",
+    ],
+)
+def test_rejects_userinfo_in_base_url(url):
+    with pytest.raises(ValueError, match="must not contain credentials"):
+        VeriSwarmClient(base_url=url, api_key="k")
+
+
+@pytest.mark.parametrize("url", ["https:///v1", "https://:443/v1"])
+def test_rejects_base_url_without_host(url):
+    with pytest.raises(ValueError, match="host"):
+        VeriSwarmClient(base_url=url, api_key="k")

@@ -170,6 +170,12 @@ class VeriSwarmClient:
         # exception; explicit and narrow. (Audit 2026-05-08 CRIT-SDK-1.)
         from urllib.parse import urlparse
         parsed = urlparse(self.base_url)
+        if not parsed.hostname:
+            raise ValueError("base_url must be an absolute URL with a host")
+        if "@" in parsed.netloc:
+            # https://api.veriswarm.ai@attacker.example sends the API key to
+            # attacker.example; never accept userinfo in base_url.
+            raise ValueError("base_url must not contain credentials (user@host)")
         if parsed.scheme != "https":
             allow_http_dev = (
                 parsed.scheme == "http"

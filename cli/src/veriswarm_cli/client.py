@@ -42,6 +42,12 @@ def validate_api_url(url: str, *, field_name: str = "VERISWARM_API_URL") -> str:
     parsed = urlparse(normalized)
     if not parsed.scheme or not parsed.netloc:
         raise SystemExit(f"{field_name} must be an absolute URL")
+    if not parsed.hostname:
+        raise SystemExit(f"{field_name} must include a host")
+    if "@" in parsed.netloc:
+        # https://api.veriswarm.ai@attacker.example sends auth headers to
+        # attacker.example; never accept userinfo in an API URL.
+        raise SystemExit(f"{field_name} must not contain credentials (user@host)")
 
     is_localhost_http = (
         parsed.scheme == "http"

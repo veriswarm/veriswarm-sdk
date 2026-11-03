@@ -153,6 +153,35 @@ def test_circuit_breaker_model_with_dots_is_encoded_not_rejected(monkeypatch, cl
     assert sent[0][1][0] == "/v1/analytics/sre/circuit-breakers/openai/gpt-4.1%2Fmini/reset"
 
 
+@pytest.mark.parametrize(
+    "template_id,path",
+    [
+        ("builtin:content_pipeline_v2", "/v1/workflows/templates/builtin:content_pipeline_v2/deploy"),
+        ("wft_abc123", "/v1/workflows/templates/wft_abc123/deploy"),
+    ],
+)
+def test_deploy_template_accepts_builtin_and_custom_ids(monkeypatch, client, template_id, path):
+    """Regression: builtin:<slug> IDs were rejected by safe_id, so built-in
+    templates could not be deployed through the MCP tool."""
+    sent = _forbid_http(monkeypatch, client)
+    tool = _tools_for(workflows, client)["deploy_template"]
+
+    asyncio.run(tool(template_id=template_id))
+
+    assert sent == [("post", (path,), {})]
+
+
+@pytest.mark.parametrize("bad", ["builtin:", "builtin:../x", "builtin:a/b", "other:slug"])
+def test_deploy_template_rejects_malformed_builtin_ids(monkeypatch, client, bad):
+    sent = _forbid_http(monkeypatch, client)
+    tool = _tools_for(workflows, client)["deploy_template"]
+
+    result = json.loads(asyncio.run(tool(template_id=bad)))
+
+    assert sent == []
+    assert result["type"] == "ToolValidationError"
+
+
 @pytest.mark.parametrize("bad", [".", "..", "a/b", "a?b", "a#b", "a%2Fb", "", "x" * 129, "a.b"])
 def test_safe_id_rejects_path_metacharacters(bad):
     with pytest.raises(ToolValidationError):
@@ -173,10 +202,11 @@ def test_q_path_encodes_reserved_characters(value, expected):
 
 
 def test_no_tool_interpolates_a_raw_name_into_a_path():
-    """Every `{...}` in an f-string API path must be a safe_id/q_path result.
+    """Every `{...}` in an f-string API path must be a sanitizer result.
 
     Enforced structurally: each interpolated name must have been assigned
-    from safe_id(...) / q_path(...) earlier in the same function.
+    from safe_id(...) / q_path(...) / safe_template_id(...) earlier in the
+    same function.
     """
     offenders = []
     for path in sorted(TOOLS_DIR.glob("*.py")):
@@ -189,7 +219,7 @@ def test_no_tool_interpolates_a_raw_name_into_a_path():
                 if (
                     isinstance(node, ast.Assign)
                     and isinstance(node.value, ast.Call)
-                    and getattr(node.value.func, "id", "") in {"safe_id", "q_path"}
+                    and getattr(node.value.func, "id", "") in {"safe_id", "q_path", "safe_template_id"}
                 ):
                     sanitized.update(t.id for t in node.targets if isinstance(t, ast.Name))
             for node in ast.walk(fn):

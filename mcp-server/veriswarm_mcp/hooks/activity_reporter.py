@@ -20,6 +20,7 @@ import signal
 import sys
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,6 +45,36 @@ except (AttributeError, ValueError):
 BUFFER_FILE = Path.home() / ".veriswarm" / "activity.jsonl"
 FLUSH_THRESHOLD = 50
 MAX_BUFFER_SIZE = 500
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock; best effort
+    fcntl = None  # type: ignore[assignment]
+
+
+def _lock_path() -> Path:
+    # Keep in sync with LOCKFILE in activity_logger.sh.
+    return BUFFER_FILE.with_name(f"{BUFFER_FILE.name}.lock")
+
+
+@contextmanager
+def _buffer_lock():
+    """Hold an exclusive flock(2) on the buffer's lock file.
+
+    Every read-modify-write of the buffer (append, evict, drain, requeue)
+    runs under this lock, and activity_logger.sh takes the same lock for
+    its appends, so no event appended concurrently can be lost.
+    """
+    BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    with open(_lock_path(), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 _CONFIG_KEYS = ("VERISWARM_API_URL", "VERISWARM_API_KEY", "GUARD_AGENT_ID", "VERISWARM_AGENT_KEY")
@@ -188,19 +219,19 @@ def buffer_event(event_type: str, metadata: dict | None = None, session_id: str 
     }
     line = json.dumps(entry, separators=(",", ":"))
 
-    count = _line_count(BUFFER_FILE)
-    if count >= MAX_BUFFER_SIZE:
+    with _buffer_lock():
+        count = _line_count(BUFFER_FILE)
+        if count < MAX_BUFFER_SIZE:
+            with open(BUFFER_FILE, "a") as f:
+                f.write(line + "\n")
+            return count + 1
         lines = _read_lines(BUFFER_FILE)
         keep = lines[len(lines) - (MAX_BUFFER_SIZE - 1):] if MAX_BUFFER_SIZE > 1 else []
         evicted = len(lines) - len(keep)
         _rewrite_buffer(keep + [line])
-        _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
-        return len(keep) + 1
 
-    with open(BUFFER_FILE, "a") as f:
-        f.write(line + "\n")
-
-    return count + 1
+    _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
+    return len(keep) + 1
 
 
 def _read_and_clear_buffer() -> list[dict]:
@@ -213,7 +244,10 @@ def _read_and_clear_buffer() -> list[dict]:
     )
     events = []
     try:
-        BUFFER_FILE.replace(drained_file)
+        # Under the lock no writer is mid-append, so every line written to
+        # the old inode is already on disk when we read it below.
+        with _buffer_lock():
+            BUFFER_FILE.replace(drained_file)
     except FileNotFoundError:
         return []
     except OSError:
@@ -275,11 +309,11 @@ def _requeue_events(events: list[dict]) -> None:
     if not events:
         return
     try:
-        BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        current = _read_lines(BUFFER_FILE)
-        lines = [json.dumps(e, separators=(",", ":")) for e in events] + current
-        evicted = max(0, len(lines) - MAX_BUFFER_SIZE)
-        _rewrite_buffer(lines[evicted:])
+        with _buffer_lock():
+            current = _read_lines(BUFFER_FILE)
+            lines = [json.dumps(e, separators=(",", ":")) for e in events] + current
+            evicted = max(0, len(lines) - MAX_BUFFER_SIZE)
+            _rewrite_buffer(lines[evicted:])
     except OSError:
         return
     if evicted:

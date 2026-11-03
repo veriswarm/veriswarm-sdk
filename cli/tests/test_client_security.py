@@ -36,6 +36,22 @@ class ApiUrlValidationTests(unittest.TestCase):
 
         self.assertIn("must be an absolute URL", str(caught.exception))
 
+    def test_rejects_userinfo_that_redirects_auth_headers(self):
+        for url in (
+            "https://api.veriswarm.ai@attacker.example",
+            "https://user:pass@api.veriswarm.ai",
+            "http://localhost@attacker.example",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(SystemExit) as caught:
+                    validate_api_url(url)
+                self.assertIn("must not contain credentials", str(caught.exception))
+
+    def test_rejects_url_without_host(self):
+        with self.assertRaises(SystemExit) as caught:
+            validate_api_url("https://:443/v1")
+        self.assertIn("must include a host", str(caught.exception))
+
     def test_get_config_validates_environment_url_before_request(self):
         with patch.dict(
             os.environ,
