@@ -66,6 +66,27 @@ export function redactPiiPatterns(text: string): LocalRedaction {
   return { text: out, entities };
 }
 
+// Define an own enumerable property. Plain assignment would turn an own
+// "__proto__" key (e.g. from JSON.parse) into a prototype change.
+export function defineOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+// Rebuild a record from [originalKey, nextKey, value] entries. Unchanged keys
+// are placed first; a rewritten key that collides with an existing one gets
+// a "#n" suffix instead of overwriting it, so no entry is lost.
+export function rebuildRecord(entries: [string, string, unknown][]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, nextKey, value] of entries) if (key === nextKey) defineOwn(out, key, value);
+  for (const [key, nextKey, value] of entries) {
+    if (key === nextKey) continue;
+    let candidate = nextKey;
+    for (let n = 2; Object.prototype.hasOwnProperty.call(out, candidate); n++) candidate = `${nextKey}#${n}`;
+    defineOwn(out, candidate, value);
+  }
+  return out;
+}
+
 // Synchronous counterpart of the async walker in index.ts: rebuilds `value`
 // with every string leaf (and, when `keys` is set, every object key) passed
 // through `fn`. Only the current path is tracked for cycle detection, so a
@@ -95,14 +116,14 @@ export function mapStringLeavesSync(
       return changed ? { value: next, changed } : { value, changed };
     }
     let changed = false;
-    const next: Record<string, unknown> = {};
+    const entries: [string, string, unknown][] = [];
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
       const nextKey = options.keys ? fn(key) : key;
       const mapped = mapStringLeavesSync(child, fn, options, ancestors);
       changed ||= mapped.changed || nextKey !== key;
-      next[nextKey] = mapped.value;
+      entries.push([key, nextKey, mapped.value]);
     }
-    return changed ? { value: next, changed } : { value, changed };
+    return changed ? { value: rebuildRecord(entries), changed } : { value, changed };
   } finally {
     ancestors.delete(value);
   }

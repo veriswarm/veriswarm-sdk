@@ -52,3 +52,22 @@ describe("mapStringLeavesSync", () => {
     expect(out.value).toBe(cyclic);
   });
 });
+
+describe("mapStringLeavesSync — key safety", () => {
+  it("keeps an own __proto__ key as data, not a prototype", () => {
+    const input = JSON.parse('{"__proto__":{"x":"a"},"b":"a"}');
+    const out = mapStringLeavesSync(input, (s) => s.toUpperCase()).value as any;
+
+    expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({ x: "A" });
+    expect(out.b).toBe("A");
+  });
+
+  it("suffixes a rewritten key that collides instead of overwriting", () => {
+    const redact = (s: string) => (s.startsWith("secret") ? "[R]" : s);
+    const out = mapStringLeavesSync({ secretA: 1, "[R]": 2, secretB: 3 }, redact, { keys: true }).value;
+
+    expect(out).toEqual({ "[R]": 2, "[R]#2": 1, "[R]#3": 3 });
+  });
+});

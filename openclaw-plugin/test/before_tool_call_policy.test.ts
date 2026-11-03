@@ -214,6 +214,13 @@ describe("tool name normalization", () => {
     expect(await callTool(hooks, "read")).toBeUndefined();
   });
 
+  it("maps the Codex-native exec_command entry to the host's exec", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, blockedTools: ["exec_command"] });
+
+    expect((await callTool(hooks, "exec")).block).toBe(true);
+  });
+
   it("normalizes allowlist entries too", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, allowedTools: ["Bash"] });
@@ -292,4 +299,112 @@ describe("plugin state across re-register", () => {
 
     expect((await guardStatus(tools)).active_pii_sessions).toBe(MAX_PII_SESSIONS);
   }, 30_000);
+});
+
+describe("PII params rewrite — key safety", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("preserves an own __proto__ key in the rewritten params", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+      const text = JSON.parse(String(init?.body)).text as string;
+      return json({ tokenized_text: text.replace("alice@example.com", "[VS:EMAIL:1]"), session_id: "p", tokens_created: text.includes("@") ? 1 : 0 });
+    });
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+
+    const res = await callTool(hooks, "send", JSON.parse('{"__proto__":{"to":"alice@example.com"},"body":"hello"}'));
+
+    expect(Object.getPrototypeOf(res.params)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(res.params, "__proto__")?.value).toEqual({ to: "[VS:EMAIL:1]" });
+    expect(Object.keys(res.params)).toEqual(["__proto__", "body"]);
+  });
+});
+
+describe("unexpected handler errors", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const throwingParams = () => {
+    const params: Record<string, unknown> = {};
+    Object.defineProperty(params, "boom", { enumerable: true, get: () => { throw new Error("bad getter"); } });
+    return params;
+  };
+  const throwingMessageEvent = () => {
+    const event: Record<string, unknown> = { to: "u" };
+    Object.defineProperty(event, "content", { get: () => { throw new Error("bad getter"); } });
+    return event;
+  };
+
+  it("before_tool_call fails closed with a block", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+
+    expect(await callTool(hooks, "send", throwingParams())).toEqual({
+      block: true,
+      blockReason: "[VeriSwarm Guard] Tool call blocked: Guard could not check this call.",
+    });
+  });
+
+  it("message_sending fails closed with a cancel", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    expect(await hooks["message_sending"](throwingMessageEvent(), { channelId: "c" })).toEqual({
+      cancel: true,
+      cancelReason: "Message held by VeriSwarm Guard: Guard could not check this message.",
+    });
+  });
+
+  it("tool_result_persist fails closed by withholding the result", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true });
+    const message: Record<string, unknown> = { role: "toolResult", toolCallId: "c1", toolName: "t" };
+    Object.defineProperty(message, "content", { get: () => { throw new Error("bad getter"); } });
+
+    const out = hooks["tool_result_persist"]({ toolName: "t", toolCallId: "c1", message }, {});
+
+    expect(out.message.content).toEqual([
+      { type: "text", text: "[VeriSwarm Guard: tool result withheld — Guard could not check it.]" },
+    ]);
+    expect(out.message.toolCallId).toBe("c1");
+  });
+
+  it("passes through on unexpected errors when failOpen is set", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, piiEnabled: true, failOpen: true });
+
+    expect(await callTool(hooks, "send", throwingParams())).toBeUndefined();
+    expect(await hooks["message_sending"](throwingMessageEvent(), { channelId: "c" })).toBeUndefined();
+  });
+
+  it("observation hooks swallow and log", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+    const ctx: Record<string, unknown> = {};
+    Object.defineProperty(ctx, "channelId", { get: () => { throw new Error("bad ctx"); } });
+
+    expect(hooks["message_received"]({ content: "hi" }, ctx)).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("message_received handler failed"));
+  });
+});
+
+describe("unconfigured plugin", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("passes through and warns once when the client is gone", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const first = makeApi();
+    pluginEntry.register(first.api as any, { ...BASE_CONFIG, blockedTools: ["exec"] });
+    pluginEntry.register(makeApi().api as any, {}); // re-registered without an apiKey
+    warn.mockClear();
+
+    expect(await callTool(first.hooks, "exec")).toBeUndefined();
+    expect(await callTool(first.hooks, "exec")).toBeUndefined();
+    expect(warn.mock.calls.filter(([m]) => String(m).includes("Not configured"))).toHaveLength(1);
+  });
 });

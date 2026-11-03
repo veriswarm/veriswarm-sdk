@@ -5,7 +5,7 @@
  *
  * GUARD (automatic, transparent — OpenClaw plugin hooks):
  *   - before_tool_call: policy enforcement (allowlist/blocklist), secret
- *     tripwire, PII tokenization of tool-call params
+ *     tripwire (blocks the call), PII tokenization of tool-call params
  *   - tool_result_persist: local secret + structured-PII redaction and a
  *     prompt-injection banner on tool results
  *   - message_received: links channel conversations to their session
@@ -45,7 +45,7 @@
 
 import { VeriSwarmClient, type TokenizeResult } from "./client.js";
 import { SecretTripwire, ensureTripwire, loadVendoredManifest } from "./secret_tripwire.js";
-import { mapStringLeavesSync, redactPiiPatterns } from "./local_redaction.js";
+import { mapStringLeavesSync, rebuildRecord, redactPiiPatterns } from "./local_redaction.js";
 import { createHash } from "node:crypto";
 
 // ── Injection Patterns (BASIC HEURISTIC ONLY) ──────────────────────────
@@ -102,10 +102,12 @@ const NO_CONVERSATION = "default";
 
 // Tool names are compared the way the host normalizes them before running
 // before_tool_call (trim, lowercase, aliases), so `blockedTools: ["Bash"]`
-// matches the host's `exec`.
+// matches the host's `exec`. `exec_command` is the Codex-native name the
+// host's native hook relay maps to `exec`.
 const TOOL_NAME_ALIASES: Record<string, string> = {
   bash: "exec",
   "apply-patch": "apply_patch",
+  exec_command: "exec",
 };
 
 export function normalizeToolName(name: string): string {
@@ -171,13 +173,12 @@ function setBounded<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
   map.set(key, value);
 }
 
-// Rebuild `value` with every string leaf (and, with `keys`, every object key)
-// passed through `fn`. Only the current path is tracked for cycle detection,
-// so a value referenced twice is still visited twice. Never mutates input.
+// Rebuild `value` with every string leaf passed through `fn`. Only the
+// current path is tracked for cycle detection, so a value referenced twice
+// is still visited twice. Keys are kept as-is. Never mutates input.
 async function mapStringLeaves(
   value: unknown,
   fn: (text: string) => Promise<string>,
-  options: { keys?: boolean } = {},
   ancestors = new Set<object>()
 ): Promise<{ value: unknown; changed: boolean }> {
   if (typeof value === "string") {
@@ -193,7 +194,7 @@ async function mapStringLeaves(
       const next = [...value];
       let changed = false;
       for (let i = 0; i < value.length; i++) {
-        const child = await mapStringLeaves(value[i], fn, options, ancestors);
+        const child = await mapStringLeaves(value[i], fn, ancestors);
         if (child.changed) {
           next[i] = child.value;
           changed = true;
@@ -201,15 +202,14 @@ async function mapStringLeaves(
       }
       return changed ? { value: next, changed } : { value, changed };
     }
-    const next: Record<string, unknown> = {};
+    const entries: [string, string, unknown][] = [];
     let changed = false;
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      const nextKey = options.keys ? await fn(key) : key;
-      const mapped = await mapStringLeaves(child, fn, options, ancestors);
-      changed ||= mapped.changed || nextKey !== key;
-      next[nextKey] = mapped.value;
+      const mapped = await mapStringLeaves(child, fn, ancestors);
+      changed ||= mapped.changed;
+      entries.push([key, key, mapped.value]);
     }
-    return changed ? { value: next, changed } : { value, changed };
+    return changed ? { value: rebuildRecord(entries), changed } : { value, changed };
   } finally {
     ancestors.delete(value);
   }
@@ -256,57 +256,19 @@ function assertTokenizeResult(result: TokenizeResult): TokenizeResult {
   return result;
 }
 
-type SecretGuardMode = "online" | "offline";
-
-interface SecretGuardOutcome {
-  value: unknown;
-  changed: boolean;
-  rules: Set<string>;
-  modes: Set<SecretGuardMode>;
-}
-
-// `piiKey` is null when the call has no conversation identity; PII sessions
-// are then not recorded (they could never be rehydrated safely).
-async function guardSecretInput(
-  input: unknown,
-  state: PluginState,
-  toolName: string,
-  piiKey: string | null
-): Promise<SecretGuardOutcome> {
+// Names of the secret rules that match anywhere in `value` — string values
+// and object keys, at any depth. Local and synchronous (no API call).
+function findSecretRules(value: unknown, tripwire: SecretTripwire): Set<string> {
   const rules = new Set<string>();
-  const modes = new Set<SecretGuardMode>();
-  const client = state.client;
-  const tripwire = state.tripwire;
-  if (!client || !tripwire) return { value: input, changed: false, rules, modes };
-
-  const guardText = async (text: string) => {
-    const hits = tripwire.scan(text);
-    if (hits.length === 0) return text;
-    for (const hit of hits) rules.add(hit.ruleName);
-    try {
-      const result = assertTokenizeResult(
-        await client.tokenizePii(text, piiKey ? state.piiSessions.get(piiKey) : undefined)
-      );
-      let guarded = result.tokens_created > 0 ? result.tokenized_text || text : text;
-      if (piiKey && result.tokens_created > 0 && result.session_id) {
-        setBounded(state.piiSessions, piiKey, result.session_id, MAX_PII_SESSIONS);
-      }
-      // The PII tokenizer is not a secret detector; fail closed if a
-      // provider-prefix span remains, or if tokenized_text was omitted.
-      if (tripwire.scan(guarded).length > 0) guarded = tripwire.redactOffline(guarded);
-      modes.add("online");
-      return guarded;
-    } catch (e) {
-      console.warn(
-        `[VeriSwarm] Secret tripwire: API unreachable for tool=${toolName}; ` +
-          `applying offline redaction. Error: ${(e as Error)?.message ?? e}`
-      );
-      modes.add("offline");
-      return tripwire.redactOffline(text);
-    }
-  };
-  const mapped = await mapStringLeaves(input, guardText, { keys: true });
-  return { value: mapped.value, changed: mapped.changed, rules, modes };
+  mapStringLeavesSync(
+    value,
+    (text) => {
+      for (const hit of tripwire.scan(text)) rules.add(hit.ruleName);
+      return text;
+    },
+    { keys: true }
+  );
+  return rules;
 }
 
 // Tokenize PII in every string leaf of the tool params. On an API error or
@@ -431,9 +393,11 @@ const MIN_PII_TEXT_LENGTH = 4;
 
 // The host runs hooks in descending priority and, for before_tool_call and
 // message_sending, merges `params` / `content` last-defined-wins while every
-// handler sees the ORIGINAL event. Running last means VeriSwarm's rewrite is
-// the one applied: a later plugin cannot undo a redaction. (A plugin that
-// adds sensitive values in its own rewrite is not seen by VeriSwarm.)
+// handler sees the ORIGINAL event. Running last means that, when VeriSwarm
+// rewrites, its rewrite (built from the original event) replaces other
+// plugins' changes. It does not survive another plugin's approval request on
+// the same tool call, so secrets are blocked rather than rewritten; blocks
+// and cancels are sticky in the host and always hold.
 const GUARD_HOOK_PRIORITY = Number.MIN_SAFE_INTEGER;
 
 function initialState(): PluginState {
@@ -503,6 +467,117 @@ const NOT_CONFIGURED = "VeriSwarm not configured";
 
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
+}
+
+function secretBlockReason(rules: Set<string>): string {
+  return (
+    `[VeriSwarm Guard] Tool call blocked: its parameters contain a credential ` +
+    `(${Array.from(rules).join(", ")}). Remove it and retry.`
+  );
+}
+
+const KEY_REWRITE_BLOCK_REASON =
+  "[VeriSwarm Guard] Tool call blocked: a parameter name needed redaction.";
+const HOOK_ERROR_TOOL_REASON =
+  "[VeriSwarm Guard] Tool call blocked: Guard could not check this call.";
+const HOOK_ERROR_MESSAGE_REASON =
+  "Message held by VeriSwarm Guard: Guard could not check this message.";
+const WITHHELD_TOOL_RESULT =
+  "[VeriSwarm Guard: tool result withheld — Guard could not check it.]";
+
+function topLevelKeysChanged(before: Record<string, unknown>, after: Record<string, unknown>): boolean {
+  const a = Object.keys(before);
+  const b = new Set(Object.keys(after));
+  return a.length !== b.size || a.some((key) => !b.has(key));
+}
+
+// Unconfigured (no client) means pass-through, like the plugin not being
+// installed; say so once instead of on every hook call.
+let unconfiguredWarned = false;
+
+function warnUnconfiguredOnce(): undefined {
+  if (!unconfiguredWarned) {
+    unconfiguredWarned = true;
+    console.warn(
+      "[VeriSwarm] Not configured (no apiKey); Guard hooks pass traffic through unchecked."
+    );
+  }
+  return undefined;
+}
+
+// The host's default for most hooks is fail-open: an error thrown by a
+// handler is logged and the call or message proceeds. These wrappers turn an
+// unexpected error into the hook's fail-closed result (unless failOpen).
+// Observation hooks pass `undefined` and only log.
+function hookFailure<R>(hookName: string, error: unknown, closed: R | undefined): R | undefined {
+  const message = (error as Error)?.message ?? String(error);
+  if (state.failOpen || closed === undefined) {
+    console.warn(
+      `[VeriSwarm] ${hookName} handler failed; continuing` +
+        `${closed === undefined ? "" : " (failOpen)"}. Error: ${message}`
+    );
+    return undefined;
+  }
+  console.warn(`[VeriSwarm] ${hookName} handler failed; failing closed. Error: ${message}`);
+  void logEvent("guard.error", { hook: hookName }).catch(() => {});
+  return closed;
+}
+
+function guardAsyncHook<R>(
+  hookName: string,
+  handler: (event: any, ctx: any) => Promise<R | undefined>,
+  closed: R | undefined
+): (event: any, ctx: any) => Promise<R | undefined> {
+  return async (event, ctx) => {
+    try {
+      return await handler(event, ctx);
+    } catch (e) {
+      return hookFailure(hookName, e, closed);
+    }
+  };
+}
+
+function guardSyncHook<R>(
+  hookName: string,
+  handler: (event: any, ctx: any) => R | undefined,
+  closed: (event: any) => R | undefined
+): (event: any, ctx: any) => R | undefined {
+  return (event, ctx) => {
+    try {
+      return handler(event, ctx);
+    } catch (e) {
+      return hookFailure(hookName, e, safeClosed(closed, event));
+    }
+  };
+}
+
+function safeClosed<R>(closed: (event: any) => R | undefined, event: any): R | undefined {
+  try {
+    return closed(event);
+  } catch {
+    return closed(undefined);
+  }
+}
+
+// Fail-closed replacement for a tool result that could not be checked.
+function withheldToolResult(event: any) {
+  const read = (key: string) => {
+    try {
+      return event?.message?.[key] ?? event?.[key];
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    message: {
+      role: "toolResult",
+      toolCallId: read("toolCallId"),
+      toolName: read("toolName"),
+      content: [{ type: "text", text: WITHHELD_TOOL_RESULT }],
+      isError: true,
+      timestamp: Date.now(),
+    },
+  };
 }
 
 // NOTE: Module-level state is shared within a single OpenClaw gateway process.
@@ -601,9 +676,9 @@ export const pluginEntry: PluginEntry = {
       secretsDetection: {
         type: "boolean",
         description:
-          "Scan outbound tool-call args for provider-prefix secrets. " +
-          "On a hit, tokenize via the API when online, or redact locally " +
-          "(fail-closed) when offline. Default off.",
+          "Scan tool-call params (values and keys) for provider-prefix secrets " +
+          "and block the call on a hit; also redact secrets in tool results. " +
+          "Local rules, no API call needed. Default off.",
         default: false,
       },
       sessionScan: {
@@ -652,6 +727,7 @@ export const pluginEntry: PluginEntry = {
       state.sessionBindings = previous.sessionBindings;
     }
     stateFingerprint = fingerprint;
+    unconfiguredWarned = false;
 
     console.log(`[VeriSwarm] Plugin config: apiKey=${cfg.apiKey ? "set" : "missing"}, agentId=${cfg.agentId || "auto"}`);
 
@@ -716,59 +792,58 @@ export const pluginEntry: PluginEntry = {
     // Hook: before_tool_call — policy check, secret tripwire, PII tokenize params.
     // Host event: { toolName, params, toolCallId?, runId? }; ctx carries
     // sessionKey/sessionId. Host result: { block, blockReason } or { params }.
+    //
+    // Guarantees: a block is always honored (the host treats block as
+    // sticky and terminal). A params rewrite is NOT guaranteed: when another
+    // plugin requests approval for the same call, the host runs the tool with
+    // the approver's params over the ORIGINAL params and drops this rewrite.
+    // So anything that must never reach the tool (secrets) is blocked, and
+    // only PII is tokenized by rewrite.
     api.on(
       "before_tool_call",
-      async (event: any, ctx: any) => {
-        if (!state.client) return;
-        const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName);
+      guardAsyncHook(
+        "before_tool_call",
+        async (event: any, ctx: any) => {
+          if (!state.client) return warnUnconfiguredOnce();
+          const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName);
 
-        if (state.policyEnabled) {
-          const verdict = policyBlock(toolName);
-          if (verdict) {
-            // Fire-and-forget: the block must not wait on (or fail with) audit I/O.
-            void logEvent("tool.blocked", {
-              tool_name: toolName ?? null,
-              reason: verdict.reason,
-            }).catch(() => {});
-            return { block: true, blockReason: verdict.message };
-          }
-        }
-
-        const params = event?.params;
-        if (!isRecord(params)) return;
-        // An unnamed call still gets its params scanned rather than skipping
-        // the secret tripwire.
-        const scanName = toolName ?? "_unidentified";
-        const conversationId = resolveConversationId(ctx, event);
-        const key = conversationId ? piiSessionKey(scanName, conversationId) : null;
-        let nextParams: unknown = params;
-        let changed = false;
-
-        // Secret tripwire — runs ahead of PII tokenization. Catches obvious
-        // provider-prefix secrets (API keys, tokens) in values and keys. On a
-        // hit we escalate to authoritative tokenization when online, and fail
-        // closed to local non-recoverable redaction when offline or when the
-        // API leaves any known-prefix span intact.
-        if (state.secretsDetection && state.tripwire) {
-          const guarded = await guardSecretInput(nextParams, state, scanName, key);
-          if (guarded.changed) {
-            void logEvent("secret.tripwire", {
-              tool_name: toolName ?? null,
-              rules: Array.from(guarded.rules),
-              mode: guarded.modes.has("offline") ? "offline" : "online",
-            }).catch(() => {});
-            nextParams = guarded.value;
-            changed = true;
-          }
-        }
-
-        if (state.piiEnabled) {
-          try {
-            const tokenized = await tokenizeParamsPii(nextParams, state, scanName, key);
-            if (tokenized.changed) {
-              nextParams = tokenized.value;
-              changed = true;
+          if (state.policyEnabled) {
+            const verdict = policyBlock(toolName);
+            if (verdict) {
+              // Fire-and-forget: the block must not wait on (or fail with) audit I/O.
+              void logEvent("tool.blocked", {
+                tool_name: toolName ?? null,
+                reason: verdict.reason,
+              }).catch(() => {});
+              return { block: true, blockReason: verdict.message };
             }
+          }
+
+          const params = event?.params;
+          if (!isRecord(params)) return;
+
+          // Secret tripwire: provider-prefix secrets anywhere in the params
+          // (values or keys, any depth) block the call. An unnamed call is
+          // scanned too.
+          if (state.secretsDetection && state.tripwire) {
+            const rules = findSecretRules(params, state.tripwire);
+            if (rules.size > 0) {
+              void logEvent("secret.tripwire", {
+                tool_name: toolName ?? null,
+                rules: Array.from(rules),
+                mode: "blocked",
+              }).catch(() => {});
+              return { block: true, blockReason: secretBlockReason(rules) };
+            }
+          }
+
+          if (!state.piiEnabled) return;
+          const scanName = toolName ?? "_unidentified";
+          const conversationId = resolveConversationId(ctx, event);
+          const key = conversationId ? piiSessionKey(scanName, conversationId) : null;
+          let tokenized: { value: unknown; changed: boolean };
+          try {
+            tokenized = await tokenizeParamsPii(params, state, scanName, key);
           } catch (e) {
             if (!(e instanceof GuardUnavailableError)) throw e;
             console.warn(
@@ -781,24 +856,39 @@ export const pluginEntry: PluginEntry = {
             }).catch(() => {});
             return { block: true, blockReason: PII_UNAVAILABLE_TOOL_REASON };
           }
-        }
-
-        return changed ? { params: nextParams as Record<string, unknown> } : undefined;
-      },
+          if (!tokenized.changed) return;
+          const nextParams = tokenized.value as Record<string, unknown>;
+          // The host shallow-merges {...original, ...rewrite}: a renamed
+          // top-level key would leave the original key in place.
+          if (topLevelKeysChanged(params, nextParams)) {
+            return { block: true, blockReason: KEY_REWRITE_BLOCK_REASON };
+          }
+          return { params: nextParams };
+        },
+        { block: true, blockReason: HOOK_ERROR_TOOL_REASON }
+      ),
       { priority: GUARD_HOOK_PRIORITY }
     );
 
     // Hook: after_tool_call — audit only. The host runs this fire-and-forget
     // and ignores its return value, so it cannot change what the model sees.
-    api.on("after_tool_call", async (event: any, ctx: any) => {
-      if (!state.client || !state.auditEnabled) return;
-      const output = serializeToolOutput(event?.result);
-      await logEvent("tool.call.success", {
-        tool_name: firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null,
-        output_length: output.length,
-        is_error: Boolean(event?.error),
-      });
-    });
+    api.on(
+      "after_tool_call",
+      guardAsyncHook(
+        "after_tool_call",
+        async (event: any, ctx: any) => {
+          if (!state.client) return warnUnconfiguredOnce();
+          if (!state.auditEnabled) return;
+          const output = serializeToolOutput(event?.result);
+          await logEvent("tool.call.success", {
+            tool_name: firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null,
+            output_length: output.length,
+            is_error: Boolean(event?.error),
+          });
+        },
+        undefined
+      )
+    );
 
     // Hook: tool_result_persist — the host's result-rewriting hook. It is
     // SYNCHRONOUS (a returned Promise is ignored by the host), so only local
@@ -807,8 +897,8 @@ export const pluginEntry: PluginEntry = {
     // API-based NER tokenization applies to tool inputs and outbound messages.
     api.on(
       "tool_result_persist",
-      (event: any, ctx: any) => {
-        if (!state.client) return;
+      guardSyncHook("tool_result_persist", (event: any, ctx: any) => {
+        if (!state.client) return warnUnconfiguredOnce();
         const original = event?.message;
         if (!isRecord(original)) return;
         const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null;
@@ -843,20 +933,28 @@ export const pluginEntry: PluginEntry = {
         }
 
         return message === original ? undefined : { message };
-      },
+      }, withheldToolResult),
       { priority: GUARD_HOOK_PRIORITY }
     );
 
     // Hook: message_received — observation only. Learns which sessionKey a
     // channel conversation belongs to, so outbound delivery (whose ctx has
     // only channelId + conversationId) resolves to the same conversation.
-    api.on("message_received", (event: any, ctx: any) => {
-      const target = deliveryTargetKey(ctx?.channelId, ctx?.conversationId);
-      const sessionKey = firstNonEmptyString(ctx?.sessionKey, event?.sessionKey);
-      if (target && sessionKey) {
-        setBounded(state.sessionBindings, target, sessionKey, MAX_SESSION_BINDINGS);
-      }
-    });
+    api.on(
+      "message_received",
+      guardSyncHook(
+        "message_received",
+        (event: any, ctx: any) => {
+          const target = deliveryTargetKey(ctx?.channelId, ctx?.conversationId);
+          const sessionKey = firstNonEmptyString(ctx?.sessionKey, event?.sessionKey);
+          if (target && sessionKey) {
+            setBounded(state.sessionBindings, target, sessionKey, MAX_SESSION_BINDINGS);
+          }
+          return undefined;
+        },
+        () => undefined
+      )
+    );
 
     // Hook: message_sending — Session Sentry + PII tokenize outbound content.
     // Host event: { to, content, ... }; ctx carries channelId/conversationId
@@ -864,8 +962,8 @@ export const pluginEntry: PluginEntry = {
     // { cancel, cancelReason } to stop delivery (cancel is terminal).
     api.on(
       "message_sending",
-      async (event: any, ctx: any) => {
-        if (!state.client) return;
+      guardAsyncHook("message_sending", async (event: any, ctx: any) => {
+        if (!state.client) return warnUnconfiguredOnce();
         const content = typeof event?.content === "string" ? event.content : "";
         if (!content) return;
 
@@ -966,7 +1064,7 @@ export const pluginEntry: PluginEntry = {
         }
 
         return;
-      },
+      }, { cancel: true, cancelReason: HOOK_ERROR_MESSAGE_REASON }),
       { priority: GUARD_HOOK_PRIORITY }
     );
 

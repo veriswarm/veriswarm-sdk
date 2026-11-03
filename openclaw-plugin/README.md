@@ -51,15 +51,22 @@ export VERISWARM_API_KEY=vsk_your_key_here
 
 ### Hooks Registered (5)
 
-- `before_tool_call` — Policy check (blocklist/allowlist), secret tripwire, PII tokenize tool params
+- `before_tool_call` — Policy check (blocklist/allowlist), secret tripwire (blocks the call), PII tokenize tool params
 - `tool_result_persist` — Local redaction of tool results (secrets + structured PII) and injection-pattern banner
 - `after_tool_call` — Audit (observation only; the host ignores its result)
 - `message_received` — Observation only: links a channel conversation to its session (see Session identity)
 - `message_sending` — Session Sentry multi-turn scan (cancels delivery on block) + PII tokenize outbound messages
 
-`before_tool_call`, `tool_result_persist` and `message_sending` are registered at the lowest hook priority. OpenClaw runs higher priorities first and applies the last handler's `params`/`content`, so VeriSwarm's redaction is the one that takes effect — another plugin rewriting the original values cannot undo it. (Values another plugin *adds* in its own rewrite are not seen by VeriSwarm.)
+#### What is guaranteed alongside other plugins
 
-Tool names in `blockedTools` / `allowedTools` are matched the way OpenClaw normalizes them before hooks run: trimmed, lowercased, and aliased (`bash` → `exec`, `apply-patch` → `apply_patch`).
+`before_tool_call`, `tool_result_persist` and `message_sending` are registered at the lowest hook priority, so they run after other plugins' handlers.
+
+- **Blocks and cancels are guaranteed.** OpenClaw treats `block` / `cancel` as sticky and terminal, whatever other plugins return. Policy violations, secrets in tool params, and Guard failures all use them.
+- **Secrets in tool params block the call** rather than being redacted in place. A params rewrite is not guaranteed to reach the tool: when another plugin requests approval for the same call, OpenClaw runs the tool with the approver's params merged over the *original* params and drops VeriSwarm's rewrite.
+- **PII tokenization of params and messages is a best-effort rewrite.** It applies unless another plugin's approval request on the same call takes precedence. Each handler receives the *original* event, and VeriSwarm builds its rewrite from it, so when VeriSwarm rewrites params or content it replaces any changes other plugins made to them; values another plugin adds in its own rewrite are not seen by VeriSwarm. A rewrite that would rename a top-level parameter is blocked instead, because OpenClaw shallow-merges rewrites over the original params.
+- **`tool_result_persist` runs in sequence**, so VeriSwarm's redaction sees, and is applied after, other plugins' result rewrites.
+
+Tool names in `blockedTools` / `allowedTools` are matched the way OpenClaw normalizes them before hooks run: trimmed, lowercased, and aliased (`bash` → `exec`, `apply-patch` → `apply_patch`). Codex-native tool calls relayed through OpenClaw arrive as `exec` for Codex's `exec_command`; `exec`, `bash` and `exec_command` entries all match it.
 
 The plugin ships an `openclaw.plugin.json` manifest declaring its config schema and all 11 tools.
 
@@ -78,7 +85,11 @@ Full NER tokenization through the VeriSwarm API applies to tool-call parameters 
 
 ### Failure behavior
 
-PII tokenization and Session Sentry **fail closed** by default: if the VeriSwarm API errors, times out, or returns an unexpected response, the tool call is blocked or the message delivery is cancelled. Set `failOpen: true` to let traffic through unmodified instead (a `[VeriSwarm] … failed` warning is logged either way). The secret tripwire always falls back to local redaction, regardless of `failOpen`.
+PII tokenization and Session Sentry **fail closed** by default: if the VeriSwarm API errors, times out, or returns an unexpected response, the tool call is blocked or the message delivery is cancelled. The same applies to any unexpected error inside a VeriSwarm hook (OpenClaw's own default for most hooks is to log the error and continue): the tool call is blocked, the message held, or the tool result withheld. Set `failOpen: true` to let traffic through unmodified instead (a `[VeriSwarm] … failed` warning is logged either way). The secret tripwire is local and needs no API, so it applies regardless of `failOpen`.
+
+If an operator sets an OpenClaw hook timeout (`plugins.entries.veriswarm.hooks.timeoutMs` / `timeouts`) shorter than the plugin's 10-second API timeout, OpenClaw abandons the handler on timeout and, for `message_sending`, delivers the message. Leave those unset or above 10 s.
+
+**Unconfigured plugin:** without an `apiKey` the plugin is passive: hooks pass everything through as if the plugin were not installed, and a one-time `[VeriSwarm] Not configured` warning is logged.
 
 ## Configuration
 
@@ -100,7 +111,7 @@ PII tokenization and Session Sentry **fail closed** by default: if the VeriSwarm
           sessionScan: true,                    // Session Sentry multi-turn exfil detection (default: true)
           blockedTools: ["dangerous_tool"],      // Optional blocklist
           allowedTools: [],                     // Optional allowlist (empty = allow all)
-          secretsDetection: false,              // Secret tripwire on tool params + tool results (default: false)
+          secretsDetection: false,              // Block tool calls carrying secrets; redact secrets in results (default: false)
           failOpen: false,                      // Let traffic through if VeriSwarm is unreachable (default: false)
         }
       }

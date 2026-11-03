@@ -90,7 +90,7 @@
       },
       "secretsDetection": {
         "type": "boolean",
-        "description": "Scan outbound tool-call args for provider-prefix secrets. On a hit, tokenize via the API when online, or redact locally (fail-closed) when offline. Default off.",
+        "description": "Scan tool-call params (values and keys) for provider-prefix secrets and block the call on a hit; also redact secrets in tool results. Local rules, no API call needed. Default off.",
         "default": false
       },
       "sessionScan": {

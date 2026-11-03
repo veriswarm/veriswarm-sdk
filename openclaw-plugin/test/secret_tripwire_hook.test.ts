@@ -1,21 +1,29 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+/**
+ * before_tool_call secret tripwire.
+ *
+ * Hooks are driven with the host's real shapes: event { toolName, params },
+ * ctx { toolName, sessionKey }; results { block, blockReason } / { params }.
+ * A secret in params BLOCKS the call: a params rewrite is not guaranteed to
+ * reach the tool (another plugin's approval request makes the host use the
+ * original params), while a block always is.
+ */
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { pluginEntry } from "../src/index.js";
 
-// Captures the hooks the plugin registers so we can drive them with the
-// host's real before_tool_call shapes: event { toolName, params },
-// ctx { sessionKey, toolName }; result { params } or { block, blockReason }.
+type Hook = (e: any, ctx?: any) => Promise<any>;
+
 function makeApi() {
-  const hooks: Record<string, (e: any, ctx?: any) => Promise<any>> = {};
+  const hooks: Record<string, Hook> = {};
   const api = {
     registerTool: () => {},
-    on: (name: string, handler: (e: any, ctx?: any) => Promise<any>) => {
+    on: (name: string, handler: Hook) => {
       hooks[name] = handler;
     },
   };
   return { api, hooks };
 }
 
-function callTool(hooks: Record<string, (e: any, ctx?: any) => Promise<any>>, toolName: string, params: any) {
+function callTool(hooks: Record<string, Hook>, toolName: string | undefined, params: any) {
   return hooks["before_tool_call"]({ toolName, params }, { toolName, sessionKey: "session-1" });
 }
 
@@ -31,123 +39,86 @@ const BASE_CONFIG = {
   injectionScan: false,
 };
 
+function expectSecretBlock(res: any) {
+  expect(res.block).toBe(true);
+  expect(res.blockReason).toContain("contain a credential");
+  expect(res.blockReason).not.toContain(GH_PAT);
+  expect(res.params).toBeUndefined();
+}
+
 describe("before_tool_call secret tripwire", () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  afterEach(() => vi.restoreAllMocks());
 
-  beforeEach(() => {
-    // Simulate offline: every outbound request rejects.
-    fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockRejectedValue(new Error("offline"));
+  it("blocks a secret in a top-level value, without any API call", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+    fetchSpy.mockClear();
+
+    expectSecretBlock(await callTool(hooks, "http_post", { body: `token=${GH_PAT}` }));
+    const apiCalls = fetchSpy.mock.calls.filter(([url]) => !String(url).endsWith("/secret-rules"));
+    expect(apiCalls).toEqual([]);
   });
 
-  afterEach(() => {
-    fetchSpy.mockRestore();
-  });
-
-  it("fails closed with offline redaction when the API is unreachable", async () => {
+  it("blocks secrets nested in structured params", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const res = await callTool(hooks, "http_post", { body: `token=${GH_PAT}` });
-
-    expect(res.params.body).toContain("[VS:");
-    expect(res.params.body).toContain(":offline]");
-    expect(res.params.body).not.toContain(GH_PAT);
+    expectSecretBlock(
+      await callTool(hooks, "http_post", {
+        url: "https://example.test",
+        headers: { Authorization: `Bearer ${GH_PAT}` },
+        tags: ["x"],
+      })
+    );
+    expectSecretBlock(await callTool(hooks, "http_post", { tags: ["x", `t=${GH_PAT}`] }));
   });
 
-  it("fails closed for secrets nested in structured tool input", async () => {
+  it("blocks a secret used as a key, top-level or nested", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const params = {
-      url: "https://example.test",
-      headers: {
-        Authorization: `Bearer ${GH_PAT}`,
-      },
-      tags: ["x", `t=${GH_PAT}`],
-    };
-    const res = await callTool(hooks, "http_post", params);
-
-    expect(res.params.url).toBe("https://example.test");
-    expect(res.params.headers.Authorization).toContain("[VS:");
-    expect(res.params.headers.Authorization).toContain(":offline]");
-    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
-    // The host's params object is not mutated.
-    expect(params.headers.Authorization).toContain(GH_PAT);
+    expectSecretBlock(await callTool(hooks, "http_post", { [GH_PAT]: "x" }));
+    expectSecretBlock(await callTool(hooks, "http_post", { headers: { [GH_PAT]: "x" } }));
   });
 
-  it("passes clean input through untouched", async () => {
+  it("blocks a secret in an object referenced twice, and terminates on cycles", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+    const shared = { note: "fine" };
+    const cyclic: Record<string, unknown> = { a: shared, b: shared };
+    cyclic.self = cyclic;
+    (shared as any).token = GH_PAT;
+
+    expectSecretBlock(await callTool(hooks, "http_post", cyclic));
+  });
+
+  it("blocks a secret beside an own __proto__ key", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const res = await callTool(hooks, "http_post", { body: "just a normal message with no secrets" });
+    const params = JSON.parse(`{"__proto__":{"x":1},"a":"${GH_PAT}"}`);
+    expectSecretBlock(await callTool(hooks, "http_post", params));
+  });
 
-    expect(res).toBeUndefined();
+  it("scans a call the host did not name", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    expectSecretBlock(await hooks["before_tool_call"]({ params: { body: GH_PAT } }, {}));
+  });
+
+  it("passes clean params through untouched", async () => {
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    expect(await callTool(hooks, "http_post", { body: "no secrets here" })).toBeUndefined();
   });
 
   it("does nothing when secretsDetection is off", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, secretsDetection: false });
 
-    const res = await callTool(hooks, "http_post", { body: `token=${GH_PAT}` });
-
-    // Tripwire disabled and PII disabled → params untouched.
-    expect(res).toBeUndefined();
-  });
-});
-
-describe("before_tool_call secret tripwire — unnamed tool", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("still redacts when the host omits toolName and no policy list is set", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    const { api, hooks } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-
-    const res = await hooks["before_tool_call"]({ params: { body: `token=${GH_PAT}` } }, {});
-
-    expect(res.params.body).not.toContain(GH_PAT);
-  });
-});
-
-describe("before_tool_call secret tripwire — keys and shared references", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("redacts secrets used as object keys", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    const { api, hooks } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-
-    const res = await callTool(hooks, "http_post", { headers: { [GH_PAT]: "x" } });
-
-    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
-  });
-
-  it("redacts every occurrence of an object referenced twice", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    const { api, hooks } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-    const shared = { token: GH_PAT };
-
-    const res = await callTool(hooks, "http_post", { first: shared, second: shared });
-
-    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
-  });
-
-  it("terminates on cyclic params", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
-    const { api, hooks } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-    const cyclic: Record<string, unknown> = { token: GH_PAT };
-    cyclic.self = cyclic;
-
-    const res = await callTool(hooks, "http_post", cyclic);
-
-    expect(res.params.token).not.toContain(GH_PAT);
+    expect(await callTool(hooks, "http_post", { body: `token=${GH_PAT}` })).toBeUndefined();
   });
 });
