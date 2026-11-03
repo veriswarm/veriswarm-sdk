@@ -152,8 +152,7 @@ class VeriSwarmClaudeGuard(GuardMixin):
         if is_async:
             @functools.wraps(fn)
             async def guarded_async(*args, **kwargs):
-                input_str = _serialize_args(args, kwargs)
-                filtered_input, ctx = await run_blocking(guard.guard_before_tool, name, input_str)
+                args, kwargs, ctx = await run_blocking(guard.guard_before_call, name, args, kwargs)
                 guard._last_ctx = ctx
 
                 if ctx.blocked:
@@ -172,8 +171,7 @@ class VeriSwarmClaudeGuard(GuardMixin):
         else:
             @functools.wraps(fn)
             def guarded_sync(*args, **kwargs):
-                input_str = _serialize_args(args, kwargs)
-                filtered_input, ctx = guard.guard_before_tool(name, input_str)
+                args, kwargs, ctx = guard.guard_before_call(name, args, kwargs)
                 guard._last_ctx = ctx
 
                 if ctx.blocked:
@@ -198,9 +196,3 @@ class VeriSwarmClaudeGuard(GuardMixin):
 def _is_async(fn: Callable) -> bool:
     import asyncio
     return asyncio.iscoroutinefunction(fn)
-
-
-def _serialize_args(args: tuple, kwargs: dict) -> str:
-    parts = [str(a) for a in args]
-    parts.extend(f"{k}={v}" for k, v in kwargs.items())
-    return " ".join(parts)

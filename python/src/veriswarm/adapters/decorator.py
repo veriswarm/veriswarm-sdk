@@ -18,7 +18,7 @@ Usage:
     async def search_records(query: str) -> str:
         return await db.search(query)
 
-    # PII is automatically stripped from inputs and outputs.
+    # PII in string arguments and string return values is tokenized.
     # Dangerous calls are blocked by policy. Everything is audited.
 
     # To rehydrate PII for writing:
@@ -80,7 +80,9 @@ def _get_guard() -> GuardMixin:
 def guard_protected(fn: Callable | None = None, *, name: str | None = None) -> Callable:
     """Decorator that wraps any function with Guard protection.
 
-    PII in arguments and return values is automatically tokenized.
+    PII in string arguments (positional or keyword) and string return values
+    is tokenized, and secrets are redacted; the function receives the
+    guarded values. Other argument types are passed through unchanged.
     Policy decisions are enforced. Tool calls are audited.
 
     Can be used with or without arguments:
@@ -98,12 +100,7 @@ def guard_protected(fn: Callable | None = None, *, name: str | None = None) -> C
             @functools.wraps(f)
             async def async_wrapper(*args, **kwargs):
                 guard = _get_guard()
-                input_str = _serialize_args(args, kwargs)
-                # NOTE: guard_before_tool checks policy and detects PII in input
-                # for audit logging. We cannot remap arbitrary *args/**kwargs with
-                # tokenized values, so input PII detection is for awareness/audit.
-                # Output PII tokenization (guard_after_tool) IS applied to the return value.
-                filtered_input, ctx = await run_blocking(guard.guard_before_tool, tool_name, input_str)
+                args, kwargs, ctx = await run_blocking(guard.guard_before_call, tool_name, args, kwargs)
 
                 if ctx.blocked:
                     return ctx.block_message
@@ -123,8 +120,7 @@ def guard_protected(fn: Callable | None = None, *, name: str | None = None) -> C
             @functools.wraps(f)
             def sync_wrapper(*args, **kwargs):
                 guard = _get_guard()
-                input_str = _serialize_args(args, kwargs)
-                filtered_input, ctx = guard.guard_before_tool(tool_name, input_str)
+                args, kwargs, ctx = guard.guard_before_call(tool_name, args, kwargs)
 
                 if ctx.blocked:
                     return ctx.block_message
@@ -160,9 +156,3 @@ def rehydrate(text: str, session_id: str | None = None) -> str:
 def _is_async(fn: Callable) -> bool:
     import asyncio
     return asyncio.iscoroutinefunction(fn)
-
-
-def _serialize_args(args: tuple, kwargs: dict) -> str:
-    parts = [str(a) for a in args]
-    parts.extend(f"{k}={v}" for k, v in kwargs.items())
-    return " ".join(parts)

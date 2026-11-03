@@ -186,6 +186,27 @@ class GuardMixin:
 
         return tool_input, ctx
 
+    def guard_before_call(
+        self, tool_name: str, args: tuple, kwargs: dict
+    ) -> tuple[tuple, dict, GuardContext]:
+        """Run guard_before_tool over a call's string arguments.
+
+        Returns ``(args, kwargs, ctx)`` with every ``str`` argument (positional
+        or keyword) replaced by its secret-redacted, PII-tokenized value, so
+        the wrapped function never receives the raw text. Other argument
+        types are passed through unchanged.
+        """
+        strings = {i: a for i, a in enumerate(args) if isinstance(a, str)}
+        strings.update({k: v for k, v in kwargs.items() if isinstance(v, str)})
+        filtered, ctx = self.guard_before_tool(tool_name, strings)
+        if ctx.blocked:
+            return args, kwargs, ctx
+        if not isinstance(filtered, dict) or filtered.keys() != strings.keys():
+            raise RuntimeError("Guard returned an unexpected argument mapping")
+        new_args = tuple(filtered[i] if i in filtered else a for i, a in enumerate(args))
+        new_kwargs = {k: filtered[k] if k in filtered else v for k, v in kwargs.items()}
+        return new_args, new_kwargs, ctx
+
     def guard_output(self, tool_name: str, tool_output: Any, ctx: GuardContext) -> Any:
         """Filter a tool output (secrets, PII, injection scan) without auditing."""
         if isinstance(tool_output, str):
