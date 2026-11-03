@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""VeriSwarm Guard Hook — PII scanning for MCP tool calls + session tracking.
+"""VeriSwarm Guard Hook — secret and PII protection for Claude Code.
 
-Handles three hook events:
-  - SessionStart:  Log session metadata, flush previous session's events
-  - PreToolUse:    Tokenize PII in MCP tool arguments (matcher: ^mcp__)
-  - PostToolUse:   Flag PII in MCP tool responses (matcher: ^mcp__)
+Handles four hook events:
+  - SessionStart:      Log session metadata, flush previous session's events
+  - UserPromptSubmit:  Block prompts carrying secrets (always) or PII
+                       (GUARD_BLOCK_PROMPT_PII, default on)
+  - PreToolUse:        Redact secrets / tokenize PII in MCP tool arguments
+                       (matcher: ^mcp__)
+  - PostToolUse:       Redact secrets / tokenize PII in MCP tool responses
+                       before Claude sees them (matcher: ^mcp__)
 
 Activity logging for ALL tools (including built-in Read/Grep/Edit/Bash)
 is handled by the companion activity_logger.sh shell script, which runs
@@ -14,13 +18,21 @@ Configuration via environment variables:
   VERISWARM_API_URL          — API base URL (default: https://api.veriswarm.ai)
   VERISWARM_API_KEY          — Platform API key (required for PII scanning)
   GUARD_AGENT_ID             — Agent ID for audit trail (optional)
-  GUARD_SECRETS_DETECTION    — "1" enables the fail-closed secret tripwire
+  GUARD_SECRETS_DETECTION    — "1" enables the fail-closed secret tripwire on
+                               MCP tool arguments and responses
+  GUARD_BLOCK_PROMPT_PII     — "0" stops blocking prompts that contain PII
+                               (default on). Secrets in prompts are always
+                               blocked.
   GUARD_PII_EXEMPT_PREFIXES  — comma-separated tool-name prefixes that skip
                                PII tokenization (default: none). The secret
                                tripwire still runs on exempt tools.
 
-Exit codes: 0 = proceed (stdout may carry a hookSpecificOutput JSON),
-2 = block the tool call (PreToolUse only; reason on stderr).
+Exit codes: 0 = proceed (stdout may carry decision JSON), 2 = block the
+tool call (PreToolUse only; reason on stderr).
+
+Every API call shares one wall-clock budget (HOOK_BUDGET_SECONDS) that ends
+well before the installed 10s hook timeout, because Claude Code discards
+the output of a hook that times out.
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -69,15 +82,28 @@ except ValueError as exc:
 API_KEY = os.environ.get("VERISWARM_API_KEY", "") if API_URL else ""
 AGENT_ID = os.environ.get("GUARD_AGENT_ID", "")
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on")
+
+
 # MCP tool prefix
 MCP_PREFIX = "mcp__"
 
 # Per-request ceiling for a single tokenize call.
 API_TIMEOUT = 3.0
 
-# Total time the hook may spend on API calls. Hook entries are installed with
-# `timeout: 10`; stay under it with headroom for process start-up.
+# Total wall-clock time the hook may spend waiting on the API. Hook entries
+# are installed with `timeout: 10`; stay under it with headroom for process
+# start-up and output.
 HOOK_BUDGET_SECONDS = 7.0
+
+# Below this much remaining budget, API calls are skipped: secrets go
+# straight to offline redaction, and scans that need the API fail closed.
+MIN_API_BUDGET = 0.25
 
 # Set by main(); None means "no overall deadline" (direct handler calls).
 _deadline: float | None = None
@@ -85,17 +111,14 @@ _deadline: float | None = None
 # Claude Code session id from the current hook payload (for audit events).
 _session_id = ""
 
-# Opt-in fail-closed secret tripwire. When enabled, obvious provider-prefix
-# secrets (ghp_, sk-, AKIA, …) that survive tokenization are locally redacted
-# rather than passed through. Default OFF — ships dormant.
-SECRETS_DETECTION = os.environ.get("GUARD_SECRETS_DETECTION", "").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+# Opt-in fail-closed secret tripwire for MCP tool arguments and responses.
+SECRETS_DETECTION = _env_flag("GUARD_SECRETS_DETECTION", False)
+
+# Prompts containing PII are blocked unless this is turned off.
+BLOCK_PROMPT_PII = _env_flag("GUARD_BLOCK_PROMPT_PII", True)
 
 # Opt-in PII exemption: tools whose names start with one of these prefixes
-# skip PII tokenization and the PostToolUse PII warning. Empty by default —
+# skip PII tokenization and PostToolUse PII handling. Empty by default —
 # no tool is exempt unless the operator lists it. The secret tripwire still
 # runs on exempt tools.
 PII_EXEMPT_PREFIXES = tuple(
@@ -114,6 +137,10 @@ class SecretBlocked(Exception):
     """A secret was detected that could not be safely redacted."""
 
 
+class ScanUnavailable(Exception):
+    """The PII scan could not complete (API error, bad response, or no time left)."""
+
+
 def _is_pii_exempt(tool_name: str) -> bool:
     return any(tool_name.startswith(p) for p in PII_EXEMPT_PREFIXES)
 
@@ -128,34 +155,78 @@ def _remaining_budget() -> float:
     return min(API_TIMEOUT, _deadline - time.monotonic())
 
 
-def _tokenize(text: str) -> dict | None:
-    """Call VeriSwarm Guard PII tokenize API.
+def _post_within(url: str, payload: dict, seconds: float) -> httpx.Response:
+    """POST with a hard wall-clock limit.
 
-    Returns the result only when it is well-formed and created tokens;
-    None on any failure, malformed response, or exhausted time budget.
+    httpx timeouts apply per phase (connect, each read, write), so a server
+    that trickles bytes can hold a request far longer than `timeout`. The
+    request runs in a daemon thread that is abandoned if it overruns.
     """
-    if not API_KEY or not text or len(text) < 4:
+    box: dict = {}
+
+    def run() -> None:
+        try:
+            box["response"] = httpx.post(url, json=payload, headers=_api_headers(), timeout=seconds)
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="veriswarm-guard-api", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise ScanUnavailable("API call exceeded the hook time budget")
+    if "error" in box:
+        raise box["error"]
+    return box["response"]
+
+
+def _tokenize_strict(text: str) -> dict | None:
+    """Tokenize PII in `text` via the Guard API.
+
+    Returns the result when PII was found, None when the text was scanned
+    and is clean (or too short to scan). Raises ScanUnavailable when the
+    scan could not be completed.
+    """
+    if not text or len(text) < 4:
         return None
-    timeout = _remaining_budget()
-    if timeout <= 0.05:
+    if not API_KEY:
+        raise ScanUnavailable("no API key configured")
+    seconds = _remaining_budget()
+    if seconds < MIN_API_BUDGET:
+        raise ScanUnavailable("hook time budget exhausted")
+    try:
+        response = _post_within(
+            API_URL + "/v1/suite/guard/pii/tokenize",
+            {"text": text, "agent_id": AGENT_ID or None},
+            seconds,
+        )
+        response.raise_for_status()
+        result = response.json()
+    except ScanUnavailable:
+        raise
+    except Exception as exc:
+        raise ScanUnavailable(type(exc).__name__) from exc
+    if not isinstance(result, dict):
+        raise ScanUnavailable("malformed response")
+    created = result.get("tokens_created", 0)
+    if not isinstance(created, int) or created < 0:
+        raise ScanUnavailable("malformed response")
+    if created == 0:
+        return None
+    if not isinstance(result.get("tokenized_text"), str):
+        raise ScanUnavailable("malformed response")
+    return result
+
+
+def _tokenize(text: str) -> dict | None:
+    """Best-effort tokenization: the result when PII was found, else None
+    (including on any failure). Used where PII handling fails open."""
+    if not API_KEY:
         return None
     try:
-        r = httpx.post(
-            API_URL + "/v1/suite/guard/pii/tokenize",
-            json={"text": text, "agent_id": AGENT_ID or None},
-            headers=_api_headers(),
-            timeout=timeout,
-        )
-        r.raise_for_status()
-        result = r.json()
+        return _tokenize_strict(text)
     except Exception:
         return None
-    if not isinstance(result, dict):
-        return None
-    created = result.get("tokens_created", 0)
-    if not isinstance(created, int) or created <= 0:
-        return None
-    return result
 
 
 def _manifest_types(result: dict) -> list[str]:
@@ -182,7 +253,7 @@ def _log_pii(result: dict, context: str) -> None:
         pass  # audit logging must never break the hook
 
 
-# -- Fail-closed secret tripwire (opt-in) ---------------------------------
+# -- Secret tripwire ------------------------------------------------------
 
 _TRIPWIRE = None
 
@@ -203,13 +274,10 @@ def _get_tripwire():
     return _TRIPWIRE or None
 
 
-def _contains_secret(text: str) -> bool:
-    """True when the tripwire is on and `text` carries a known secret.
-
-    Fails closed: with detection enabled but the tripwire unavailable,
-    any non-empty text counts as possibly carrying a secret.
-    """
-    if not SECRETS_DETECTION or not text:
+def _has_secret(text: str) -> bool:
+    """Tripwire scan regardless of GUARD_SECRETS_DETECTION. Fails closed:
+    an unavailable tripwire counts every non-empty text as a hit."""
+    if not text:
         return False
     tw = _get_tripwire()
     if tw is None:
@@ -217,13 +285,19 @@ def _contains_secret(text: str) -> bool:
     return bool(tw.scan(text))
 
 
+def _contains_secret(text: str) -> bool:
+    """True when the tool tripwire is on and `text` carries a known secret."""
+    return SECRETS_DETECTION and _has_secret(text)
+
+
 def apply_secret_tripwire(text: str) -> str:
     """Escalate obvious-secret strings to fail-closed redaction.
 
     No-op unless GUARD_SECRETS_DETECTION is enabled. On a known-prefix hit,
-    try authoritative tokenization first; if it doesn't clear the secret,
-    fall back to local non-recoverable redaction ([VS:<TYPE>:offline]).
-    Raises SecretBlocked when detection is on but the tripwire is unavailable.
+    try authoritative tokenization first when there is time; if it doesn't
+    clear the secret (or there is no time), redact locally
+    ([VS:<TYPE>:offline]). Raises SecretBlocked when the tripwire is
+    unavailable.
     """
     if not SECRETS_DETECTION or not isinstance(text, str) or not text:
         return text
@@ -232,15 +306,27 @@ def apply_secret_tripwire(text: str) -> str:
         raise SecretBlocked("secret tripwire unavailable")
     if not tw.scan(text):
         return text
-    result = _tokenize(text)
     guarded = text
-    if result:
-        tokenized = result.get("tokenized_text")
-        if isinstance(tokenized, str) and tokenized:
-            guarded = tokenized
+    if _remaining_budget() >= MIN_API_BUDGET:
+        result = _tokenize(text)
+        if result:
+            tokenized = result.get("tokenized_text")
+            if isinstance(tokenized, str) and tokenized:
+                guarded = tokenized
     if tw.scan(guarded):
         guarded = tw.redact_offline(guarded)
     return guarded
+
+
+def redact_secrets_offline(text: str) -> str:
+    """Local-only secret redaction (no API call). No-op unless
+    GUARD_SECRETS_DETECTION is enabled."""
+    if not SECRETS_DETECTION or not isinstance(text, str) or not text:
+        return text
+    tw = _get_tripwire()
+    if tw is None:
+        raise SecretBlocked("secret tripwire unavailable")
+    return tw.redact_offline(text) if tw.scan(text) else text
 
 
 def _pii_tokenize_string(value: str, tool_name: str) -> str:
@@ -248,16 +334,13 @@ def _pii_tokenize_string(value: str, tool_name: str) -> str:
     result = _tokenize(value)
     if not result:
         return value
-    tokenized = result.get("tokenized_text")
-    if not isinstance(tokenized, str):
-        return value
     _log_pii(result, "pre:" + tool_name)
-    return tokenized
+    return result["tokenized_text"]
 
 
-def _guard_strings(value, transform):
-    """Apply `transform` to every string in a JSON-like value — dict keys
-    included — returning (new_value, changed)."""
+def _guard_strings(value, transform, *, keys: bool = True):
+    """Apply `transform` to every string in a JSON-like value (dict keys
+    too, unless keys=False), returning (new_value, changed)."""
     if isinstance(value, str):
         guarded = transform(value)
         return guarded, guarded != value
@@ -266,14 +349,17 @@ def _guard_strings(value, transform):
         updated = {}
         changed = False
         for key, child in value.items():
-            new_key, key_changed = _guard_strings(key, transform) if isinstance(key, str) else (key, False)
-            new_child, child_changed = _guard_strings(child, transform)
+            if keys and isinstance(key, str):
+                new_key, key_changed = _guard_strings(key, transform, keys=keys)
+            else:
+                new_key, key_changed = key, False
+            new_child, child_changed = _guard_strings(child, transform, keys=keys)
             updated[new_key] = new_child
             changed = changed or key_changed or child_changed
         return (updated if changed else value), changed
 
     if isinstance(value, list):
-        pairs = [_guard_strings(child, transform) for child in value]
+        pairs = [_guard_strings(child, transform, keys=keys) for child in value]
         changed = any(c for _, c in pairs)
         return ([v for v, _ in pairs] if changed else value), changed
 
@@ -300,9 +386,66 @@ def handle_session_start(event: dict) -> None:
         pass  # audit logging must never break the session
     print(
         "[VeriSwarm Guard] Active. "
-        "PII scanning on MCP tool calls. "
+        "Secret and PII protection on prompts and MCP tool calls. "
         "Activity logging on all tools."
     )
+    sys.exit(0)
+
+
+def _block_prompt(reason: str) -> None:
+    json.dump(
+        {
+            "decision": "block",
+            "reason": f"[VeriSwarm Guard] {reason}",
+            # Keep the blocked text out of the block message.
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "suppressOriginalPrompt": True,
+            },
+        },
+        sys.stdout,
+    )
+    sys.exit(0)
+
+
+def handle_user_prompt_submit(event: dict) -> None:
+    """Block prompts that carry secrets (always) or PII (GUARD_BLOCK_PROMPT_PII).
+
+    Secrets are detected locally and fail closed. The PII check needs the
+    API; if it cannot complete, the prompt proceeds with a visible warning.
+    """
+    prompt = event.get("prompt")
+    if not isinstance(prompt, str):
+        if prompt is not None and _has_secret(json.dumps(prompt, default=str)):
+            _block_prompt("Prompt blocked: it may contain a secret (API key, token, or credential).")
+        sys.exit(0)
+
+    if _has_secret(prompt):
+        _block_prompt(
+            "Prompt blocked: it contains what looks like a secret (API key, token, or "
+            "credential). Remove it and send the prompt again."
+        )
+
+    if not BLOCK_PROMPT_PII or not API_KEY:
+        sys.exit(0)
+
+    try:
+        result = _tokenize_strict(prompt)
+    except ScanUnavailable:
+        json.dump(
+            {"systemMessage": "[VeriSwarm Guard] PII check on this prompt could not complete; it was sent unscanned."},
+            sys.stdout,
+        )
+        sys.exit(0)
+
+    if result:
+        _log_pii(result, "prompt")
+        types = ", ".join(_manifest_types(result)) or "personal data"
+        _block_prompt(
+            f"Prompt blocked: it contains personal data ({types}). Remove it, or use the "
+            "tokenize_pii tool, and send the prompt again. "
+            "Set GUARD_BLOCK_PROMPT_PII=0 to allow PII in prompts."
+        )
     sys.exit(0)
 
 
@@ -364,58 +507,103 @@ def handle_pre_tool_use(event: dict) -> None:
     sys.exit(0)
 
 
-def _response_text(event: dict) -> str:
-    """Text of the tool's result. Claude Code sends `tool_response`;
-    `tool_result` is accepted from older hosts."""
-    response = event.get("tool_response")
-    if response is None:
-        response = event.get("tool_result")
-    if response is None:
-        return ""
+def _post_tool_output(output, context: str) -> None:
+    hook_output = {"hookEventName": "PostToolUse", "updatedToolOutput": output}
+    if context:
+        hook_output["additionalContext"] = context
+    json.dump({"hookSpecificOutput": hook_output}, sys.stdout)
+    sys.exit(0)
+
+
+def _withheld_output(response, why: str):
+    message = f"[VeriSwarm Guard] Tool output withheld: {why}."
     if isinstance(response, str):
-        return response
-    return json.dumps(response, default=str)
+        return message
+    return [{"type": "text", "text": message}]
 
 
 def handle_post_tool_use(event: dict) -> None:
-    """Flag MCP tool responses containing PII.
+    """Protect MCP tool output before Claude sees it.
 
-    The tool has already run, so this only adds a warning to Claude's
-    context (hookSpecificOutput.additionalContext).
+    Secrets are redacted locally first (GUARD_SECRETS_DETECTION). PII is
+    then tokenized through the API (when an API key is configured and the
+    tool is not exempt). If either step cannot complete, the output is
+    replaced with a withheld notice instead of passing through unscanned.
+    The result replaces the tool output via hookSpecificOutput.updatedToolOutput.
     """
     tool_name = event.get("tool_name")
     if not isinstance(tool_name, str) or not tool_name.startswith(MCP_PREFIX):
         sys.exit(0)
-    if _is_pii_exempt(tool_name):
+
+    response = event.get("tool_response")
+    if response is None:
+        response = event.get("tool_result")
+    if response is None:
         sys.exit(0)
 
-    text = _response_text(event)
-    if len(text) < 4:
+    scan_pii = bool(API_KEY) and not _is_pii_exempt(tool_name)
+    if not SECRETS_DETECTION and not scan_pii:
         sys.exit(0)
 
-    result = _tokenize(text[:4000])
-    if not result:
+    try:
+        updated, changed = _guard_strings(response, redact_secrets_offline)
+    except Exception:
+        _post_tool_output(
+            _withheld_output(response, "secret redaction could not run"),
+            "VeriSwarm Guard withheld this tool output because its secret scan failed.",
+        )
+
+    pii_total = 0
+    pii_types: set[str] = set()
+    if scan_pii:
+        cache: dict[str, str] = {}
+
+        def tokenize_value(text: str) -> str:
+            nonlocal pii_total
+            if len(text) < 4:
+                return text
+            if text not in cache:
+                result = _tokenize_strict(text)
+                if result:
+                    pii_total += result.get("tokens_created", 0)
+                    pii_types.update(_manifest_types(result))
+                    _log_pii(result, "post:" + tool_name)
+                    cache[text] = result["tokenized_text"]
+                else:
+                    cache[text] = text
+            return cache[text]
+
+        try:
+            updated, pii_changed = _guard_strings(updated, tokenize_value, keys=False)
+            changed = changed or pii_changed
+        except Exception:
+            _post_tool_output(
+                _withheld_output(response, "the PII scan could not complete"),
+                "VeriSwarm Guard withheld this tool output because its PII scan could "
+                "not complete. Retry the tool call, or ask the user to check the "
+                "VeriSwarm API connection.",
+            )
+
+    try:
+        if _contains_secret(json.dumps(updated, default=str)):
+            raise SecretBlocked("secret remained after redaction")
+    except Exception:
+        _post_tool_output(
+            _withheld_output(response, "a secret could not be redacted"),
+            "VeriSwarm Guard withheld this tool output because it contained a secret.",
+        )
+
+    if not changed:
         sys.exit(0)
 
-    types_found = _manifest_types(result)
-    count = result.get("tokens_created", 0)
-    _log_pii(result, "post:" + tool_name)
-
-    type_list = ", ".join(types_found) or "unknown types"
-    json.dump(
-        {
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "additionalContext": (
-                    f"[VeriSwarm Guard] Warning: {count} PII item(s) detected in "
-                    f"tool response ({type_list}). Use the tokenize_pii tool before "
-                    "storing or forwarding this data."
-                ),
-            }
-        },
-        sys.stdout,
-    )
-    sys.exit(0)
+    context = ""
+    if pii_total:
+        context = (
+            f"[VeriSwarm Guard] {pii_total} PII item(s) in this tool response "
+            f"({', '.join(sorted(pii_types)) or 'unknown types'}) were replaced with "
+            "tokens. Use rehydrate_pii only where the real values are required."
+        )
+    _post_tool_output(updated, context)
 
 
 # -- Main Dispatcher -------------------------------------------------------
@@ -454,23 +642,19 @@ def _dispatch(raw: str, clean: bool) -> None:
     hook_event = event.get("hook_event_name")
     _session_id = str(event.get("session_id") or "")
 
-    if not API_KEY and hook_event != "PreToolUse":
-        sys.exit(0)
-
-    if hook_event == "SessionStart":
-        handle_session_start(event)
+    if hook_event == "UserPromptSubmit":
+        handle_user_prompt_submit(event)
     elif hook_event == "PreToolUse":
         handle_pre_tool_use(event)
     elif hook_event == "PostToolUse":
         handle_post_tool_use(event)
+    elif hook_event == "SessionStart" and API_KEY:
+        handle_session_start(event)
     sys.exit(0)
 
 
 def main() -> None:
     global _deadline
-    if not API_KEY and not SECRETS_DETECTION:
-        sys.exit(0)
-
     _deadline = time.monotonic() + HOOK_BUDGET_SECONDS
     raw = ""
     try:
@@ -479,14 +663,14 @@ def main() -> None:
     except SystemExit:
         raise
     except Exception:
-        # Never exit 1 (a non-blocking error that lets the call proceed
+        # Never exit 1 (a non-blocking error that lets the action proceed
         # unmodified). Block if the input carries a secret; otherwise proceed.
         try:
-            secret = _contains_secret(raw)
+            secret = _has_secret(raw)
         except Exception:
-            secret = SECRETS_DETECTION
+            secret = True
         if secret:
-            _block("internal error while redacting a secret")
+            _block("internal error while checking for secrets")
         sys.exit(0)
 
 

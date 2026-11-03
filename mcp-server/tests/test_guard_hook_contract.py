@@ -30,7 +30,12 @@ def _fake_pii_tokenizer(text, **k):
     return dict(PII_RESULT, tokenized_text=text.replace("a@b.com", "[VS:EMAIL:abc123]"))
 
 
-def _reload_hook(monkeypatch, *, secrets: bool = True, api_key: str = "test-key", exempt: str | None = None):
+def _reload_hook(
+    monkeypatch, *, secrets: bool = True, api_key: str = "test-key",
+    exempt: str | None = None, env: dict | None = None,
+):
+    for key, value in (env or {}).items():
+        monkeypatch.setenv(key, value)
     if api_key:
         monkeypatch.setenv("VERISWARM_API_KEY", api_key)
     monkeypatch.setenv("GUARD_SECRETS_DETECTION", "1" if secrets else "")
@@ -212,34 +217,83 @@ def test_total_api_time_is_bounded_by_the_hook_deadline(monkeypatch, capsys):
 # ── PostToolUse contract ─────────────────────────────────────────────
 
 @pytest.mark.parametrize("field", ["tool_response", "tool_result"])
-def test_post_tool_use_reads_tool_response_and_nests_context(monkeypatch, capsys, field):
+def test_post_tool_use_replaces_output_with_tokenized_values(monkeypatch, capsys, field):
     gh = _reload_hook(monkeypatch)
-    seen = []
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
+    response = {"content": [{"type": "text", "text": "mail a@b.com now"}], "isError": False}
 
-    def _tokenize(text, **k):
-        seen.append(text)
-        return dict(PII_RESULT)
-
-    monkeypatch.setattr(gh, "_tokenize", _tokenize)
-    event = _event("PostToolUse", tool_input={"q": "x"}, **{field: {"content": [{"type": "text", "text": "a@b.com"}]}})
-
-    code = _run_main(gh, monkeypatch, event)
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_input={"q": "x"}, **{field: response}))
 
     assert code == 0
-    assert "a@b.com" in seen[0]
     out = _output(capsys)
     assert "additionalContext" not in out
-    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
-    assert "PII" in out["hookSpecificOutput"]["additionalContext"]
+    hso = out["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert hso["updatedToolOutput"] == {
+        "content": [{"type": "text", "text": "mail [VS:EMAIL:abc123] now"}], "isError": False,
+    }
+    assert "PII" in hso["additionalContext"]
 
 
-def test_post_tool_use_tolerates_malformed_manifest(monkeypatch, capsys):
+def test_post_tool_use_without_pii_leaves_output_alone(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch)
-    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: {"tokens_created": 2, "token_manifest": [{}, "x"]})
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response="nothing personal here"))
+
+    assert code == 0
+    assert _output(capsys) is None
+
+
+@pytest.mark.parametrize("response", ["contact a@b.com please", [{"type": "text", "text": "a@b.com"}]])
+def test_post_tool_use_withholds_output_when_pii_scan_cannot_complete(monkeypatch, capsys, response):
+    gh = _reload_hook(monkeypatch)
+
+    def _unavailable(text, **k):
+        raise gh.ScanUnavailable("down")
+
+    monkeypatch.setattr(gh, "_tokenize_strict", _unavailable)
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response=response))
+
+    assert code == 0
+    raw = json.dumps(_output(capsys))
+    assert "a@b.com" not in raw
+    assert "withheld" in raw
+
+
+def test_post_tool_use_withholds_on_malformed_tokenize_response(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"tokens_created": 2, "token_manifest": [{}, "x"]}  # no tokenized_text
+
+    monkeypatch.setattr(gh.httpx, "post", lambda *a, **k: _Resp())
 
     code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response="contact a@b.com please"))
 
     assert code == 0
+    assert "withheld" in json.dumps(_output(capsys))
+
+
+def test_post_tool_use_redacts_secrets_offline_without_api(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, api_key="")
+
+    def _no_network(*a, **k):
+        raise AssertionError("network call")
+
+    monkeypatch.setattr(gh.httpx, "post", _no_network)
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response={"token": "key " + GH}))
+
+    assert code == 0
+    assert _output(capsys)["hookSpecificOutput"]["updatedToolOutput"] == {
+        "token": "key [VS:GITHUB_TOKEN:offline]",
+    }
 
 
 # ── PII exemption (opt-in) ───────────────────────────────────────────
@@ -298,3 +352,173 @@ def test_session_start_uses_payload_session_id(monkeypatch, capsys):
     _run_main(gh, monkeypatch, _event("SessionStart", source="startup"))
 
     assert seen["session_id"] == "sess-123"
+
+
+# ── UserPromptSubmit ─────────────────────────────────────────────────
+
+def _prompt_event(prompt):
+    return _event("UserPromptSubmit", tool_name=None, prompt=prompt)
+
+
+def test_prompt_with_secret_is_always_blocked_without_echoing_it(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False, api_key="")
+
+    code = _run_main(gh, monkeypatch, _prompt_event("deploy with " + GH))
+
+    out = _output(capsys)
+    assert code == 0
+    assert out["decision"] == "block"
+    assert "secret" in out["reason"]
+    assert out["hookSpecificOutput"] == {"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": True}
+    assert GH not in json.dumps(out)
+
+
+def test_prompt_blocked_when_secret_tripwire_unavailable(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False, api_key="")
+    monkeypatch.setattr(gh, "_get_tripwire", lambda: None)
+
+    _run_main(gh, monkeypatch, _prompt_event("hello there"))
+
+    assert _output(capsys)["decision"] == "block"
+
+
+def test_prompt_with_pii_is_blocked_by_default(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
+
+    _run_main(gh, monkeypatch, _prompt_event("email a@b.com about it"))
+
+    out = _output(capsys)
+    assert out["decision"] == "block"
+    assert "EMAIL" in out["reason"]
+    assert "a@b.com" not in json.dumps(out)
+
+
+def test_prompt_pii_allowed_when_blocking_turned_off(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False, env={"GUARD_BLOCK_PROMPT_PII": "0"})
+
+    def _not_called(text, **k):
+        raise AssertionError("PII scan should be skipped")
+
+    monkeypatch.setattr(gh, "_tokenize_strict", _not_called)
+
+    assert _run_main(gh, monkeypatch, _prompt_event("email a@b.com about it")) == 0
+    assert _output(capsys) is None
+
+
+def test_clean_prompt_passes_silently(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
+
+    assert _run_main(gh, monkeypatch, _prompt_event("refactor the parser")) == 0
+    assert _output(capsys) is None
+
+
+def test_prompt_pii_scan_failure_warns_but_does_not_block(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+
+    def _unavailable(text, **k):
+        raise gh.ScanUnavailable("down")
+
+    monkeypatch.setattr(gh, "_tokenize_strict", _unavailable)
+
+    _run_main(gh, monkeypatch, _prompt_event("email a@b.com about it"))
+
+    out = _output(capsys)
+    assert "decision" not in out
+    assert "could not complete" in out["systemMessage"]
+
+
+# ── Hard wall-clock deadline against a server that really stalls ─────
+
+import http.server
+import threading
+import time
+
+
+class _TricklingHandler(http.server.BaseHTTPRequestHandler):
+    """Sends headers, then one body byte every 0.2s: each read finishes well
+    inside httpx's per-read timeout, so only a wall-clock limit stops it."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        try:
+            for _ in range(100):
+                self.wfile.write(b" ")
+                self.wfile.flush()
+                time.sleep(0.2)
+        except OSError:
+            pass
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def stalling_api(monkeypatch):
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TricklingHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("VERISWARM_API_URL", f"http://127.0.0.1:{server.server_address[1]}")
+    yield
+    server.shutdown()
+
+
+BUDGET = 1.5
+
+
+def _timed_main(gh, monkeypatch, event):
+    monkeypatch.setattr(gh, "HOOK_BUDGET_SECONDS", BUDGET)
+    monkeypatch.setattr(gh, "API_TIMEOUT", 1.0)
+    start = time.monotonic()
+    code = _run_main(gh, monkeypatch, event)
+    return code, time.monotonic() - start
+
+
+def test_pre_tool_use_finishes_within_budget_and_redacts_offline(monkeypatch, capsys, stalling_api):
+    gh = _reload_hook(monkeypatch)
+    fields = {"secret": "token " + GH, **{f"f{i}": f"value number {i}" for i in range(5)}}
+
+    code, elapsed = _timed_main(gh, monkeypatch, _event("PreToolUse", tool_input=fields))
+
+    assert code == 0
+    assert elapsed < BUDGET + 0.5
+    updated = _output(capsys)["hookSpecificOutput"]["updatedInput"]
+    assert updated["secret"] == "token [VS:GITHUB_TOKEN:offline]"
+
+
+def test_post_tool_use_withholds_within_budget_when_api_stalls(monkeypatch, capsys, stalling_api):
+    gh = _reload_hook(monkeypatch)
+
+    code, elapsed = _timed_main(gh, monkeypatch, _event("PostToolUse", tool_response="contact a@b.com please"))
+
+    assert code == 0
+    assert elapsed < BUDGET + 0.5
+    assert "withheld" in json.dumps(_output(capsys))
+
+
+def test_prompt_check_finishes_within_budget_when_api_stalls(monkeypatch, capsys, stalling_api):
+    gh = _reload_hook(monkeypatch, secrets=False)
+
+    code, elapsed = _timed_main(gh, monkeypatch, _prompt_event("email a@b.com about it"))
+
+    assert code == 0
+    assert elapsed < BUDGET + 0.5
+    assert "systemMessage" in _output(capsys)
+
+
+def test_tripwire_skips_api_when_budget_is_low(monkeypatch):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_deadline", time.monotonic() + gh.MIN_API_BUDGET / 2)
+
+    def _no_api(*a, **k):
+        raise AssertionError("API called with no budget left")
+
+    monkeypatch.setattr(gh, "_post_within", _no_api)
+
+    assert gh.apply_secret_tripwire("token " + GH) == "token [VS:GITHUB_TOKEN:offline]"
