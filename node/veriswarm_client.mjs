@@ -314,28 +314,29 @@ export class VeriSwarmClient {
     return this.#request("/v1/suite/guard/secret-rules", { method: "GET" });
   }
 
-  // Returns text safe to emit: tokenized when online, locally redacted
-  // (fail-closed) when offline. No-op when secretsDetection is disabled.
-  // The tripwire is a client-side safety net for obvious provider-prefix
-  // secrets — never a substitute for the authoritative Guard scan.
+  // Returns text safe to emit. No-op when secretsDetection is disabled.
+  // Detected secret spans are redacted locally FIRST, so a secret the
+  // tripwire found never leaves the process (the tokenize endpoint stores
+  // what it receives, rehydratably). The already-redacted text is then sent
+  // for PII tokenization when online; if that fails, the locally redacted
+  // text is returned (fail-closed). The tripwire is a client-side safety
+  // net for obvious provider-prefix secrets — never a substitute for the
+  // authoritative Guard scan.
   async guardOutboundText(text, { agentId, sessionId } = {}) {
     if (!this.secretsDetection || typeof text !== "string" || text.length === 0) {
       return text;
     }
     await this.#refreshTripwireIfDue();
-    if (this._tripwire.scan(text).length === 0) return text;
+    const tripwire = this._tripwire;
+    if (tripwire.scan(text).length === 0) return text;
+    const redacted = tripwire.redactOffline(text);
     try {
-      const result = await this.tokenizePii({ text, agentId, sessionId });
-      let guarded = result?.tokens_created > 0 ? result.tokenized_text || text : text;
-      // Belt-and-suspenders: if the API left any known-prefix span intact
-      // (the PII tokenizer is not a secret detector), redact it locally.
-      if (this._tripwire.scan(guarded).length > 0) {
-        guarded = this._tripwire.redactOffline(guarded);
-      }
-      return guarded;
+      const result = await this.tokenizePii({ text: redacted, agentId, sessionId });
+      const tokenized = result?.tokens_created > 0 ? result.tokenized_text || redacted : redacted;
+      // Never trust the response to stay secret-free.
+      return tripwire.scan(tokenized).length > 0 ? tripwire.redactOffline(tokenized) : tokenized;
     } catch {
-      // Offline / API failure → fail closed with local redaction.
-      return this._tripwire.redactOffline(text);
+      return redacted;
     }
   }
 

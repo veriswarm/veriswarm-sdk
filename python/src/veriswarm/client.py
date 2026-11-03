@@ -332,32 +332,35 @@ class VeriSwarmClient:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> str:
-        """Tokenize-when-online / redact-when-offline outbound text.
+        """Return outbound text that is safe to emit.
 
-        No-op unless ``secrets_detection`` is enabled. On a prefix hit the
-        authoritative tokenize endpoint is tried first; any failure (or a
-        surviving prefix span) falls back to a non-recoverable local
-        redaction (fail-closed).
+        No-op unless ``secrets_detection`` is enabled. Detected secret spans
+        are redacted locally FIRST, so a secret the tripwire found never
+        leaves the process (the tokenize endpoint stores what it receives,
+        rehydratably). The already-redacted text is then sent for PII
+        tokenization when online; on any failure the locally redacted text
+        is returned (fail-closed).
         """
         if not self.secrets_detection or not isinstance(text, str) or not text:
             return text
         tripwire = self._refresh_tripwire_if_due()
         if not tripwire.scan(text):
             return text
+        redacted = tripwire.redact_offline(text)
         try:
             result = self.tokenize_pii(
-                text=text, agent_id=agent_id, session_id=session_id
+                text=redacted, agent_id=agent_id, session_id=session_id
             )
-            guarded = text
-            if isinstance(result, dict) and result.get("tokens_created", 0) > 0:
-                guarded = result.get("tokenized_text") or text
-            # Belt-and-suspenders: the PII tokenizer is not a secret detector,
-            # so re-scan and locally redact any provider-prefix span it left.
-            if tripwire.scan(guarded):
-                guarded = tripwire.redact_offline(guarded)
-            return guarded
         except Exception:
-            return tripwire.redact_offline(text)
+            return redacted
+        tokenized = redacted
+        created = result.get("tokens_created") if isinstance(result, dict) else None
+        if isinstance(created, int) and created > 0:
+            tokenized = result.get("tokenized_text") or redacted
+        if not isinstance(tokenized, str):
+            return redacted
+        # Never trust the response to stay secret-free.
+        return tripwire.redact_offline(tokenized) if tripwire.scan(tokenized) else tokenized
 
     def _refresh_tripwire_if_due(self) -> SecretTripwire:
         """Load the tripwire on first use; if only built-in rules are active

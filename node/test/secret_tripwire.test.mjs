@@ -175,3 +175,49 @@ describe("guardOutboundText — manifest refresh after a failed fetch", () => {
     }
   });
 });
+
+describe("guardOutboundText — detected secrets never leave the process", () => {
+  function captureFetch(tokenizeResponse) {
+    const bodies = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (init?.body !== undefined) bodies.push(String(init.body));
+        const json = String(url).includes("/secret-rules") ? MANIFEST : tokenizeResponse(JSON.parse(init.body));
+        return new Response(JSON.stringify(json), { headers: { "content-type": "application/json" } });
+      }),
+    );
+    return bodies;
+  }
+
+  it("redacts locally before the tokenize call and returns safe text", async () => {
+    const bodies = captureFetch((req) => ({ tokens_created: 0, tokenized_text: req.text }));
+    const c = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "k", secretsDetection: true });
+    const out = await c.guardOutboundText(`email bob@example.com key ${GH}`);
+    expect(out).toBe("email bob@example.com key [VS:GITHUB_TOKEN:offline]");
+    expect(bodies.length).toBe(1); // the tokenize call still happens, on redacted text
+    for (const body of bodies) expect(body).not.toContain(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps PII tokenization of the already-redacted text", async () => {
+    const bodies = captureFetch((req) => ({
+      tokens_created: 1,
+      tokenized_text: req.text.replace("bob@example.com", "[VS:EMAIL:1]"),
+    }));
+    const c = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "k", secretsDetection: true });
+    const out = await c.guardOutboundText(`bob@example.com ${GH}`);
+    expect(out).toBe("[VS:EMAIL:1] [VS:GITHUB_TOKEN:offline]");
+    for (const body of bodies) expect(body).not.toContain(GH);
+    vi.unstubAllGlobals();
+  });
+
+  it("returns locally redacted text when tokenize fails", async () => {
+    captureFetch(() => {
+      throw new Error("down");
+    });
+    const c = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "k", secretsDetection: true });
+    expect(await c.guardOutboundText(`x ${GH}`)).toBe("x [VS:GITHUB_TOKEN:offline]");
+    vi.unstubAllGlobals();
+  });
+});

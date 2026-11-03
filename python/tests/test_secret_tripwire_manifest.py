@@ -90,3 +90,64 @@ def test_client_retries_fetch_after_interval(monkeypatch):
     now[0] += 3600
     c.guard_outbound_text("hello")
     assert len(calls) == 2  # a successful fetch is not repeated
+
+
+# --- detected secrets never leave the process --------------------------------
+
+import json as _json  # noqa: E402
+
+GH_MANIFEST = {
+    "version": "sha256:t",
+    "rules": [
+        {"name": "github_pat", "entity_type": "GITHUB_TOKEN", "prefix_pattern": r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"}
+    ],
+}
+
+
+def _route(recorder, tokenize):
+    class Opener:
+        def open(self, request, timeout=None):
+            recorder.requests.append(request)
+            if request.full_url.endswith("/secret-rules"):
+                body = GH_MANIFEST
+            else:
+                body = tokenize(_json.loads(request.data))
+            from .conftest import FakeResponse
+
+            return FakeResponse(_json.dumps(body).encode())
+
+    return Opener()
+
+
+def _bodies(recorder):
+    return [r.data.decode() for r in recorder.requests if r.data is not None]
+
+
+def test_secret_is_redacted_before_tokenize_call(recorder, monkeypatch):
+    monkeypatch.setattr(client_module, "_OPENER", _route(recorder, lambda req: {"tokens_created": 0, "tokenized_text": req["text"]}))
+    c = VeriSwarmClient(base_url="https://api.test", api_key="k", secrets_detection=True)
+    out = c.guard_outbound_text(f"email bob@example.com key {GH}")
+    assert out == "email bob@example.com key [VS:GITHUB_TOKEN:offline]"
+    bodies = _bodies(recorder)
+    assert len(bodies) == 1  # tokenize still called, on redacted text
+    assert all(GH not in b for b in bodies)
+
+
+def test_pii_tokenization_applies_to_redacted_text(recorder, monkeypatch):
+    def tokenize(req):
+        return {"tokens_created": 1, "tokenized_text": req["text"].replace("bob@example.com", "[VS:EMAIL:1]")}
+
+    monkeypatch.setattr(client_module, "_OPENER", _route(recorder, tokenize))
+    c = VeriSwarmClient(base_url="https://api.test", api_key="k", secrets_detection=True)
+    assert c.guard_outbound_text(f"bob@example.com {GH}") == "[VS:EMAIL:1] [VS:GITHUB_TOKEN:offline]"
+    assert all(GH not in b for b in _bodies(recorder))
+
+
+def test_tokenize_failure_returns_local_redaction(recorder, monkeypatch):
+    def tokenize(req):
+        raise OSError("down")
+
+    monkeypatch.setattr(client_module, "_OPENER", _route(recorder, tokenize))
+    c = VeriSwarmClient(base_url="https://api.test", api_key="k", secrets_detection=True)
+    assert c.guard_outbound_text(f"x {GH}") == "x [VS:GITHUB_TOKEN:offline]"
+    assert all(GH not in b for b in _bodies(recorder))
