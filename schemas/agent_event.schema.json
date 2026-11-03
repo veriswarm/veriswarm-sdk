@@ -2,31 +2,23 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://veriswarm.ai/schemas/agent_event.schema.json",
   "title": "AgentEvent",
+  "description": "Body of POST /v1/events. Mirrors the API's EventIngest model: source_type is a free-form string and payload is optional (defaults to {}).",
   "type": "object",
-  "required": [
-    "event_id",
-    "agent_id",
-    "source_type",
-    "event_type",
-    "occurred_at",
-    "payload"
-  ],
+  "required": ["event_id", "agent_id", "source_type", "event_type", "occurred_at"],
   "properties": {
-    "event_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "agent_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "event_id": { "type": "string" },
+    "agent_id": { "type": "string" },
     "source_type": {
       "type": "string",
-      "enum": ["agent", "platform", "system", "moderator"]
+      "description": "Where the event came from, e.g. agent, platform, system, moderator, cli. Free-form."
     },
-    "event_type": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "event_type": { "type": "string" },
     "occurred_at": { "type": "string", "format": "date-time" },
-    "signature": { "type": ["string", "null"], "maxLength": 4096 },
+    "signature": { "type": ["string", "null"] },
     "payload": {
       "type": "object",
       "additionalProperties": true,
-      "maxProperties": 50,
-      "description": "Event-specific data. additionalProperties:true is intentional but capped at 50 keys to prevent unbounded payloads from clients trusting the published contract."
+      "description": "Event-specific data. Optional; defaults to an empty object."
     }
-  },
-  "additionalProperties": false
+  }
 }

@@ -2,69 +2,145 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://veriswarm.ai/schemas/score_snapshot.schema.json",
   "title": "ScoreSnapshot",
+  "description": "Response of GET /v1/public/agents/{agent_id}/scores/current.",
   "type": "object",
   "required": [
-    "agent_id",
     "identity",
     "risk",
     "reliability",
     "autonomy",
-    "policy_tier",
-    "created_at"
+    "policy_tier"
   ],
   "properties": {
-    "agent_id": { "type": "string" },
     "identity": {
       "type": "object",
-      "required": ["score", "confidence"],
+      "required": [
+        "score",
+        "confidence"
+      ],
       "properties": {
-        "score": { "type": "number", "minimum": 0, "maximum": 100 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
     "risk": {
       "type": "object",
-      "required": ["score", "confidence"],
+      "required": [
+        "score",
+        "confidence"
+      ],
       "properties": {
-        "score": { "type": "number", "minimum": 0, "maximum": 100 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "band": {
+          "type": "string",
+          "enum": [
+            "low",
+            "moderate",
+            "high",
+            "severe"
+          ]
+        }
       }
     },
     "reliability": {
       "type": "object",
-      "required": ["score", "confidence"],
+      "required": [
+        "score",
+        "confidence"
+      ],
       "properties": {
-        "score": { "type": "number", "minimum": 0, "maximum": 100 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
       }
     },
     "autonomy": {
       "type": "object",
-      "required": ["score", "confidence", "label"],
+      "required": [
+        "score",
+        "confidence",
+        "label"
+      ],
       "properties": {
-        "score": { "type": "number", "minimum": 0, "maximum": 100 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
         "label": {
           "type": "string",
-          "enum": ["agent-operated", "human-assisted", "unclear"]
+          "enum": [
+            "agent_operated",
+            "human_assisted",
+            "unclear"
+          ]
         }
       }
     },
     "calibration": {
-      "type": ["object", "null"],
-      "description": "Fifth trust dimension (Brier-score calibration). Null/absent for cold-start agents below the minimum matched-pairs threshold; the composite falls back to the four established dimensions.",
-      "required": ["score", "confidence"],
+      "type": "object",
+      "required": [
+        "score",
+        "confidence"
+      ],
       "properties": {
-        "score": { "type": "number", "minimum": 0, "maximum": 100 },
-        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-        "brier_avg": { "type": "number", "minimum": 0, "maximum": 1 }
-      }
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "description": "Fifth trust dimension (Brier-score calibration). Absent for cold-start agents below the minimum matched-pairs threshold; the composite then uses the four established dimensions."
     },
     "policy_tier": {
       "type": "string",
-      "enum": ["tier_0", "tier_1", "tier_2", "tier_3", "tier_x"]
+      "enum": [
+        "tier_0",
+        "tier_1",
+        "tier_2",
+        "tier_3",
+        "tier_x"
+      ]
     },
-    "created_at": { "type": "string", "format": "date-time" }
-  },
-  "additionalProperties": false
+    "explanations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
 }
