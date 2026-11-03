@@ -413,3 +413,83 @@ def test_no_fork_while_another_thread_is_alive(monkeypatch):
     finally:
         stop.set()
         worker.join()
+
+
+# ── Buffer locking (shell logger + reporter share one flock) ─────────
+
+import threading
+
+LOGGER_SH = Path(activity_reporter.__file__).with_name("activity_logger.sh")
+
+
+def _point_buffer_at_home(monkeypatch, home):
+    buffer_file = home / ".veriswarm" / "activity.jsonl"
+    buffer_file.parent.mkdir(parents=True)
+    monkeypatch.setattr(activity_reporter, "BUFFER_FILE", buffer_file)
+    return buffer_file
+
+
+@pytest.mark.skipif(
+    activity_reporter.fcntl is None
+    or not (shutil.which("flock") or shutil.which("perl")),
+    reason="needs flock(2) and a locking tool for the shell logger",
+)
+def test_shell_logger_waits_for_the_reporter_lock(monkeypatch, tmp_path):
+    """Regression: the shell logger appended without a lock, so an event
+    written while the reporter drained could land in a file that was then
+    read and deleted."""
+    buffer_file = _point_buffer_at_home(monkeypatch, tmp_path)
+    env = {**os.environ, "HOME": str(tmp_path)}
+    payload = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "session_id": "s1"})
+
+    with activity_reporter._buffer_lock():
+        proc = subprocess.Popen(
+            ["bash", str(LOGGER_SH)], stdin=subprocess.PIPE, env=env,
+        )
+        proc.stdin.write(payload.encode())
+        proc.stdin.close()
+        time.sleep(0.5)
+        assert proc.poll() is None, "logger finished while the reporter held the lock"
+        assert not buffer_file.exists() or buffer_file.read_text() == ""
+
+    assert proc.wait(timeout=10) == 0
+    lines = buffer_file.read_text().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["tool"] == "Bash"
+
+
+@pytest.mark.skipif(activity_reporter.fcntl is None, reason="needs flock(2)")
+def test_concurrent_appends_drains_and_requeues_lose_nothing(monkeypatch, tmp_path):
+    _point_buffer_at_home(monkeypatch, tmp_path)
+    monkeypatch.setattr(activity_reporter, "MAX_BUFFER_SIZE", 10_000)
+    writers, per_writer = 4, 150
+    drained: list[dict] = []
+    done = threading.Event()
+
+    def write(n):
+        for i in range(per_writer):
+            activity_reporter.buffer_event("tool.call", {"w": n, "i": i}, session_id="s")
+
+    def drain():
+        requeue_next = True
+        while not done.is_set():
+            batch = activity_reporter._read_and_clear_buffer()
+            if batch and requeue_next:
+                activity_reporter._requeue_events(batch)  # simulate a failed upload
+            else:
+                drained.extend(batch)
+            requeue_next = not requeue_next
+
+    drainer = threading.Thread(target=drain)
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(writers)]
+    drainer.start()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    done.set()
+    drainer.join()
+    drained.extend(activity_reporter._read_and_clear_buffer())
+
+    seen = sorted((e["meta"]["w"], e["meta"]["i"]) for e in drained)
+    assert seen == sorted((n, i) for n in range(writers) for i in range(per_writer))

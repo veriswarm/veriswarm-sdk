@@ -106,6 +106,22 @@ async def call_api(method: Callable[..., Any], *args: Any, **kwargs: Any) -> Any
     return await asyncio.to_thread(method, *args, **kwargs)
 
 
+_BUILTIN_TEMPLATE_PREFIX = "builtin:"
+
+
+def safe_template_id(value: str) -> str:
+    """Validate a workflow template ID: a plain ID or ``builtin:<slug>``.
+
+    Built-in template IDs carry a ``builtin:`` prefix that the safe_id
+    allowlist rejects. Validate the slug with safe_id and keep the prefix
+    (":" is a legal path-segment character).
+    """
+    if isinstance(value, str) and value.startswith(_BUILTIN_TEMPLATE_PREFIX):
+        slug = value[len(_BUILTIN_TEMPLATE_PREFIX):]
+        return _BUILTIN_TEMPLATE_PREFIX + safe_id(slug, "template_id")
+    return safe_id(value, "template_id")
+
+
 def q_path(value: object, field_name: str = "path segment") -> str:
     """Percent-encode a value for safe use as a single URL path segment.
 

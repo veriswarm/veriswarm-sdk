@@ -90,6 +90,13 @@ describe("localhost http escape hatch", () => {
   it.each(["http://[::2]:8000", "http://localhost.evil.test", "http://10.0.0.1"])("rejects %s", (baseUrl) => {
     expect(() => client({ baseUrl })).toThrow(/https/);
   });
+  it.each([
+    "https://api.veriswarm.ai@attacker.example",
+    "https://user:pass@api.veriswarm.ai",
+    "http://localhost@attacker.example",
+  ])("rejects userinfo in %s", (baseUrl) => {
+    expect(() => client({ baseUrl })).toThrow(/must not contain credentials/);
+  });
 });
 
 describe("error bodies and status", () => {

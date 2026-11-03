@@ -6,7 +6,7 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
-from ._shared import call_api, safe_error_response, safe_id
+from ._shared import call_api, safe_error_response, safe_id, safe_template_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -126,10 +126,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def deploy_template(template_id: str) -> str:
         """Deploy a workflow template as a new workflow in your workspace.
 
-        template_id: the template ID (e.g., "builtin:content-pipeline-v2" or a custom template ID)
+        template_id: the template ID (e.g., "builtin:content_pipeline_v2" or a custom template ID)
         """
         try:
-            template_id = safe_id(template_id, "template_id")
+            template_id = safe_template_id(template_id)
             result = await call_api(client.post, f"/v1/workflows/templates/{template_id}/deploy")
             return json.dumps(result, indent=2)
         except Exception as exc:

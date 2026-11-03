@@ -192,6 +192,11 @@ export class VeriSwarmClient {
     } catch {
       throw new Error(`baseUrl is not a valid URL: ${baseUrl}`);
     }
+    // https://api.veriswarm.ai@attacker.example sends credentials to
+    // attacker.example; never accept userinfo in baseUrl.
+    if (parsedUrl.username || parsedUrl.password) {
+      throw new Error("baseUrl must not contain credentials (user@host)");
+    }
     // WHATWG URL keeps the brackets on IPv6 hostnames ("[::1]").
     const isLocalhostHttp = parsedUrl.protocol === "http:" && LOCAL_HTTP_HOSTS.has(parsedUrl.hostname);
     if (parsedUrl.protocol !== "https:" && !isLocalhostHttp) {
