@@ -18,8 +18,9 @@ Configuration via environment variables:
   VERISWARM_API_URL          — API base URL (default: https://api.veriswarm.ai)
   VERISWARM_API_KEY          — Platform API key (required for PII scanning)
   GUARD_AGENT_ID             — Agent ID for audit trail (optional)
-  GUARD_SECRETS_DETECTION    — "1" enables the fail-closed secret tripwire on
-                               MCP tool arguments and responses
+  GUARD_SECRETS_DETECTION    — "1" also sends detected secrets in MCP tool
+                               arguments to the Guard API for tokenization
+                               (local secret redaction is always on)
   GUARD_BLOCK_PROMPT_PII     — "0" stops blocking prompts that contain PII
                                (default on). Secrets in prompts are always
                                blocked.
@@ -29,6 +30,9 @@ Configuration via environment variables:
 
 Exit codes: 0 = proceed (stdout may carry decision JSON), 2 = block the
 tool call (PreToolUse only; reason on stderr).
+
+Secrets are always redacted locally (no network) in prompts, MCP tool
+arguments and MCP tool responses.
 
 Every API call shares one wall-clock budget (HOOK_BUDGET_SECONDS) that ends
 well before the installed 10s hook timeout, because Claude Code discards
@@ -51,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from activity_reporter import (  # noqa: E402
     log_pii_detected,
     log_session_start,
+    surface_pending_warnings,
 )
 from veriswarm_mcp.url_security import validate_api_url  # noqa: E402
 
@@ -97,9 +102,10 @@ MCP_PREFIX = "mcp__"
 API_TIMEOUT = 3.0
 
 # Total wall-clock time the hook may spend waiting on the API. Hook entries
-# are installed with `timeout: 10`; stay under it with headroom for process
-# start-up and output.
-HOOK_BUDGET_SECONDS = 7.0
+# are installed with `timeout: 10`; stay well under it, leaving headroom for
+# interpreter start-up and output on a loaded machine (a timed-out
+# PostToolUse hook lets the original tool output through).
+HOOK_BUDGET_SECONDS = 6.0
 
 # Below this much remaining budget, API calls are skipped: secrets go
 # straight to offline redaction, and scans that need the API fail closed.
@@ -111,7 +117,11 @@ _deadline: float | None = None
 # Claude Code session id from the current hook payload (for audit events).
 _session_id = ""
 
-# Opt-in fail-closed secret tripwire for MCP tool arguments and responses.
+# The parsed hook payload, for the crash handler in main().
+_current_event: dict | None = None
+
+# Opt-in: also send detected secrets in tool arguments to the Guard API for
+# authoritative tokenization. Local redaction runs regardless.
 SECRETS_DETECTION = _env_flag("GUARD_SECRETS_DETECTION", False)
 
 # Prompts containing PII are blocked unless this is turned off.
@@ -275,8 +285,8 @@ def _get_tripwire():
 
 
 def _has_secret(text: str) -> bool:
-    """Tripwire scan regardless of GUARD_SECRETS_DETECTION. Fails closed:
-    an unavailable tripwire counts every non-empty text as a hit."""
+    """Local tripwire scan. Fails closed: an unavailable tripwire counts
+    every non-empty text as a hit."""
     if not text:
         return False
     tw = _get_tripwire()
@@ -285,21 +295,18 @@ def _has_secret(text: str) -> bool:
     return bool(tw.scan(text))
 
 
-def _contains_secret(text: str) -> bool:
-    """True when the tool tripwire is on and `text` carries a known secret."""
-    return SECRETS_DETECTION and _has_secret(text)
+_contains_secret = _has_secret
 
 
 def apply_secret_tripwire(text: str) -> str:
-    """Escalate obvious-secret strings to fail-closed redaction.
+    """Redact obvious-secret strings (always on).
 
-    No-op unless GUARD_SECRETS_DETECTION is enabled. On a known-prefix hit,
-    try authoritative tokenization first when there is time; if it doesn't
-    clear the secret (or there is no time), redact locally
-    ([VS:<TYPE>:offline]). Raises SecretBlocked when the tripwire is
-    unavailable.
+    On a known-prefix hit, try authoritative tokenization first when
+    GUARD_SECRETS_DETECTION is on and there is time; if that doesn't clear
+    the secret, redact locally ([VS:<TYPE>:offline]). Raises SecretBlocked
+    when the tripwire is unavailable.
     """
-    if not SECRETS_DETECTION or not isinstance(text, str) or not text:
+    if not isinstance(text, str) or not text:
         return text
     tw = _get_tripwire()
     if tw is None:
@@ -307,7 +314,7 @@ def apply_secret_tripwire(text: str) -> str:
     if not tw.scan(text):
         return text
     guarded = text
-    if _remaining_budget() >= MIN_API_BUDGET:
+    if SECRETS_DETECTION and _remaining_budget() >= MIN_API_BUDGET:
         result = _tokenize(text)
         if result:
             tokenized = result.get("tokenized_text")
@@ -319,9 +326,8 @@ def apply_secret_tripwire(text: str) -> str:
 
 
 def redact_secrets_offline(text: str) -> str:
-    """Local-only secret redaction (no API call). No-op unless
-    GUARD_SECRETS_DETECTION is enabled."""
-    if not SECRETS_DETECTION or not isinstance(text, str) or not text:
+    """Local-only secret redaction (no API call, always on)."""
+    if not isinstance(text, str) or not text:
         return text
     tw = _get_tripwire()
     if tw is None:
@@ -408,12 +414,25 @@ def _block_prompt(reason: str) -> None:
     sys.exit(0)
 
 
+PROMPT_CHECK_FAILED = "Prompt blocked: the secret check could not run. Try again, or reinstall veriswarm-mcp."
+
+
 def handle_user_prompt_submit(event: dict) -> None:
     """Block prompts that carry secrets (always) or PII (GUARD_BLOCK_PROMPT_PII).
 
-    Secrets are detected locally and fail closed. The PII check needs the
-    API; if it cannot complete, the prompt proceeds with a visible warning.
+    Secrets are detected locally and fail closed: any error blocks the
+    prompt without echoing it. The PII check needs the API; if it cannot
+    complete, the prompt proceeds with a visible warning.
     """
+    try:
+        _check_prompt(event)
+    except SystemExit:
+        raise
+    except Exception:
+        _block_prompt(PROMPT_CHECK_FAILED)
+
+
+def _check_prompt(event: dict) -> None:
     prompt = event.get("prompt")
     if not isinstance(prompt, str):
         if prompt is not None and _has_secret(json.dumps(prompt, default=str)):
@@ -522,10 +541,30 @@ def _withheld_output(response, why: str):
     return [{"type": "text", "text": message}]
 
 
+def _withhold_post_tool_output(event: dict, why: str) -> None:
+    response = event.get("tool_response")
+    if response is None:
+        response = event.get("tool_result")
+    _post_tool_output(
+        _withheld_output(response, why),
+        f"VeriSwarm Guard withheld this tool output: {why}.",
+    )
+
+
 def handle_post_tool_use(event: dict) -> None:
+    """Protect MCP tool output; any unexpected error withholds the output."""
+    try:
+        _protect_tool_output(event)
+    except SystemExit:
+        raise
+    except Exception:
+        _withhold_post_tool_output(event, "the Guard check failed")
+
+
+def _protect_tool_output(event: dict) -> None:
     """Protect MCP tool output before Claude sees it.
 
-    Secrets are redacted locally first (GUARD_SECRETS_DETECTION). PII is
+    Secrets are redacted locally first (always). PII is
     then tokenized through the API (when an API key is configured and the
     tool is not exempt). If either step cannot complete, the output is
     replaced with a withheld notice instead of passing through unscanned.
@@ -542,8 +581,6 @@ def handle_post_tool_use(event: dict) -> None:
         sys.exit(0)
 
     scan_pii = bool(API_KEY) and not _is_pii_exempt(tool_name)
-    if not SECRETS_DETECTION and not scan_pii:
-        sys.exit(0)
 
     try:
         updated, changed = _guard_strings(response, redact_secrets_offline)
@@ -635,10 +672,12 @@ def _dispatch(raw: str, clean: bool) -> None:
         except ValueError:
             event = None
     if not isinstance(event, dict):
-        if _contains_secret(raw):
+        if _has_secret(raw):
             _block("unparseable hook input carries a secret")
         sys.exit(0)
 
+    global _current_event
+    _current_event = event
     hook_event = event.get("hook_event_name")
     _session_id = str(event.get("session_id") or "")
 
@@ -653,9 +692,31 @@ def _dispatch(raw: str, clean: bool) -> None:
     sys.exit(0)
 
 
+def _fail_closed(raw: str) -> None:
+    """Crash path: never exit 1 (a non-blocking error that lets the action
+    proceed unchanged). Block or withhold according to the event."""
+    event = _current_event or {}
+    hook_event = event.get("hook_event_name")
+    if hook_event == "UserPromptSubmit":
+        _block_prompt(PROMPT_CHECK_FAILED)
+    if hook_event == "PostToolUse" and str(event.get("tool_name") or "").startswith(MCP_PREFIX):
+        _withhold_post_tool_output(event, "the Guard check failed")
+    try:
+        secret = _has_secret(raw)
+    except Exception:
+        secret = True
+    if secret:
+        _block("internal error while checking for secrets")
+    sys.exit(0)
+
+
 def main() -> None:
     global _deadline
     _deadline = time.monotonic() + HOOK_BUDGET_SECONDS
+    try:
+        surface_pending_warnings()
+    except Exception:
+        pass
     raw = ""
     try:
         raw, clean = _read_stdin()
@@ -663,15 +724,7 @@ def main() -> None:
     except SystemExit:
         raise
     except Exception:
-        # Never exit 1 (a non-blocking error that lets the action proceed
-        # unmodified). Block if the input carries a secret; otherwise proceed.
-        try:
-            secret = _has_secret(raw)
-        except Exception:
-            secret = True
-        if secret:
-            _block("internal error while checking for secrets")
-        sys.exit(0)
+        _fail_closed(raw)
 
 
 if __name__ == "__main__":

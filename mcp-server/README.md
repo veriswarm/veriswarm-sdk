@@ -38,10 +38,17 @@ How the guards behave when something goes wrong or needs a decision:
   invalid response, or out of time), the response is replaced with a "withheld" notice.
 - **Prompt PII check fails open.** If the PII check on a prompt can't finish, the prompt is sent and you see
   a warning. Secrets in prompts are checked locally and always blocked.
-- **Time limit.** All API calls share a 7-second wall-clock budget inside the 10-second hook timeout. When it
+- **Secrets are always redacted locally.** Known-prefix secrets (`ghp_`, `sk-`, `AKIA`, …) are caught without
+  any network call in prompts (blocked), MCP tool arguments, and MCP tool responses (redacted), whatever
+  `GUARD_SECRETS_DETECTION` is set to. Any error in a guard blocks the prompt or tool call, or withholds the
+  tool output.
+- **Time limit.** All API calls share a 6-second wall-clock budget inside the 10-second hook timeout. When it
   runs out, secrets are redacted locally and unscanned tool output is withheld.
-- **A broken secret-rules manifest blocks.** If the bundled secret rules can't load, prompts are blocked, and
-  MCP tool calls are blocked when `GUARD_SECRETS_DETECTION` is on. Reinstall the package to fix it.
+- **A broken secret-rules manifest blocks.** If the bundled secret rules can't load, prompts and MCP tool
+  calls are blocked and MCP tool output is withheld. Reinstall the package to fix it.
+- **Upload warnings.** Activity-upload problems (events rejected as invalid, buffer evictions, missing
+  `GUARD_AGENT_ID`) are recorded in `~/.veriswarm/activity_reporter.log`; the next hook run prints a one-line
+  summary to stderr and clears the file.
 - **Hook failures block.** `veriswarm-setup` installs the prompt and tool-input guards with
   `"onFailure": "block"`, so a crash or timeout blocks the prompt or tool call instead of letting it through.
   This needs Claude Code v2.1.295 or later.
@@ -74,7 +81,7 @@ If you prefer manual configuration:
 | `VERISWARM_AGENT_KEY` | Yes (or `API_KEY`) | Agent-scoped key for self-reporting tools |
 | `GUARD_AGENT_ID` | For activity upload | Agent that Guard hook activity events are attributed to. Without it, events stay in the local buffer and are not uploaded |
 | `GUARD_BLOCK_PROMPT_PII` | No | Block prompts that contain PII (default on). Set to `0` to allow them. Prompts with secrets are always blocked |
-| `GUARD_SECRETS_DETECTION` | No | `1` enables the fail-closed secret tripwire on MCP tools: known-prefix secrets in tool arguments and responses are redacted, and the call is blocked if redaction fails. If the bundled secret rules can't load, MCP tool calls are blocked |
+| `GUARD_SECRETS_DETECTION` | No | `1` also sends secrets found in MCP tool arguments to the Guard API for tokenization (recoverable tokens) before falling back to local redaction. Local secret redaction in prompts, tool arguments and tool responses is always on, regardless of this setting |
 | `GUARD_PII_EXEMPT_PREFIXES` | No | Comma-separated tool-name prefixes (e.g. `mcp__mystore__`) that skip PII tokenization and the PII warning. Empty by default. The secret tripwire still applies |
 
 ## Tools (102 total)

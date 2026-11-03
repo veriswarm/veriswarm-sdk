@@ -522,3 +522,119 @@ def test_tripwire_skips_api_when_budget_is_low(monkeypatch):
     monkeypatch.setattr(gh, "_post_within", _no_api)
 
     assert gh.apply_secret_tripwire("token " + GH) == "token [VS:GITHUB_TOKEN:offline]"
+
+
+# ── Round 2: always-on secret redaction, crash fail-closed, no fork ──
+
+def test_secrets_redacted_in_tool_input_even_with_detection_off(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+
+    _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
+
+    assert _output(capsys)["hookSpecificOutput"]["updatedInput"]["body"] == "token [VS:GITHUB_TOKEN:offline]"
+
+
+def test_secrets_redacted_in_tool_output_even_with_detection_off(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False, api_key="")
+
+    _run_main(gh, monkeypatch, _event("PostToolUse", tool_response="key " + GH))
+
+    assert _output(capsys)["hookSpecificOutput"]["updatedToolOutput"] == "key [VS:GITHUB_TOKEN:offline]"
+
+
+def test_detection_flag_only_controls_the_api_tokenize_step(monkeypatch):
+    gh = _reload_hook(monkeypatch, secrets=False)
+
+    def _no_api(text, **k):
+        raise AssertionError("API tokenize used with detection off")
+
+    monkeypatch.setattr(gh, "_tokenize", _no_api)
+
+    assert gh.apply_secret_tripwire("token " + GH) == "token [VS:GITHUB_TOKEN:offline]"
+
+
+def test_unparseable_stdin_with_secret_blocks_with_detection_off(monkeypatch):
+    gh = _reload_hook(monkeypatch, secrets=False)
+
+    assert _run_main(gh, monkeypatch, b"\xff\xfe" + GH.encode()) == 2
+
+
+def test_post_tool_use_crash_inside_handler_withholds_output(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(gh, "_guard_strings", _boom)
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response="key " + GH))
+
+    assert code == 0
+    raw = json.dumps(_output(capsys))
+    assert GH not in raw
+    assert "withheld" in raw
+
+
+def test_post_tool_use_crash_outside_handler_withholds_output(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(gh, "handle_post_tool_use", _boom)
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response=[{"type": "text", "text": "key " + GH}]))
+
+    assert code == 0
+    out = _output(capsys)["hookSpecificOutput"]
+    assert out["hookEventName"] == "PostToolUse"
+    assert "withheld" in json.dumps(out["updatedToolOutput"])
+    assert GH not in json.dumps(out)
+
+
+def test_post_tool_use_budget_leaves_headroom(monkeypatch):
+    gh = _reload_hook(monkeypatch)
+    assert gh.HOOK_BUDGET_SECONDS <= 6.0
+
+
+class _RaisingTripwire:
+    def scan(self, text):
+        raise RuntimeError("tripwire bug")
+
+
+def test_prompt_tripwire_error_blocks_without_echoing_prompt(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_get_tripwire", lambda: _RaisingTripwire())
+
+    code = _run_main(gh, monkeypatch, _prompt_event("my private prompt text"))
+
+    out = _output(capsys)
+    assert code == 0
+    assert out["decision"] == "block"
+    assert out["hookSpecificOutput"]["suppressOriginalPrompt"] is True
+    assert "my private prompt text" not in json.dumps(out)
+
+
+def test_foreground_run_surfaces_pending_reporter_warnings(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    import activity_reporter as reporter  # the sibling module guard_hook imports
+    reporter._warn("Activity upload: dropped 3 event(s) the API rejected as invalid (HTTP 400/413/422).")
+
+    _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"q": "x"}))
+
+    assert "dropped 3" in capsys.readouterr().err
+
+
+def test_timed_out_request_thread_prevents_fork(monkeypatch, stalling_api):
+    gh = _reload_hook(monkeypatch)
+    import activity_reporter as reporter
+
+    with pytest.raises(gh.ScanUnavailable):
+        gh._post_within(gh.API_URL + "/v1/suite/guard/pii/tokenize", {"text": "x"}, 0.3)
+
+    def _no_fork():
+        raise AssertionError("forked while a request thread was alive")
+
+    monkeypatch.setattr(reporter.os, "fork", _no_fork)
+    reporter.maybe_flush(reporter.FLUSH_THRESHOLD)

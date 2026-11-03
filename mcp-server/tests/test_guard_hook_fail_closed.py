@@ -38,10 +38,11 @@ def test_no_hit_passthrough(monkeypatch):
     assert gh.apply_secret_tripwire(clean) == clean
 
 
-def test_disabled_is_passthrough(monkeypatch):
+def test_detection_off_still_redacts_locally(monkeypatch):
+    # Local redaction is always on; the flag only gates the API tokenize step.
     gh = _reload_hook(monkeypatch, enabled=False)
     monkeypatch.setattr(gh, "_tokenize", lambda text: None)
-    assert gh.apply_secret_tripwire("token " + GH) == "token " + GH
+    assert gh.apply_secret_tripwire("token " + GH) == "token [VS:GITHUB_TOKEN:offline]"
 
 
 def test_prefix_hit_uses_tokenize_when_online(monkeypatch):
