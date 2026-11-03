@@ -25,9 +25,26 @@ The setup wizard configures everything for your platform (Claude Code, Gemini CL
 
 | Hook | Event | Action |
 |------|-------|--------|
-| Prompt Guard | `UserPromptSubmit` | Blocks prompts containing PII (emails, SSNs, etc.) |
-| Tool Input Guard | `PreToolUse` | Tokenizes PII in tool arguments before execution |
-| Tool Output Guard | `PostToolUse` | Tokenizes PII in tool responses before the LLM sees them |
+| Prompt Guard | `UserPromptSubmit` | Blocks prompts containing secrets (always) or PII (on by default; `GUARD_BLOCK_PROMPT_PII=0` turns the PII check off) |
+| Tool Input Guard | `PreToolUse` | Redacts secrets and tokenizes PII in MCP tool arguments before execution |
+| Tool Output Guard | `PostToolUse` | Redacts secrets and tokenizes PII in MCP tool responses before the LLM sees them |
+
+How the guards behave when something goes wrong or needs a decision:
+
+- **Rewritten tool calls ask for confirmation.** When the Tool Input Guard changes an MCP call's arguments,
+  it returns the rewritten call with permission decision `ask`, so you review it before it runs. In headless
+  runs (`claude -p`) nobody can answer that prompt, so those calls are denied.
+- **Tool output is withheld, not leaked.** If the PII scan of a tool response can't finish (API unreachable,
+  invalid response, or out of time), the response is replaced with a "withheld" notice.
+- **Prompt PII check fails open.** If the PII check on a prompt can't finish, the prompt is sent and you see
+  a warning. Secrets in prompts are checked locally and always blocked.
+- **Time limit.** All API calls share a 7-second wall-clock budget inside the 10-second hook timeout. When it
+  runs out, secrets are redacted locally and unscanned tool output is withheld.
+- **A broken secret-rules manifest blocks.** If the bundled secret rules can't load, prompts are blocked, and
+  MCP tool calls are blocked when `GUARD_SECRETS_DETECTION` is on. Reinstall the package to fix it.
+- **Hook failures block.** `veriswarm-setup` installs the prompt and tool-input guards with
+  `"onFailure": "block"`, so a crash or timeout blocks the prompt or tool call instead of letting it through.
+  This needs Claude Code v2.1.295 or later.
 
 ### Manual setup
 
@@ -56,7 +73,8 @@ If you prefer manual configuration:
 | `VERISWARM_API_KEY` | Yes (or `AGENT_KEY`) | Platform API key for workspace operations |
 | `VERISWARM_AGENT_KEY` | Yes (or `API_KEY`) | Agent-scoped key for self-reporting tools |
 | `GUARD_AGENT_ID` | For activity upload | Agent that Guard hook activity events are attributed to. Without it, events stay in the local buffer and are not uploaded |
-| `GUARD_SECRETS_DETECTION` | No | `1` enables the fail-closed secret tripwire in the Guard hook: known-prefix secrets in MCP tool arguments are redacted, and the call is blocked if redaction fails |
+| `GUARD_BLOCK_PROMPT_PII` | No | Block prompts that contain PII (default on). Set to `0` to allow them. Prompts with secrets are always blocked |
+| `GUARD_SECRETS_DETECTION` | No | `1` enables the fail-closed secret tripwire on MCP tools: known-prefix secrets in tool arguments and responses are redacted, and the call is blocked if redaction fails. If the bundled secret rules can't load, MCP tool calls are blocked |
 | `GUARD_PII_EXEMPT_PREFIXES` | No | Comma-separated tool-name prefixes (e.g. `mcp__mystore__`) that skip PII tokenization and the PII warning. Empty by default. The secret tripwire still applies |
 
 ## Tools (102 total)

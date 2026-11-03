@@ -101,3 +101,25 @@ def test_built_wheel_ships_hook_scripts():
         "veriswarm_mcp/__main__.py",
     ):
         assert required in names
+
+
+def _guard_handlers(event):
+    hooks = vs_setup._generate_hooks_config(vs_setup._hook_script_path(), "vs_key")["hooks"]
+    return [h for entry in hooks.get(event, []) for h in entry["hooks"] if "guard_hook" in h["command"]]
+
+
+@pytest.mark.parametrize("event", ["UserPromptSubmit", "PreToolUse"])
+def test_gatekeeping_guard_hooks_block_on_failure(event):
+    handlers = _guard_handlers(event)
+
+    assert len(handlers) == 1
+    assert handlers[0]["onFailure"] == "block"
+    assert handlers[0]["timeout"] == 10
+
+
+def test_guard_budget_fits_inside_installed_timeout():
+    import veriswarm_mcp.hooks.guard_hook as gh
+
+    timeouts = {h["timeout"] for e in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse") for h in _guard_handlers(e)}
+    # Leave room for interpreter start-up and writing the output.
+    assert all(gh.HOOK_BUDGET_SECONDS + 2 <= t for t in timeouts)
