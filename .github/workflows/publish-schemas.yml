@@ -17,11 +17,35 @@ jobs:
         working-directory: schemas
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Guard release ref and version
+        working-directory: .
+        run: python3 scripts/check_release_version.py schemas "$GITHUB_REF"
+
+      - name: Require tagged commit to be on main
+        working-directory: .
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "::error::Tagged commit is not reachable from main"; exit 1; }
+
 
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Validate schemas
+        working-directory: .
+        run: |
+          pip install jsonschema
+          python3 scripts/validate_schemas.py
 
       - name: Verify package
         run: npm pack --dry-run
