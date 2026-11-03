@@ -143,7 +143,7 @@ class VeriSwarmClient:
     ``code="ACCOUNT_TOKEN_REQUIRED"`` when it is not configured.
     """
     base_url: str
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     timeout_seconds: float = 15
     secrets_detection: bool = False
     account_token: str | None = field(default=None, repr=False)

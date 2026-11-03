@@ -127,3 +127,9 @@ def test_redirect_handler_strips_session_token():
     names = {k.lower() for k in new.headers}
     assert "x-account-access-token" not in names
     assert "x-api-key" not in names
+
+
+def test_repr_never_shows_credentials():
+    c = VeriSwarmClient(base_url=BASE, api_key="vsk_secret", account_token="acct_secret")
+    assert "vsk_secret" not in repr(c)
+    assert "acct_secret" not in repr(c)
