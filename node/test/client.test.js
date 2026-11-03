@@ -34,7 +34,7 @@ describe('VeriSwarmClient', () => {
   });
 
   it('should throw if both keys are missing', () => {
-    expect(() => new VeriSwarmClient({ baseUrl })).toThrow('either apiKey or agentKey is required');
+    expect(() => new VeriSwarmClient({ baseUrl })).toThrow('one of apiKey, agentKey, or accountToken is required');
   });
 
   it('should format baseUrl by removing trailing slashes', () => {

@@ -10,7 +10,7 @@ BASE = "https://api.test"
 
 @pytest.fixture
 def client() -> VeriSwarmClient:
-    return VeriSwarmClient(base_url=BASE, api_key="vsk_x")
+    return VeriSwarmClient(base_url=BASE, api_key="vsk_x", account_token="acct")
 
 
 @pytest.mark.parametrize("bad", [".", "..", ""])

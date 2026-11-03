@@ -28,6 +28,40 @@ const decision = await client.checkDecision({
 console.log(decision.decision); // "allow", "review", or "deny"
 ```
 
+## Authentication
+
+The client accepts three credentials; pass whichever your integration has:
+
+| Option | Header | Use for |
+|--------|--------|---------|
+| `apiKey` | `x-api-key` | Workspace API key (`vsk_...`) — trust checks, events, Guard scans, workflows, analytics |
+| `agentKey` | `x-agent-api-key` | Individual agent key (`vak_...`) — agent self-service (`getMyScores`, `issueCredential`) |
+| `accountToken` | `x-account-access-token` | Account session token — account administration |
+
+Some endpoints accept **only** an account session token: team and workspace
+management, notifications, IP allowlist, custom domain, scoring profile,
+approval approve/reject, JIT approve/deny, workflow step approval, governance
+credential store/revoke, shadow-discovery scan/dismiss, compliance schedule,
+Passport verify/manifests/delegations, Vault export, Guard finding updates, and
+PII session revocation. Calling one of these without `accountToken` throws a
+`VeriSwarmError` with `code === "ACCOUNT_TOKEN_REQUIRED"` before any request
+is sent.
+
+Kill switch (`killAgent`/`unkillAgent`) and Guard policy CRUD send the API key
+(an API key needs the matching Guard scope on the server) and the account
+token too when one is configured.
+
+```javascript
+const admin = new VeriSwarmClient({
+  baseUrl: "https://api.veriswarm.ai",
+  apiKey: "vsk_your_workspace_key",
+  accountToken: process.env.VERISWARM_ACCOUNT_TOKEN,
+});
+```
+
+Like API keys, the account token is only ever sent over `https://` (plain
+`http://` is allowed for `localhost`, `127.0.0.1`, and `[::1]` only).
+
 ## Event Ingestion
 
 ```javascript

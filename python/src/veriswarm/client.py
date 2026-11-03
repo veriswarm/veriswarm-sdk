@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import functools
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as _q, urlencode as _qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -41,6 +42,9 @@ def _query_value(value: Any) -> str:
     return str(value)
 
 
+_CREDENTIAL_HEADERS = ("x-api-key", "x-account-access-token", "authorization")
+
+
 class _StripAuthRedirectHandler(HTTPRedirectHandler):
     """Strip credential headers when urllib follows a redirect.
 
@@ -57,7 +61,7 @@ class _StripAuthRedirectHandler(HTTPRedirectHandler):
             return None
         new_req.headers = {
             k: v for k, v in new_req.headers.items()
-            if k.lower() not in ("x-api-key", "authorization")
+            if k.lower() not in _CREDENTIAL_HEADERS
         }
         return new_req
 
@@ -66,7 +70,43 @@ _OPENER = build_opener(_StripAuthRedirectHandler())
 
 
 class VeriSwarmClientError(RuntimeError):
-    pass
+    """Error raised by the client.
+
+    ``status`` is the HTTP status when a response was received (``None`` for
+    local or network failures); ``code`` names local failure classes such as
+    ``"ACCOUNT_TOKEN_REQUIRED"``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _requires_account_token(method: _F) -> _F:
+    """Fail fast for endpoints whose server route accepts only a session token."""
+
+    @functools.wraps(method)
+    def wrapper(self: "VeriSwarmClient", *args: Any, **kwargs: Any) -> Any:
+        if not self.account_token:
+            raise VeriSwarmClientError(
+                f"{method.__name__} requires an account session token: pass "
+                "account_token to VeriSwarmClient (this endpoint does not "
+                "accept API keys)",
+                code="ACCOUNT_TOKEN_REQUIRED",
+            )
+        return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
 
 
 @dataclass(slots=True)
@@ -76,18 +116,25 @@ class VeriSwarmClient:
     Usage:
         client = VeriSwarmClient(base_url="https://api.veriswarm.ai", api_key="vsk_...")
         decision = client.check_decision(agent_id="agt_123", action_type="post_message")
+
+    ``account_token`` is an account session token sent as
+    ``x-account-access-token``. Account-administration methods (team,
+    workspaces, notifications, Passport, Vault export, ...) call routes that
+    accept only a session token and raise ``VeriSwarmClientError`` with
+    ``code="ACCOUNT_TOKEN_REQUIRED"`` when it is not configured.
     """
     base_url: str
-    api_key: str
+    api_key: str | None = None
     timeout_seconds: int = 15
     secrets_detection: bool = False
+    account_token: str | None = field(default=None, repr=False)
     _tripwire: "SecretTripwire | None" = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.base_url:
             raise ValueError("base_url is required")
-        if not self.api_key:
-            raise ValueError("api_key is required")
+        if not self.api_key and not self.account_token:
+            raise ValueError("api_key or account_token is required")
         self.base_url = self.base_url.rstrip("/")
         # Reject non-https base_url. The SDK ships x-api-key on every
         # request; an http base_url would transmit it in plaintext where
@@ -304,10 +351,12 @@ class VeriSwarmClient:
 
     # --- Scoring Profiles ---
 
+    @_requires_account_token
     def get_scoring_profile(self) -> dict[str, Any]:
         """Get the current tenant's scoring profile."""
         return self._get("/v1/suite/scoring/profile")
 
+    @_requires_account_token
     def set_scoring_profile(
         self,
         profile_code: str,
@@ -345,6 +394,7 @@ class VeriSwarmClient:
         """Get details of a PII tokenization session."""
         return self._get(f"/v1/suite/guard/pii/sessions/{_path(session_id)}")
 
+    @_requires_account_token
     def revoke_pii_session(self, session_id: str) -> dict[str, Any]:
         """Revoke (delete) a PII tokenization session and all its tokens."""
         return self._request(f"/v1/suite/guard/pii/sessions/{_path(session_id)}", method="DELETE")
@@ -383,36 +433,43 @@ class VeriSwarmClient:
         """List Guard security findings, optionally filtered by agent."""
         return self._get("/v1/suite/guard/findings", query={"agent_id": agent_id or None})
 
+    @_requires_account_token
     def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         """Update a Guard finding (e.g. resolve, dismiss)."""
         return self._request(f"/v1/suite/guard/findings/{_path(finding_id)}", method="PATCH", body=updates)
 
     # --- Passport Delegations ---
 
+    @_requires_account_token
     def create_delegation(self, delegation: dict[str, Any]) -> dict[str, Any]:
         """Create a new Passport delegation grant."""
         return self._post("/v1/suite/passport/delegations", delegation)
 
+    @_requires_account_token
     def list_delegations(self) -> list[dict[str, Any]]:
         """List active Passport delegations."""
         return self._get("/v1/suite/passport/delegations")
 
+    @_requires_account_token
     def revoke_delegation(self, delegation_id: int) -> dict[str, Any]:
         """Revoke a Passport delegation."""
         return self._request(f"/v1/suite/passport/delegations/{_path(delegation_id)}", method="DELETE")
 
     # --- Passport Verification ---
 
+    @_requires_account_token
     def verify_agent_identity(self, agent_id: str) -> dict[str, Any]:
         """Mark an agent as identity-verified in Passport."""
         return self._post(f"/v1/suite/passport/verify/{_path(agent_id)}")
 
     # --- Passport Manifests ---
 
+    @_requires_account_token
     def create_manifest(self, agent_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         """Create or update an agent capability manifest."""
         return self._post(f"/v1/suite/passport/manifests/{_path(agent_id)}", manifest)
 
+    @_requires_account_token
     def get_manifests(self, agent_id: str) -> list[dict[str, Any]]:
         """Get agent capability manifests from Passport."""
         return self._get(f"/v1/suite/passport/manifests/{_path(agent_id)}")
@@ -429,76 +486,92 @@ class VeriSwarmClient:
         """Verify hash-chain integrity of the Vault ledger."""
         return self._get("/v1/suite/vault/verify", query={"limit": limit})
 
+    @_requires_account_token
     def export_vault(self, *, export_type: str = "json") -> dict[str, Any]:
         """Create a Vault export job."""
         return self._post("/v1/suite/vault/export", {"export_type": export_type})
 
+    @_requires_account_token
     def get_vault_export_status(self, job_id: str) -> dict[str, Any]:
         """Check the status of a Vault export job."""
         return self._get(f"/v1/suite/vault/export/{_path(job_id)}")
 
     # --- Notifications ---
 
+    @_requires_account_token
     def list_notifications(self) -> list[dict[str, Any]]:
         """List notifications for the current workspace."""
         return self._get("/v1/suite/notifications")
 
+    @_requires_account_token
     def mark_notification_read(self, notification_id: int) -> dict[str, Any]:
         """Mark a single notification as read."""
         return self._post(f"/v1/suite/notifications/{_path(notification_id)}/read")
 
+    @_requires_account_token
     def mark_all_notifications_read(self) -> dict[str, Any]:
         """Mark all notifications as read."""
         return self._post("/v1/suite/notifications/read-all")
 
     # --- IP Allowlist ---
 
+    @_requires_account_token
     def get_ip_allowlist(self) -> dict[str, Any]:
         """Get the current IP allowlist for the workspace."""
         return self._get("/v1/public/providers/ip-allowlist")
 
+    @_requires_account_token
     def set_ip_allowlist(self, *, cidrs: list[str], enabled: bool = True) -> dict[str, Any]:
         """Set the IP allowlist for the workspace."""
         return self._post("/v1/public/providers/ip-allowlist", {"cidrs": cidrs, "enabled": enabled})
 
     # --- Custom Domains ---
 
+    @_requires_account_token
     def get_custom_domain(self) -> dict[str, Any]:
         """Get the custom domain configuration for the workspace."""
         return self._get("/v1/public/providers/custom-domain")
 
+    @_requires_account_token
     def set_custom_domain(self, *, domain: str) -> dict[str, Any]:
         """Set a custom domain for the workspace."""
         return self._post("/v1/public/providers/custom-domain", {"domain": domain})
 
+    @_requires_account_token
     def verify_custom_domain(self) -> dict[str, Any]:
         """Verify DNS configuration for the custom domain."""
         return self._post("/v1/public/providers/custom-domain/verify")
 
+    @_requires_account_token
     def delete_custom_domain(self) -> dict[str, Any]:
         """Remove the custom domain from the workspace."""
         return self._request("/v1/public/providers/custom-domain", method="DELETE")
 
     # --- Team Management ---
 
+    @_requires_account_token
     def list_team_members(self) -> list[dict[str, Any]]:
         """List team members in the current workspace."""
         return self._get("/v1/public/providers/team")
 
+    @_requires_account_token
     def invite_team_member(self, *, email: str, role: str = "member") -> dict[str, Any]:
         """Invite a new team member to the workspace."""
         return self._post("/v1/public/providers/team/invite", {"email": email, "role": role})
 
+    @_requires_account_token
     def remove_team_member(self, user_id: str) -> dict[str, Any]:
         """Remove a team member from the workspace."""
         return self._request(f"/v1/public/providers/team/{_path(user_id)}", method="DELETE")
 
     # --- Workspaces ---
 
+    @_requires_account_token
     def list_workspaces(self) -> list[dict[str, Any]]:
         """List workspaces the current user belongs to."""
         return self._get("/v1/public/accounts/workspaces")
 
+    @_requires_account_token
     def switch_workspace(self, tenant_id: str) -> dict[str, Any]:
         """Switch the user's active workspace."""
         return self._post(f"/v1/public/accounts/workspaces/{_path(tenant_id)}/switch")
@@ -609,6 +682,7 @@ class VeriSwarmClient:
         """Retry a failed execution."""
         return self._post(f"/v1/workflows/executions/{_path(execution_id)}/retry")
 
+    @_requires_account_token
     def approve_step(
         self,
         execution_id: str,
@@ -911,6 +985,7 @@ class VeriSwarmClient:
         """Get a single approval request."""
         return self._get(f"/v1/approvals/{_path(approval_id)}")
 
+    @_requires_account_token
     def approve_approval(
         self, approval_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -923,6 +998,7 @@ class VeriSwarmClient:
             body["reason"] = reason
         return self._post(f"/v1/approvals/{_path(approval_id)}/approve", body=body)
 
+    @_requires_account_token
     def reject_approval(
         self, approval_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -1108,10 +1184,12 @@ class VeriSwarmClient:
             body["reason"] = reason
         return self._post("/v1/passport/jit/request", body=body)
 
+    @_requires_account_token
     def approve_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Approve a pending JIT grant (requires account session token)."""
         return self._post(f"/v1/passport/jit/{_path(grant_id)}/approve")
 
+    @_requires_account_token
     def deny_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """Deny a pending JIT grant."""
         body: dict[str, Any] = {}
@@ -1177,6 +1255,7 @@ class VeriSwarmClient:
             "/v1/governance/anomalies", query={"limit": limit, "agent_id": agent_id or None}
         )
 
+    @_requires_account_token
     def run_shadow_discovery(self) -> dict[str, Any]:
         """Trigger a shadow-agent discovery scan."""
         return self._post("/v1/governance/discovery/scan")
@@ -1185,10 +1264,12 @@ class VeriSwarmClient:
         """List discovered shadow agents, optionally filtered by status."""
         return self._get("/v1/governance/discovery", query={"status": status or None})
 
+    @_requires_account_token
     def dismiss_discovered_agent(self, discovery_id: int) -> dict[str, Any]:
         """Dismiss a discovered shadow agent."""
         return self._post(f"/v1/governance/discovery/{_path(discovery_id)}/dismiss")
 
+    @_requires_account_token
     def store_credential(
         self,
         *,
@@ -1223,6 +1304,7 @@ class VeriSwarmClient:
         """List stored credentials (names/metadata only — never values)."""
         return self._get("/v1/governance/credentials")
 
+    @_requires_account_token
     def revoke_credential(self, credential_id: int) -> dict[str, Any]:
         """Revoke a stored credential by id."""
         return self._request(f"/v1/governance/credentials/{_path(credential_id)}", method="DELETE")
@@ -1240,10 +1322,12 @@ class VeriSwarmClient:
             query={"limit": limit, "credential_id": credential_id, "agent_id": agent_id or None},
         )
 
+    @_requires_account_token
     def get_compliance_schedule(self) -> dict[str, Any]:
         """Get the scheduled compliance report delivery config."""
         return self._get("/v1/governance/compliance/schedule")
 
+    @_requires_account_token
     def set_compliance_schedule(
         self,
         *,
@@ -1257,6 +1341,7 @@ class VeriSwarmClient:
             {"framework": framework, "frequency": frequency, "email": email},
         )
 
+    @_requires_account_token
     def delete_compliance_schedule(self) -> dict[str, Any]:
         """Remove the scheduled compliance report delivery."""
         return self._request("/v1/governance/compliance/schedule", method="DELETE")
@@ -1279,6 +1364,17 @@ class VeriSwarmClient:
         """Convenience wrapper for POST requests."""
         return self._request(path, method="POST", body=body)
 
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "veriswarm-python-sdk/0.4.0",
+        }
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        if self.account_token:
+            headers["x-account-access-token"] = self.account_token
+        return headers
+
     def _request(
         self,
         path: str,
@@ -1292,11 +1388,7 @@ class VeriSwarmClient:
             f"{self.base_url}{_with_query(path, query)}",
             data=encoded,
             method=method,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "veriswarm-python-sdk/0.4.0",
-                "x-api-key": self.api_key,
-            },
+            headers=self._headers(),
         )
         try:
             with _OPENER.open(request, timeout=self.timeout_seconds) as response:

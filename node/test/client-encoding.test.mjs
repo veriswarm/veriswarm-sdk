@@ -16,7 +16,7 @@ describe("path segment safety", () => {
   let client;
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    client = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "vsk_x" });
+    client = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "vsk_x", accountToken: "acct" });
   });
 
   it.each([".", "..", ""])("rejects %j as a path id before any request", async (bad) => {
@@ -64,7 +64,7 @@ describe("query value encoding", () => {
   let client;
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
-    client = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "vsk_x" });
+    client = new VeriSwarmClient({ baseUrl: "https://api.test", apiKey: "vsk_x", accountToken: "acct" });
   });
 
   it("encodes status in listExecutions", async () => {

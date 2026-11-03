@@ -27,6 +27,39 @@ decision = client.check_decision(
 print(decision["decision"])  # "allow", "review", or "deny"
 ```
 
+## Authentication
+
+| Argument | Header | Use for |
+|----------|--------|---------|
+| `api_key` | `x-api-key` | Workspace API key (`vsk_...`) — trust checks, events, Guard scans, workflows, analytics |
+| `account_token` | `x-account-access-token` | Account session token — account administration |
+
+Some endpoints accept **only** an account session token: team and workspace
+management, notifications, IP allowlist, custom domain, scoring profile,
+approval approve/reject, JIT approve/deny, workflow step approval, governance
+credential store/revoke, shadow-discovery scan/dismiss, compliance schedule,
+Passport verify/manifests/delegations, Vault export, Guard finding updates, and
+PII session revocation. Calling one of these without `account_token` raises
+`VeriSwarmClientError` with `code == "ACCOUNT_TOKEN_REQUIRED"` before any
+request is sent.
+
+Kill switch (`kill_agent`/`unkill_agent`) and Guard policy CRUD send the API
+key (an API key needs the matching Guard scope on the server) and the account
+token too when one is configured.
+
+```python
+import os
+
+admin = VeriSwarmClient(
+    base_url="https://api.veriswarm.ai",
+    api_key="vsk_your_workspace_key",
+    account_token=os.environ["VERISWARM_ACCOUNT_TOKEN"],
+)
+```
+
+Like API keys, the account token is only ever sent over `https://` (plain
+`http://` is allowed for `localhost`, `127.0.0.1`, and `[::1]` only).
+
 ## Event Ingestion
 
 ```python

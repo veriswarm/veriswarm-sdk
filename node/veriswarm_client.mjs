@@ -26,6 +26,22 @@ function pathSegment(value) {
   return encodeURIComponent(segment);
 }
 
+/**
+ * Error thrown by the client. `status` is the HTTP status when a response
+ * was received (null for local/network failures); `code` names local
+ * failure classes (e.g. ACCOUNT_TOKEN_REQUIRED); `payload` carries the
+ * parsed error body for callers that opt in to reading it.
+ */
+export class VeriSwarmError extends Error {
+  constructor(message, { status = null, code = null, payload = undefined, cause = undefined } = {}) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "VeriSwarmError";
+    this.status = status;
+    this.code = code;
+    if (payload !== undefined) this.payload = payload;
+  }
+}
+
 /** Tagged template: every interpolated value becomes one encoded path segment. */
 function apiPath(strings, ...values) {
   return strings.reduce(
@@ -51,11 +67,24 @@ export class VeriSwarmClient {
    * @param {string} options.baseUrl - e.g. https://api.veriswarm.ai
    * @param {string} [options.apiKey] - workspace API key (vsk_...)
    * @param {string} [options.agentKey] - individual agent API key (vak_...)
+   * @param {string} [options.accountToken] - account session token, sent as
+   *   x-account-access-token. Required by account-administration endpoints
+   *   (team, workspaces, notifications, Passport, Vault export, ...) that do
+   *   not accept API keys.
    * @param {number} [options.timeoutMs=15000]
    */
-  constructor({ baseUrl, apiKey = null, agentKey = null, timeoutMs = 15000, secretsDetection = false }) {
+  constructor({
+    baseUrl,
+    apiKey = null,
+    agentKey = null,
+    accountToken = null,
+    timeoutMs = 15000,
+    secretsDetection = false,
+  }) {
     if (!baseUrl) throw new Error("baseUrl is required");
-    if (!apiKey && !agentKey) throw new Error("either apiKey or agentKey is required");
+    if (!apiKey && !agentKey && !accountToken) {
+      throw new Error("one of apiKey, agentKey, or accountToken is required");
+    }
     // Reject non-https baseUrl. The SDK ships x-api-key on every
     // request; an http baseUrl transmits it in plaintext where any
     // MITM can harvest it. Local development against http://localhost
@@ -79,6 +108,7 @@ export class VeriSwarmClient {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
     this.agentKey = agentKey;
+    this.accountToken = accountToken;
     this.timeoutMs = timeoutMs;
     this.secretsDetection = secretsDetection === true;
     this._tripwire = null;
@@ -248,11 +278,13 @@ export class VeriSwarmClient {
 
   /** Get the current tenant's scoring profile. */
   async getScoringProfile() {
+    this.#requireAccountToken("getScoringProfile");
     return this.#request("/v1/suite/scoring/profile");
   }
 
   /** Set the tenant's scoring profile. Admin required. */
   async setScoringProfile(profileCode, weightOverrides = null) {
+    this.#requireAccountToken("setScoringProfile");
     const body = { profile_code: profileCode };
     if (weightOverrides) body.weight_overrides = weightOverrides;
     return this.#request("/v1/suite/scoring/profile", { method: "POST", body });
@@ -291,6 +323,7 @@ export class VeriSwarmClient {
 
   /** Revoke a PII tokenization session and all its tokens. */
   async revokePiiSession(sessionId) {
+    this.#requireAccountToken("revokePiiSession");
     return this.#request(apiPath`/v1/suite/guard/pii/sessions/${sessionId}`, { method: "DELETE" });
   }
 
@@ -337,6 +370,7 @@ export class VeriSwarmClient {
 
   /** Update a Guard finding (e.g. resolve, dismiss). */
   async updateGuardFinding(findingId, updates) {
+    this.#requireAccountToken("updateGuardFinding");
     return this.#request(apiPath`/v1/suite/guard/findings/${findingId}`, { method: "PATCH", body: updates });
   }
 
@@ -344,16 +378,19 @@ export class VeriSwarmClient {
 
   /** Create a new Passport delegation grant. */
   async createDelegation(delegation) {
+    this.#requireAccountToken("createDelegation");
     return this.#request("/v1/suite/passport/delegations", { method: "POST", body: delegation });
   }
 
   /** List active Passport delegations. */
   async listDelegations() {
+    this.#requireAccountToken("listDelegations");
     return this.#request("/v1/suite/passport/delegations");
   }
 
   /** Revoke a Passport delegation. */
   async revokeDelegation(delegationId) {
+    this.#requireAccountToken("revokeDelegation");
     return this.#request(apiPath`/v1/suite/passport/delegations/${delegationId}`, { method: "DELETE" });
   }
 
@@ -361,6 +398,7 @@ export class VeriSwarmClient {
 
   /** Mark an agent as identity-verified in Passport. */
   async verifyAgentIdentity(agentId) {
+    this.#requireAccountToken("verifyAgentIdentity");
     return this.#request(apiPath`/v1/suite/passport/verify/${agentId}`, { method: "POST" });
   }
 
@@ -368,11 +406,13 @@ export class VeriSwarmClient {
 
   /** Create or update an agent capability manifest. */
   async createManifest(agentId, manifest) {
+    this.#requireAccountToken("createManifest");
     return this.#request(apiPath`/v1/suite/passport/manifests/${agentId}`, { method: "POST", body: manifest });
   }
 
   /** Get agent capability manifests from Passport. */
   async getManifests(agentId) {
+    this.#requireAccountToken("getManifests");
     return this.#request(apiPath`/v1/suite/passport/manifests/${agentId}`);
   }
 
@@ -390,11 +430,13 @@ export class VeriSwarmClient {
 
   /** Create a Vault export job. */
   async exportVault({ exportType = "json" } = {}) {
+    this.#requireAccountToken("exportVault");
     return this.#request("/v1/suite/vault/export", { method: "POST", body: { export_type: exportType } });
   }
 
   /** Check the status of a Vault export job. */
   async getVaultExportStatus(jobId) {
+    this.#requireAccountToken("getVaultExportStatus");
     return this.#request(apiPath`/v1/suite/vault/export/${jobId}`);
   }
 
@@ -402,16 +444,19 @@ export class VeriSwarmClient {
 
   /** List notifications for the current workspace. */
   async listNotifications() {
+    this.#requireAccountToken("listNotifications");
     return this.#request("/v1/suite/notifications");
   }
 
   /** Mark a single notification as read. */
   async markNotificationRead(notificationId) {
+    this.#requireAccountToken("markNotificationRead");
     return this.#request(apiPath`/v1/suite/notifications/${notificationId}/read`, { method: "POST" });
   }
 
   /** Mark all notifications as read. */
   async markAllNotificationsRead() {
+    this.#requireAccountToken("markAllNotificationsRead");
     return this.#request("/v1/suite/notifications/read-all", { method: "POST" });
   }
 
@@ -419,11 +464,13 @@ export class VeriSwarmClient {
 
   /** Get the current IP allowlist for the workspace. */
   async getIpAllowlist() {
+    this.#requireAccountToken("getIpAllowlist");
     return this.#request("/v1/public/providers/ip-allowlist");
   }
 
   /** Set the IP allowlist for the workspace. */
   async setIpAllowlist({ cidrs, enabled = true }) {
+    this.#requireAccountToken("setIpAllowlist");
     return this.#request("/v1/public/providers/ip-allowlist", { method: "POST", body: { cidrs, enabled } });
   }
 
@@ -431,21 +478,25 @@ export class VeriSwarmClient {
 
   /** Get the custom domain configuration for the workspace. */
   async getCustomDomain() {
+    this.#requireAccountToken("getCustomDomain");
     return this.#request("/v1/public/providers/custom-domain");
   }
 
   /** Set a custom domain for the workspace. */
   async setCustomDomain(domain) {
+    this.#requireAccountToken("setCustomDomain");
     return this.#request("/v1/public/providers/custom-domain", { method: "POST", body: { domain } });
   }
 
   /** Verify DNS configuration for the custom domain. */
   async verifyCustomDomain() {
+    this.#requireAccountToken("verifyCustomDomain");
     return this.#request("/v1/public/providers/custom-domain/verify", { method: "POST" });
   }
 
   /** Remove the custom domain from the workspace. */
   async deleteCustomDomain() {
+    this.#requireAccountToken("deleteCustomDomain");
     return this.#request("/v1/public/providers/custom-domain", { method: "DELETE" });
   }
 
@@ -453,16 +504,19 @@ export class VeriSwarmClient {
 
   /** List team members in the current workspace. */
   async listTeamMembers() {
+    this.#requireAccountToken("listTeamMembers");
     return this.#request("/v1/public/providers/team");
   }
 
   /** Invite a new team member to the workspace. */
   async inviteTeamMember({ email, role = "member" }) {
+    this.#requireAccountToken("inviteTeamMember");
     return this.#request("/v1/public/providers/team/invite", { method: "POST", body: { email, role } });
   }
 
   /** Remove a team member from the workspace. */
   async removeTeamMember(userId) {
+    this.#requireAccountToken("removeTeamMember");
     return this.#request(apiPath`/v1/public/providers/team/${userId}`, { method: "DELETE" });
   }
 
@@ -470,11 +524,13 @@ export class VeriSwarmClient {
 
   /** List workspaces the current user belongs to. */
   async listWorkspaces() {
+    this.#requireAccountToken("listWorkspaces");
     return this.#request("/v1/public/accounts/workspaces");
   }
 
   /** Switch the user's active workspace. */
   async switchWorkspace(tenantId) {
+    this.#requireAccountToken("switchWorkspace");
     return this.#request(apiPath`/v1/public/accounts/workspaces/${tenantId}/switch`, { method: "POST" });
   }
 
@@ -572,6 +628,7 @@ export class VeriSwarmClient {
 
   /** Approve, reject, or edit a human review step. */
   async approveStep(executionId, stepId, { action = "approve", editedOutput = null } = {}) {
+    this.#requireAccountToken("approveStep");
     const body = { action };
     if (editedOutput) body.edited_output = editedOutput;
     return this.#request(apiPath`/v1/workflows/executions/${executionId}/steps/${stepId}/approve`, {
@@ -846,6 +903,7 @@ export class VeriSwarmClient {
 
   /** Approve a pending approval request. Requires account session token (operator role). */
   async approveApproval(approvalId, { reason = null } = {}) {
+    this.#requireAccountToken("approveApproval");
     const body = {};
     if (reason !== null) body.reason = reason;
     return this.#request(apiPath`/v1/approvals/${approvalId}/approve`, {
@@ -856,6 +914,7 @@ export class VeriSwarmClient {
 
   /** Reject a pending approval request. Requires account session token (operator role). */
   async rejectApproval(approvalId, { reason = null } = {}) {
+    this.#requireAccountToken("rejectApproval");
     const body = {};
     if (reason !== null) body.reason = reason;
     return this.#request(apiPath`/v1/approvals/${approvalId}/reject`, {
@@ -987,11 +1046,13 @@ export class VeriSwarmClient {
 
   /** Approve a pending JIT grant (requires account session token). */
   async approveJitGrant(grantId) {
+    this.#requireAccountToken("approveJitGrant");
     return this.#request(apiPath`/v1/passport/jit/${grantId}/approve`, { method: "POST" });
   }
 
   /** Deny a pending JIT grant. */
   async denyJitGrant(grantId, { reason = null } = {}) {
+    this.#requireAccountToken("denyJitGrant");
     const body = {};
     if (reason !== null) body.reason = reason;
     return this.#request(apiPath`/v1/passport/jit/${grantId}/deny`, { method: "POST", body });
@@ -1044,6 +1105,7 @@ export class VeriSwarmClient {
 
   /** Trigger a shadow-agent discovery scan. */
   async runShadowDiscovery() {
+    this.#requireAccountToken("runShadowDiscovery");
     return this.#request("/v1/governance/discovery/scan", { method: "POST" });
   }
 
@@ -1054,11 +1116,13 @@ export class VeriSwarmClient {
 
   /** Dismiss a discovered shadow agent. */
   async dismissDiscoveredAgent(discoveryId) {
+    this.#requireAccountToken("dismissDiscoveredAgent");
     return this.#request(apiPath`/v1/governance/discovery/${discoveryId}/dismiss`, { method: "POST" });
   }
 
   /** Store an encrypted credential in the governance vault. */
   async storeCredential({ name, credentialType, value, agentId = null, minTrustScore = 0, rotationIntervalHours = null }) {
+    this.#requireAccountToken("storeCredential");
     return this.#request("/v1/governance/credentials", {
       method: "POST",
       body: {
@@ -1087,6 +1151,7 @@ export class VeriSwarmClient {
 
   /** Revoke a stored credential by id. */
   async revokeCredential(credentialId) {
+    this.#requireAccountToken("revokeCredential");
     return this.#request(apiPath`/v1/governance/credentials/${credentialId}`, { method: "DELETE" });
   }
 
@@ -1099,11 +1164,13 @@ export class VeriSwarmClient {
 
   /** Get the scheduled compliance report delivery config. */
   async getComplianceSchedule() {
+    this.#requireAccountToken("getComplianceSchedule");
     return this.#request("/v1/governance/compliance/schedule");
   }
 
   /** Configure scheduled compliance report delivery (eu-ai-act, soc2, iso42001, hipaa). */
   async setComplianceSchedule({ framework, email, frequency = "monthly" }) {
+    this.#requireAccountToken("setComplianceSchedule");
     return this.#request("/v1/governance/compliance/schedule", {
       method: "POST",
       body: { framework, frequency, email },
@@ -1112,6 +1179,7 @@ export class VeriSwarmClient {
 
   /** Remove the scheduled compliance report delivery. */
   async deleteComplianceSchedule() {
+    this.#requireAccountToken("deleteComplianceSchedule");
     return this.#request("/v1/governance/compliance/schedule", { method: "DELETE" });
   }
 
@@ -1127,6 +1195,16 @@ export class VeriSwarmClient {
 
   // --- Internal ---
 
+  /** Fail fast for endpoints whose server route accepts only a session token. */
+  #requireAccountToken(method) {
+    if (this.accountToken) return;
+    throw new VeriSwarmError(
+      `${method} requires an account session token: pass accountToken to the ` +
+        "VeriSwarmClient constructor (this endpoint does not accept API keys)",
+      { code: "ACCOUNT_TOKEN_REQUIRED" },
+    );
+  }
+
   async #request(path, { method = "GET", body = null, query = null } = {}) {
     const pathWithQuery = withQuery(path, query);
     const controller = new AbortController();
@@ -1138,6 +1216,7 @@ export class VeriSwarmClient {
       };
       if (this.apiKey) headers["x-api-key"] = this.apiKey;
       if (this.agentKey) headers["x-agent-api-key"] = this.agentKey;
+      if (this.accountToken) headers["x-account-access-token"] = this.accountToken;
 
       // redirect:'error' refuses to follow any 3xx. fetch's default
       // would re-attach headers including x-api-key on the redirected
