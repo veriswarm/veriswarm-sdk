@@ -113,5 +113,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Install script deps
+        run: pip install jsonschema pytest
       - name: Validate JSON schemas
-        run: python3 -c "import json,glob,sys;[json.load(open(f)) for f in glob.glob('schemas/*.json')];print('All schemas valid')"
+        run: python scripts/validate_schemas.py
+      - name: Test release guard script
+        run: python -m pytest -q scripts/test_check_release_version.py
+      - name: Check vendored secret manifests for drift
+        run: node scripts/check_secret_manifest.mjs
