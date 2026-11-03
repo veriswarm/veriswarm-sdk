@@ -83,6 +83,27 @@ def _require_cryptography() -> Any:
     return serialization, Ed25519PrivateKey
 
 
+# Fields of the server's closed ``PrincipalRef`` model (extra fields are
+# rejected there). The server canonicalizes ``PrincipalRef.model_dump()``,
+# which always emits every field, with ``None`` for unset ones.
+_PRINCIPAL_REF_FIELDS = ("type", "name", "identifier", "source")
+
+
+def _normalize_principal_ref(principal_ref: Any) -> dict[str, Any] | None:
+    """Return ``principal_ref`` exactly as the server hashes it: all four
+    PrincipalRef fields present, missing ones ``None``. Unknown fields raise
+    because the server would refuse them (a signature over them could never
+    verify)."""
+    if principal_ref is None:
+        return None
+    if not isinstance(principal_ref, dict):
+        raise ValueError("principal_ref must be a dict or None")
+    unknown = [key for key in principal_ref if key not in _PRINCIPAL_REF_FIELDS]
+    if unknown:
+        raise ValueError(f"principal_ref has unsupported field(s): {', '.join(map(str, unknown))}")
+    return {key: principal_ref.get(key) for key in _PRINCIPAL_REF_FIELDS}
+
+
 def _manifest_content_dict(
     *,
     version: str,
@@ -102,7 +123,7 @@ def _manifest_content_dict(
         "capabilities": sorted(capabilities or []),
         "required_tools": sorted(required_tools or []),
         "ai_disclosure": ai_disclosure,
-        "principal_ref": principal_ref,
+        "principal_ref": _normalize_principal_ref(principal_ref),
     }
 
 

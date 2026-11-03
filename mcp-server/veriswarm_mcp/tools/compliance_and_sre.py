@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, q_path, safe_error_response, safe_id
 
 
 def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
@@ -24,23 +24,19 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         evidence counts from Guard/Vault, and an overall coverage score.
         """
         try:
-            result = client.get("/v1/compliance/owasp-attestation")
+            result = await call_api(client.get, "/v1/compliance/owasp-attestation")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_owasp_attestation")
 
     @server.tool()
     async def list_compliance_frameworks() -> str:
         """List supported compliance frameworks (eu-ai-act, nist-ai-rmf, iso-42001)."""
         try:
-            result = client.get("/v1/compliance/frameworks")
+            result = await call_api(client.get, "/v1/compliance/frameworks")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_compliance_frameworks")
 
     @server.tool()
     async def get_compliance_report(framework_id: str) -> str:
@@ -50,12 +46,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns pass/warn/fail per control with evidence counts and recommendations.
         """
         try:
-            result = client.get(f"/v1/compliance/{framework_id}")
+            framework_id = safe_id(framework_id, "framework_id")
+            result = await call_api(client.get, f"/v1/compliance/{framework_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_compliance_report")
 
     # ── Cedar Policies ──────────────────────────────────────────────
 
@@ -63,12 +58,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def list_cedar_policies() -> str:
         """List active Cedar declarative policies for the tenant."""
         try:
-            result = client.get("/v1/policies")
+            result = await call_api(client.get, "/v1/policies")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_cedar_policies")
 
     @server.tool()
     async def validate_cedar_policy(policy_text: str) -> str:
@@ -77,12 +70,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Returns {"valid": true} on success, {"valid": false, "error": "..."} on failure.
         """
         try:
-            result = client.post("/v1/policies/validate", json={"policy_text": policy_text})
+            result = await call_api(client.post, "/v1/policies/validate", json={"policy_text": policy_text})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="validate_cedar_policy")
 
     @server.tool()
     async def test_cedar_policy(
@@ -95,7 +86,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     ) -> str:
         """Dry-run a Cedar policy against test input. Returns the decision."""
         try:
-            result = client.post(
+            result = await call_api(
+                client.post,
                 "/v1/policies/test",
                 json={
                     "policy_text": policy_text,
@@ -107,10 +99,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 },
             )
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="test_cedar_policy")
 
     # ── SRE: Circuit Breakers + SLOs + Error Budgets ───────────────
 
@@ -118,45 +108,39 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_sre_dashboard() -> str:
         """Combined SRE dashboard — circuit breakers + SLO + error budget + provider health."""
         try:
-            result = client.get("/v1/analytics/sre/dashboard")
+            result = await call_api(client.get, "/v1/analytics/sre/dashboard")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_sre_dashboard")
 
     @server.tool()
     async def get_circuit_breakers() -> str:
         """Get current state of all LLM provider circuit breakers (closed/open/half-open)."""
         try:
-            result = client.get("/v1/analytics/sre/circuit-breakers")
+            result = await call_api(client.get, "/v1/analytics/sre/circuit-breakers")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_circuit_breakers")
 
     @server.tool()
     async def reset_circuit_breaker(provider: str, model: str) -> str:
         """Manually reset a circuit breaker to closed state (e.g., after fixing a provider outage)."""
         try:
-            result = client.post(f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
+            provider = safe_id(provider, "provider")
+            model = q_path(model, "model")
+            result = await call_api(client.post, f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="reset_circuit_breaker")
 
     @server.tool()
     async def get_error_budget() -> str:
         """Get error budget status based on tenant SLO targets and recent LLM usage."""
         try:
-            result = client.get("/v1/analytics/sre/error-budget")
+            result = await call_api(client.get, "/v1/analytics/sre/error-budget")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_error_budget")
 
     # ── Context Governance ─────────────────────────────────────────
 
@@ -164,23 +148,19 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def get_context_dashboard(days: int = 30) -> str:
         """Combined context governance dashboard — topics + quality + gaps."""
         try:
-            result = client.get("/v1/analytics/context/dashboard", params={"days": days})
+            result = await call_api(client.get, "/v1/analytics/context/dashboard", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_context_dashboard")
 
     @server.tool()
     async def get_context_gaps(days: int = 30) -> str:
         """Detect agents with high failure rates and low knowledge base coverage."""
         try:
-            result = client.get("/v1/analytics/context/gaps", params={"days": days})
+            result = await call_api(client.get, "/v1/analytics/context/gaps", params={"days": days})
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_context_gaps")
 
     # ── Guard Extensions: MCP Scanner + Cross-Model Verification ───
 
@@ -211,14 +191,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             })
         try:
             tools = json.loads(tools_json)
-            result = client.post("/v1/suite/guard/scan-mcp", json={"tools": tools})
+            result = await call_api(client.post, "/v1/suite/guard/scan-mcp", json={"tools": tools})
             return json.dumps(result, indent=2)
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON in tools_json: {exc}"})
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="scan_mcp_tools")
 
     @server.tool()
     async def scan_ci(files_json: str) -> str:
@@ -237,14 +215,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             })
         try:
             files = json.loads(files_json)
-            result = client.post("/v1/suite/guard/scan-ci", json={"files": files})
+            result = await call_api(client.post, "/v1/suite/guard/scan-ci", json={"files": files})
             return json.dumps(result, indent=2)
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON in files_json: {exc}"})
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="scan_ci")
 
     @server.tool()
     async def verify_response(prompt: str, response: str) -> str:
@@ -263,15 +239,14 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 "received_bytes": len(response),
             })
         try:
-            result = client.post(
+            result = await call_api(
+                client.post,
                 "/v1/suite/guard/verify",
                 json={"prompt": prompt, "response": response},
             )
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="verify_response")
 
     # ── A2A Transport (Ed25519 signing) ────────────────────────────
 
@@ -283,12 +258,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         x-veriswarm-transport. Inter-agent messages can then be cryptographically signed.
         """
         try:
-            result = client.post(f"/v1/a2a/{agent_id}/keys")
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.post, f"/v1/a2a/{agent_id}/keys")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="provision_a2a_keys")
 
     # ── Content Provenance (EU AI Act Article 50) ──────────────────
 
@@ -315,12 +289,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 body["agent_id"] = agent_id
             if model:
                 body["model"] = model
-            result = client.post("/v1/content/label", json=body)
+            result = await call_api(client.post, "/v1/content/label", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="label_content")
 
     @server.tool()
     async def get_content_provenance(content_hash: str) -> str:
@@ -330,12 +302,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         VeriSwarm agent. No authentication required on the server side.
         """
         try:
-            result = client.get(f"/v1/content/provenance/{content_hash}")
+            content_hash = safe_id(content_hash, "content_hash")
+            result = await call_api(client.get, f"/v1/content/provenance/{content_hash}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_content_provenance")
 
     # ── ABAC: Agent Attributes ─────────────────────────────────────
 
@@ -347,12 +318,11 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         and can be referenced in custom policies as principal.<key>.
         """
         try:
-            result = client.get(f"/v1/agents/{agent_id}/attributes")
+            agent_id = safe_id(agent_id, "agent_id")
+            result = await call_api(client.get, f"/v1/agents/{agent_id}/attributes")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="get_agent_attributes")
 
     @server.tool()
     async def set_agent_attributes(agent_id: str, attributes_json: str) -> str:
@@ -363,18 +333,18 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         Reserved keys (policy_tier, risk_score, is_verified) are silently rejected.
         """
         try:
+            agent_id = safe_id(agent_id, "agent_id")
             attrs = json.loads(attributes_json)
-            result = client.put(
+            result = await call_api(
+                client.put,
                 f"/v1/agents/{agent_id}/attributes",
                 json={"attributes": attrs},
             )
             return json.dumps(result, indent=2)
         except json.JSONDecodeError as exc:
             return json.dumps({"error": f"Invalid JSON in attributes_json: {exc}"})
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="set_agent_attributes")
 
     # ── Passport JIT (Just-in-Time Access Grants) ─────────────────
 
@@ -400,12 +370,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 body["resource_id"] = resource_id
             if reason:
                 body["reason"] = reason
-            result = client.post("/v1/passport/jit/request", json=body)
+            result = await call_api(client.post, "/v1/passport/jit/request", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="request_jit_grant")
 
     # NOTE: approve_jit_grant and issue_jit_token are deliberately NOT
     # registered as MCP tools.
@@ -427,13 +395,12 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def revoke_jit_grant(grant_id: str, reason: str = "") -> str:
         """Revoke an approved JIT grant immediately."""
         try:
+            grant_id = safe_id(grant_id, "grant_id")
             body = {"reason": reason} if reason else {}
-            result = client.post(f"/v1/passport/jit/{grant_id}/revoke", json=body)
+            result = await call_api(client.post, f"/v1/passport/jit/{grant_id}/revoke", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="revoke_jit_grant")
 
     @server.tool()
     async def list_jit_grants(
@@ -448,9 +415,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 params["agent_id"] = agent_id
             if status:
                 params["status"] = status
-            result = client.get("/v1/passport/jit/grants", params=params)
+            result = await call_api(client.get, "/v1/passport/jit/grants", params=params)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="list_jit_grants")

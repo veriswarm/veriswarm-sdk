@@ -1,0 +1,33 @@
+{
+  "name": "ops",
+  "trigger": {
+    "type": "manual"
+  },
+  "steps": [
+    {
+      "id": "q",
+      "name": "Query",
+      "type": "platform_query",
+      "query_type": "tenant_overview"
+    },
+    {
+      "id": "m",
+      "name": "Mail",
+      "type": "send_email",
+      "depends_on": [
+        "q"
+      ]
+    },
+    {
+      "id": "a",
+      "name": "A2A",
+      "type": "a2a",
+      "depends_on": [
+        "m"
+      ]
+    }
+  ],
+  "budget": {
+    "max_duration_minutes": 4000
+  }
+}

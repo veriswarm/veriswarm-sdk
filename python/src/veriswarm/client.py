@@ -1,23 +1,64 @@
 from __future__ import annotations
 
+import functools
 import json
+import math
+import socket
+import time
+from http.client import HTTPException
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote as _q, urlencode as _qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from veriswarm._version import __version__
 from veriswarm.secret_tripwire import SecretTripwire, ensure_tripwire
+
+_MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+_USER_AGENT = f"veriswarm-python-sdk/{__version__}"
 
 
 # Path-component encoder. quote(..., safe="") percent-encodes every
 # character that's not in the unreserved set (A-Za-z0-9-_.~), so a
 # value like "../admin" becomes "..%2Fadmin" and cannot escape the
-# intended path segment. Used at every f-string path-interpolation
-# call site. (Audit 2026-05-08 HIGH-SDK-1, HIGH-SDK-3, HIGH-SDK-4.)
+# intended path segment. "." and ".." survive quoting unchanged and are
+# resolved by URL normalization, so they are rejected outright, as are
+# empty/None ids. Used at every f-string path-interpolation call site.
 def _path(value: Any) -> str:
-    """Quote an ID for safe use as a URL path component."""
-    return _q(str(value), safe="")
+    """Quote an ID for safe use as a single URL path segment."""
+    if value is None:
+        raise ValueError("path segment must not be None")
+    segment = str(value)
+    if segment in ("", ".", ".."):
+        raise ValueError(f'path segment must not be empty, "." or ".." (got {segment!r})')
+    return _q(segment, safe="")
+
+
+def _with_query(path: str, query: dict[str, Any] | None) -> str:
+    """Append ``query`` to ``path``, encoding every value and skipping ``None``."""
+    if not query:
+        return path
+    pairs = [(key, _query_value(value)) for key, value in query.items() if value is not None]
+    return f"{path}?{_qs(pairs)}" if pairs else path
+
+
+def _normalize_cidrs(cidrs: list[str] | str | None) -> str:
+    """Join a CIDR list (or comma/newline-separated string) into the server's format."""
+    if cidrs is None:
+        return ""
+    parts = cidrs.replace("\n", ",").split(",") if isinstance(cidrs, str) else cidrs
+    return ",".join(p.strip() for p in (str(x) for x in parts) if p.strip())
+
+
+def _query_value(value: Any) -> str:
+    # Match the Node SDK / server expectations for booleans.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+_CREDENTIAL_HEADERS = ("x-api-key", "x-account-access-token", "authorization")
 
 
 class _StripAuthRedirectHandler(HTTPRedirectHandler):
@@ -36,7 +77,7 @@ class _StripAuthRedirectHandler(HTTPRedirectHandler):
             return None
         new_req.headers = {
             k: v for k, v in new_req.headers.items()
-            if k.lower() not in ("x-api-key", "authorization")
+            if k.lower() not in _CREDENTIAL_HEADERS
         }
         return new_req
 
@@ -45,28 +86,82 @@ _OPENER = build_opener(_StripAuthRedirectHandler())
 
 
 class VeriSwarmClientError(RuntimeError):
-    pass
+    """Error raised by the client.
+
+    ``status`` is the HTTP status when a response was received (``None`` for
+    local or network failures); ``code`` names local failure classes such as
+    ``"ACCOUNT_TOKEN_REQUIRED"``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.code = code
 
 
-@dataclass(slots=True)
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+# How long to keep built-in-only tripwire rules before retrying the fetch.
+_TRIPWIRE_RETRY_SECONDS = 60.0
+
+
+def _requires_account_token(method: _F) -> _F:
+    """Fail fast for endpoints whose server route accepts only a session token."""
+
+    @functools.wraps(method)
+    def wrapper(self: "VeriSwarmClient", *args: Any, **kwargs: Any) -> Any:
+        if not self.account_token:
+            raise VeriSwarmClientError(
+                f"{method.__name__} requires an account session token: pass "
+                "account_token to VeriSwarmClient (this endpoint does not "
+                "accept API keys)",
+                code="ACCOUNT_TOKEN_REQUIRED",
+            )
+        return method(self, *args, **kwargs)
+
+    return wrapper  # type: ignore[return-value]
+
+
+@dataclass
 class VeriSwarmClient:
     """VeriSwarm Python SDK — trust scoring, event ingestion, and agent management.
 
     Usage:
         client = VeriSwarmClient(base_url="https://api.veriswarm.ai", api_key="vsk_...")
         decision = client.check_decision(agent_id="agt_123", action_type="post_message")
+
+    ``account_token`` is an account session token sent as
+    ``x-account-access-token``. Account-administration methods (team,
+    workspaces, notifications, Passport, Vault export, ...) call routes that
+    accept only a session token and raise ``VeriSwarmClientError`` with
+    ``code="ACCOUNT_TOKEN_REQUIRED"`` when it is not configured.
     """
     base_url: str
-    api_key: str
-    timeout_seconds: int = 15
+    api_key: str | None = field(default=None, repr=False)
+    timeout_seconds: float = 15
     secrets_detection: bool = False
+    account_token: str | None = field(default=None, repr=False)
     _tripwire: "SecretTripwire | None" = field(default=None, init=False, repr=False)
+    _tripwire_retry_at: float = field(default=0.0, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.base_url:
             raise ValueError("base_url is required")
-        if not self.api_key:
-            raise ValueError("api_key is required")
+        if not self.api_key and not self.account_token:
+            raise ValueError("api_key or account_token is required")
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive, finite number")
         self.base_url = self.base_url.rstrip("/")
         # Reject non-https base_url. The SDK ships x-api-key on every
         # request; an http base_url would transmit it in plaintext where
@@ -166,7 +261,7 @@ class VeriSwarmClient:
 
     def get_agent_score_history(self, agent_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         """Get an agent's score history (last N snapshots)."""
-        return self._request(f"/v1/public/agents/{_path(agent_id)}/scores/history?limit={limit}")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/scores/history", query={"limit": limit})
 
     def get_agent_score_breakdown(self, agent_id: str) -> dict[str, Any]:
         """Get detailed score breakdown with contributing factors."""
@@ -237,33 +332,49 @@ class VeriSwarmClient:
         agent_id: str | None = None,
         session_id: str | None = None,
     ) -> str:
-        """Tokenize-when-online / redact-when-offline outbound text.
+        """Return outbound text that is safe to emit.
 
-        No-op unless ``secrets_detection`` is enabled. On a prefix hit the
-        authoritative tokenize endpoint is tried first; any failure (or a
-        surviving prefix span) falls back to a non-recoverable local
-        redaction (fail-closed).
+        No-op unless ``secrets_detection`` is enabled. Detected secret spans
+        are redacted locally FIRST, so a secret the tripwire found never
+        leaves the process (the tokenize endpoint stores what it receives,
+        rehydratably). The already-redacted text is then sent for PII
+        tokenization when online; on any failure the locally redacted text
+        is returned (fail-closed).
         """
         if not self.secrets_detection or not isinstance(text, str) or not text:
             return text
-        if self._tripwire is None:
-            self._tripwire = ensure_tripwire(fetch_manifest=self.get_secret_rules)
-        if not self._tripwire.scan(text):
+        tripwire = self._refresh_tripwire_if_due()
+        if not tripwire.scan(text):
             return text
+        redacted = tripwire.redact_offline(text)
         try:
             result = self.tokenize_pii(
-                text=text, agent_id=agent_id, session_id=session_id
+                text=redacted, agent_id=agent_id, session_id=session_id
             )
-            guarded = text
-            if isinstance(result, dict) and result.get("tokens_created", 0) > 0:
-                guarded = result.get("tokenized_text") or text
-            # Belt-and-suspenders: the PII tokenizer is not a secret detector,
-            # so re-scan and locally redact any provider-prefix span it left.
-            if self._tripwire.scan(guarded):
-                guarded = self._tripwire.redact_offline(guarded)
-            return guarded
         except Exception:
-            return self._tripwire.redact_offline(text)
+            return redacted
+        tokenized = redacted
+        created = result.get("tokens_created") if isinstance(result, dict) else None
+        if isinstance(created, int) and created > 0:
+            tokenized = result.get("tokenized_text") or redacted
+        if not isinstance(tokenized, str):
+            return redacted
+        # Never trust the response to stay secret-free.
+        return tripwire.redact_offline(tokenized) if tripwire.scan(tokenized) else tokenized
+
+    def _refresh_tripwire_if_due(self) -> SecretTripwire:
+        """Load the tripwire on first use; if only built-in rules are active
+        (fetch failed or manifest invalid), retry once the interval passes
+        instead of keeping the fallback forever."""
+        current = self._tripwire
+        due = time.monotonic() >= self._tripwire_retry_at
+        if current is not None and (current.source == "remote" or not due):
+            return current
+        fresh = ensure_tripwire(fetch_manifest=self.get_secret_rules)
+        if fresh.source != "remote":
+            self._tripwire_retry_at = time.monotonic() + _TRIPWIRE_RETRY_SECONDS
+        self._tripwire = fresh
+        return fresh
 
     # --- Credentials ---
 
@@ -283,10 +394,12 @@ class VeriSwarmClient:
 
     # --- Scoring Profiles ---
 
+    @_requires_account_token
     def get_scoring_profile(self) -> dict[str, Any]:
         """Get the current tenant's scoring profile."""
         return self._get("/v1/suite/scoring/profile")
 
+    @_requires_account_token
     def set_scoring_profile(
         self,
         profile_code: str,
@@ -302,7 +415,7 @@ class VeriSwarmClient:
 
     def get_agent_timeline(self, agent_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Get an agent's event timeline."""
-        return self._get(f"/v1/public/agents/{_path(agent_id)}/timeline?limit={limit}")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/timeline", query={"limit": limit})
 
     # --- Agent API Keys ---
 
@@ -324,6 +437,7 @@ class VeriSwarmClient:
         """Get details of a PII tokenization session."""
         return self._get(f"/v1/suite/guard/pii/sessions/{_path(session_id)}")
 
+    @_requires_account_token
     def revoke_pii_session(self, session_id: str) -> dict[str, Any]:
         """Revoke (delete) a PII tokenization session and all its tokens."""
         return self._request(f"/v1/suite/guard/pii/sessions/{_path(session_id)}", method="DELETE")
@@ -338,9 +452,22 @@ class VeriSwarmClient:
         """Create a new Guard policy rule."""
         return self._post("/v1/suite/guard/policies", policy)
 
-    def update_guard_policy(self, policy_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        """Update a Guard policy rule."""
-        return self._request(f"/v1/suite/guard/policies/{_path(policy_id)}", method="PATCH", body=updates)
+    def update_guard_policy(
+        self,
+        policy_id: int,
+        updates: dict[str, Any] | None = None,
+        *,
+        is_active: bool | None = None,
+    ) -> dict[str, Any]:
+        """Activate or deactivate a Guard policy rule (``is_active``)."""
+        active = is_active if is_active is not None else (updates or {}).get("is_active")
+        if not isinstance(active, bool):
+            raise ValueError("update_guard_policy requires is_active=True/False")
+        return self._request(
+            f"/v1/suite/guard/policies/{_path(policy_id)}",
+            method="PATCH",
+            query={"is_active": active},
+        )
 
     def delete_guard_policy(self, policy_id: int) -> dict[str, Any]:
         """Delete a Guard policy rule."""
@@ -360,41 +487,59 @@ class VeriSwarmClient:
 
     def list_guard_findings(self, *, agent_id: str | None = None) -> list[dict[str, Any]]:
         """List Guard security findings, optionally filtered by agent."""
-        path = "/v1/suite/guard/findings"
-        if agent_id:
-            path += f"?agent_id={_path(agent_id)}"
-        return self._get(path)
+        return self._get("/v1/suite/guard/findings", query={"agent_id": agent_id or None})
 
-    def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        """Update a Guard finding (e.g. resolve, dismiss)."""
-        return self._request(f"/v1/suite/guard/findings/{_path(finding_id)}", method="PATCH", body=updates)
+    @_requires_account_token
+    def update_guard_finding(
+        self,
+        finding_id: int,
+        updates: dict[str, Any] | None = None,
+        *,
+        new_status: str | None = None,
+    ) -> dict[str, Any]:
+        """Set a Guard finding's status: open, false_positive, mitigated, or resolved."""
+        given = updates or {}
+        value = new_status or given.get("new_status") or given.get("status")
+        if not isinstance(value, str) or not value:
+            raise ValueError("update_guard_finding requires new_status")
+        return self._request(
+            f"/v1/suite/guard/findings/{_path(finding_id)}",
+            method="PATCH",
+            query={"new_status": value},
+        )
 
     # --- Passport Delegations ---
 
+    @_requires_account_token
     def create_delegation(self, delegation: dict[str, Any]) -> dict[str, Any]:
         """Create a new Passport delegation grant."""
         return self._post("/v1/suite/passport/delegations", delegation)
 
+    @_requires_account_token
     def list_delegations(self) -> list[dict[str, Any]]:
         """List active Passport delegations."""
         return self._get("/v1/suite/passport/delegations")
 
+    @_requires_account_token
     def revoke_delegation(self, delegation_id: int) -> dict[str, Any]:
         """Revoke a Passport delegation."""
         return self._request(f"/v1/suite/passport/delegations/{_path(delegation_id)}", method="DELETE")
 
     # --- Passport Verification ---
 
+    @_requires_account_token
     def verify_agent_identity(self, agent_id: str) -> dict[str, Any]:
         """Mark an agent as identity-verified in Passport."""
         return self._post(f"/v1/suite/passport/verify/{_path(agent_id)}")
 
     # --- Passport Manifests ---
 
+    @_requires_account_token
     def create_manifest(self, agent_id: str, manifest: dict[str, Any]) -> dict[str, Any]:
         """Create or update an agent capability manifest."""
         return self._post(f"/v1/suite/passport/manifests/{_path(agent_id)}", manifest)
 
+    @_requires_account_token
     def get_manifests(self, agent_id: str) -> list[dict[str, Any]]:
         """Get agent capability manifests from Passport."""
         return self._get(f"/v1/suite/passport/manifests/{_path(agent_id)}")
@@ -403,94 +548,132 @@ class VeriSwarmClient:
 
     def query_vault_ledger(self, *, agent_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Query the immutable Vault audit ledger."""
-        path = f"/v1/suite/vault/ledger?limit={limit}"
-        if agent_id:
-            path += f"&agent_id={_path(agent_id)}"
-        return self._get(path)
+        return self._get(
+            "/v1/suite/vault/ledger", query={"limit": limit, "agent_id": agent_id or None}
+        )
 
     def verify_vault_chain(self, *, limit: int = 100) -> dict[str, Any]:
         """Verify hash-chain integrity of the Vault ledger."""
-        return self._get(f"/v1/suite/vault/verify?limit={limit}")
+        return self._get("/v1/suite/vault/verify", query={"limit": limit})
 
+    @_requires_account_token
     def export_vault(self, *, export_type: str = "json") -> dict[str, Any]:
         """Create a Vault export job."""
         return self._post("/v1/suite/vault/export", {"export_type": export_type})
 
+    @_requires_account_token
     def get_vault_export_status(self, job_id: str) -> dict[str, Any]:
         """Check the status of a Vault export job."""
         return self._get(f"/v1/suite/vault/export/{_path(job_id)}")
 
     # --- Notifications ---
 
+    @_requires_account_token
     def list_notifications(self) -> list[dict[str, Any]]:
         """List notifications for the current workspace."""
         return self._get("/v1/suite/notifications")
 
+    @_requires_account_token
     def mark_notification_read(self, notification_id: int) -> dict[str, Any]:
         """Mark a single notification as read."""
         return self._post(f"/v1/suite/notifications/{_path(notification_id)}/read")
 
+    @_requires_account_token
     def mark_all_notifications_read(self) -> dict[str, Any]:
         """Mark all notifications as read."""
         return self._post("/v1/suite/notifications/read-all")
 
     # --- IP Allowlist ---
 
+    @_requires_account_token
     def get_ip_allowlist(self) -> dict[str, Any]:
         """Get the current IP allowlist for the workspace."""
         return self._get("/v1/public/providers/ip-allowlist")
 
-    def set_ip_allowlist(self, *, cidrs: list[str], enabled: bool = True) -> dict[str, Any]:
-        """Set the IP allowlist for the workspace."""
-        return self._post("/v1/public/providers/ip-allowlist", {"cidrs": cidrs, "enabled": enabled})
+    @_requires_account_token
+    def set_ip_allowlist(
+        self,
+        *,
+        cidrs: list[str] | str | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Set the IP allowlist for the workspace.
+
+        The server stores a comma-separated CIDR string and treats an empty
+        one as "disable", so an empty list is refused unless
+        ``enabled=False`` is passed explicitly.
+        """
+        ip_allowlist = _normalize_cidrs(cidrs) if enabled else ""
+        if enabled and not ip_allowlist:
+            raise ValueError(
+                "set_ip_allowlist: cidrs is empty; pass enabled=False to disable the allowlist"
+            )
+        return self._post("/v1/public/providers/ip-allowlist", {"ip_allowlist": ip_allowlist})
 
     # --- Custom Domains ---
 
+    @_requires_account_token
     def get_custom_domain(self) -> dict[str, Any]:
         """Get the custom domain configuration for the workspace."""
         return self._get("/v1/public/providers/custom-domain")
 
+    @_requires_account_token
     def set_custom_domain(self, *, domain: str) -> dict[str, Any]:
         """Set a custom domain for the workspace."""
         return self._post("/v1/public/providers/custom-domain", {"domain": domain})
 
+    @_requires_account_token
     def verify_custom_domain(self) -> dict[str, Any]:
         """Verify DNS configuration for the custom domain."""
         return self._post("/v1/public/providers/custom-domain/verify")
 
+    @_requires_account_token
     def delete_custom_domain(self) -> dict[str, Any]:
         """Remove the custom domain from the workspace."""
         return self._request("/v1/public/providers/custom-domain", method="DELETE")
 
     # --- Team Management ---
 
+    @_requires_account_token
     def list_team_members(self) -> list[dict[str, Any]]:
         """List team members in the current workspace."""
         return self._get("/v1/public/providers/team")
 
+    @_requires_account_token
     def invite_team_member(self, *, email: str, role: str = "member") -> dict[str, Any]:
         """Invite a new team member to the workspace."""
         return self._post("/v1/public/providers/team/invite", {"email": email, "role": role})
 
+    @_requires_account_token
     def remove_team_member(self, user_id: str) -> dict[str, Any]:
         """Remove a team member from the workspace."""
         return self._request(f"/v1/public/providers/team/{_path(user_id)}", method="DELETE")
 
     # --- Workspaces ---
 
+    @_requires_account_token
     def list_workspaces(self) -> list[dict[str, Any]]:
         """List workspaces the current user belongs to."""
         return self._get("/v1/public/accounts/workspaces")
 
+    @_requires_account_token
     def switch_workspace(self, tenant_id: str) -> dict[str, Any]:
         """Switch the user's active workspace."""
         return self._post(f"/v1/public/accounts/workspaces/{_path(tenant_id)}/switch")
 
     # --- Reputation Lookup ---
 
-    def reputation_lookup(self, *, slug: str) -> dict[str, Any]:
-        """Look up an agent's shared reputation by slug."""
-        return self._get(f"/v1/public/reputation/lookup?slug={_path(slug)}")
+    def reputation_lookup(
+        self, agent_ref: str | None = None, *, slug: str | None = None
+    ) -> dict[str, Any]:
+        """Look up an agent's shared reputation by reference (email, URL, slug, ...).
+
+        ``slug=`` is accepted as an alias for ``agent_ref``.
+        """
+        ref = agent_ref if agent_ref is not None else slug
+        if not ref:
+            raise ValueError("reputation_lookup requires agent_ref")
+        return self._get("/v1/public/reputation/lookup", query={"agent_ref": ref})
 
     # --- Badges ---
 
@@ -501,16 +684,14 @@ class VeriSwarmClient:
         theme: str = "dark",
     ) -> str:
         """Get the URL for an agent's embeddable trust badge."""
-        return f"{self.base_url}/v1/badge/{agent_slug}.svg?style={style}&theme={theme}"
+        path = _with_query(f"/v1/badge/{_path(agent_slug)}.svg", {"style": style, "theme": theme})
+        return f"{self.base_url}{path}"
 
     # --- Cortex Workflows ---
 
     def list_workflows(self, *, is_active: bool | None = None) -> dict[str, Any]:
         """List all Cortex Workflows for the current tenant."""
-        params = ""
-        if is_active is not None:
-            params = f"?is_active={'true' if is_active else 'false'}"
-        return self._get(f"/v1/workflows{params}")
+        return self._get("/v1/workflows", query={"is_active": is_active})
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Get a workflow's details and recent executions."""
@@ -582,10 +763,9 @@ class VeriSwarmClient:
         status: str | None = None,
     ) -> dict[str, Any]:
         """List executions for a workflow."""
-        params = ""
-        if status:
-            params = f"?status={status}"
-        return self._get(f"/v1/workflows/{_path(workflow_id)}/executions{params}")
+        return self._get(
+            f"/v1/workflows/{_path(workflow_id)}/executions", query={"status": status or None}
+        )
 
     def cancel_execution(self, execution_id: str) -> dict[str, Any]:
         """Cancel a running execution."""
@@ -595,6 +775,7 @@ class VeriSwarmClient:
         """Retry a failed execution."""
         return self._post(f"/v1/workflows/executions/{_path(execution_id)}/retry")
 
+    @_requires_account_token
     def approve_step(
         self,
         execution_id: str,
@@ -608,7 +789,7 @@ class VeriSwarmClient:
         if edited_output:
             body["edited_output"] = edited_output
         return self._post(
-            f"/v1/workflows/executions/{_path(execution_id)}/steps/{step_id}/approve",
+            f"/v1/workflows/executions/{_path(execution_id)}/steps/{_path(step_id)}/approve",
             body=body,
         )
 
@@ -729,7 +910,9 @@ class VeriSwarmClient:
 
     def reset_circuit_breaker(self, provider: str, model: str) -> dict[str, Any]:
         """Manually reset a circuit breaker to closed state."""
-        return self._post(f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
+        return self._post(
+            f"/v1/analytics/sre/circuit-breakers/{_path(provider)}/{_path(model)}/reset"
+        )
 
     def get_error_budget(self) -> dict[str, Any]:
         """Get error budget status based on SLO targets and recent LLM usage."""
@@ -763,11 +946,11 @@ class VeriSwarmClient:
 
     def get_context_dashboard(self, *, days: int = 30) -> dict[str, Any]:
         """Combined context governance dashboard — topics + quality + gaps."""
-        return self._get(f"/v1/analytics/context/dashboard?days={days}")
+        return self._get("/v1/analytics/context/dashboard", query={"days": days})
 
     def get_context_topics(self, *, days: int = 30, limit: int = 20) -> dict[str, Any]:
         """Event topic distribution and trending categories."""
-        return self._get(f"/v1/analytics/context/topics?days={days}&limit={limit}")
+        return self._get("/v1/analytics/context/topics", query={"days": days, "limit": limit})
 
     def get_context_quality(self) -> dict[str, Any]:
         """Knowledge base coverage, event health, per-agent breakdown."""
@@ -775,7 +958,7 @@ class VeriSwarmClient:
 
     def get_context_gaps(self, *, days: int = 30) -> dict[str, Any]:
         """Detect agents with high failure rates and low knowledge base coverage."""
-        return self._get(f"/v1/analytics/context/gaps?days={days}")
+        return self._get("/v1/analytics/context/gaps", query={"days": days})
 
     # --- Guard Extensions: MCP Scanner + Cross-Model Verification ---
 
@@ -887,16 +1070,15 @@ class VeriSwarmClient:
 
         state: one of "pending", "approved", "rejected", "expired", "all".
         """
-        from urllib.parse import urlencode
-        params: dict[str, Any] = {"state": state, "limit": limit}
-        if agent_id is not None:
-            params["agent_id"] = agent_id
-        return self._get(f"/v1/approvals?{urlencode(params)}")
+        return self._get(
+            "/v1/approvals", query={"state": state, "limit": limit, "agent_id": agent_id}
+        )
 
     def get_approval(self, approval_id: str) -> dict[str, Any]:
         """Get a single approval request."""
         return self._get(f"/v1/approvals/{_path(approval_id)}")
 
+    @_requires_account_token
     def approve_approval(
         self, approval_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -909,6 +1091,7 @@ class VeriSwarmClient:
             body["reason"] = reason
         return self._post(f"/v1/approvals/{_path(approval_id)}/approve", body=body)
 
+    @_requires_account_token
     def reject_approval(
         self, approval_id: str, *, reason: str | None = None
     ) -> dict[str, Any]:
@@ -1018,7 +1201,7 @@ class VeriSwarmClient:
         No authentication required on the server side — third parties can
         verify AI-generated content labels without a VeriSwarm account.
         """
-        return self._get(f"/v1/content/provenance/{content_hash}")
+        return self._get(f"/v1/content/provenance/{_path(content_hash)}")
 
     def verify_content(
         self,
@@ -1094,10 +1277,12 @@ class VeriSwarmClient:
             body["reason"] = reason
         return self._post("/v1/passport/jit/request", body=body)
 
+    @_requires_account_token
     def approve_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Approve a pending JIT grant (requires account session token)."""
         return self._post(f"/v1/passport/jit/{_path(grant_id)}/approve")
 
+    @_requires_account_token
     def deny_jit_grant(self, grant_id: str, *, reason: str | None = None) -> dict[str, Any]:
         """Deny a pending JIT grant."""
         body: dict[str, Any] = {}
@@ -1146,12 +1331,10 @@ class VeriSwarmClient:
         limit: int = 50,
     ) -> dict[str, Any]:
         """List JIT grants for the tenant, optionally filtered by agent or status."""
-        params = [f"limit={limit}"]
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        if status:
-            params.append(f"status={status}")
-        return self._get(f"/v1/passport/jit/grants?{'&'.join(params)}")
+        return self._get(
+            "/v1/passport/jit/grants",
+            query={"limit": limit, "agent_id": agent_id or None, "status": status or None},
+        )
 
     def get_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Get a single JIT grant by id."""
@@ -1161,26 +1344,25 @@ class VeriSwarmClient:
 
     def list_anomalies(self, *, agent_id: str | None = None, limit: int = 50) -> dict[str, Any]:
         """List behavioral anomalies detected for the tenant."""
-        params = [f"limit={limit}"]
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        return self._get(f"/v1/governance/anomalies?{'&'.join(params)}")
+        return self._get(
+            "/v1/governance/anomalies", query={"limit": limit, "agent_id": agent_id or None}
+        )
 
+    @_requires_account_token
     def run_shadow_discovery(self) -> dict[str, Any]:
         """Trigger a shadow-agent discovery scan."""
         return self._post("/v1/governance/discovery/scan")
 
     def list_discovered_agents(self, *, status: str | None = None) -> dict[str, Any]:
         """List discovered shadow agents, optionally filtered by status."""
-        path = "/v1/governance/discovery"
-        if status:
-            path += f"?status={status}"
-        return self._get(path)
+        return self._get("/v1/governance/discovery", query={"status": status or None})
 
+    @_requires_account_token
     def dismiss_discovered_agent(self, discovery_id: int) -> dict[str, Any]:
         """Dismiss a discovered shadow agent."""
         return self._post(f"/v1/governance/discovery/{_path(discovery_id)}/dismiss")
 
+    @_requires_account_token
     def store_credential(
         self,
         *,
@@ -1215,6 +1397,7 @@ class VeriSwarmClient:
         """List stored credentials (names/metadata only — never values)."""
         return self._get("/v1/governance/credentials")
 
+    @_requires_account_token
     def revoke_credential(self, credential_id: int) -> dict[str, Any]:
         """Revoke a stored credential by id."""
         return self._request(f"/v1/governance/credentials/{_path(credential_id)}", method="DELETE")
@@ -1227,17 +1410,17 @@ class VeriSwarmClient:
         limit: int = 50,
     ) -> dict[str, Any]:
         """Get credential checkout audit history."""
-        params = [f"limit={limit}"]
-        if credential_id is not None:
-            params.append(f"credential_id={_path(credential_id)}")
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        return self._get(f"/v1/governance/credentials/history?{'&'.join(params)}")
+        return self._get(
+            "/v1/governance/credentials/history",
+            query={"limit": limit, "credential_id": credential_id, "agent_id": agent_id or None},
+        )
 
+    @_requires_account_token
     def get_compliance_schedule(self) -> dict[str, Any]:
         """Get the scheduled compliance report delivery config."""
         return self._get("/v1/governance/compliance/schedule")
 
+    @_requires_account_token
     def set_compliance_schedule(
         self,
         *,
@@ -1251,6 +1434,7 @@ class VeriSwarmClient:
             {"framework": framework, "frequency": frequency, "email": email},
         )
 
+    @_requires_account_token
     def delete_compliance_schedule(self) -> dict[str, Any]:
         """Remove the scheduled compliance report delivery."""
         return self._request("/v1/governance/compliance/schedule", method="DELETE")
@@ -1265,43 +1449,65 @@ class VeriSwarmClient:
 
     # --- Internal ---
 
-    def _get(self, path: str) -> Any:
+    def _get(self, path: str, *, query: dict[str, Any] | None = None) -> Any:
         """Convenience wrapper for GET requests."""
-        return self._request(path, method="GET")
+        return self._request(path, method="GET", query=query)
 
     def _post(self, path: str, body: Any = None) -> Any:
         """Convenience wrapper for POST requests."""
         return self._request(path, method="POST", body=body)
 
-    def _request(self, path: str, *, method: str = "GET", body: Any = None) -> Any:
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": _USER_AGENT,
+        }
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
+        if self.account_token:
+            headers["x-account-access-token"] = self.account_token
+        return headers
+
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Any = None,
+        query: dict[str, Any] | None = None,
+    ) -> Any:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
         request = Request(
-            f"{self.base_url}{path}",
+            f"{self.base_url}{_with_query(path, query)}",
             data=encoded,
             method=method,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "veriswarm-python-sdk/0.4.0",
-                "x-api-key": self.api_key,
-            },
+            headers=self._headers(),
         )
+        status, raw_bytes = self._send(request)
+        # Cap the read at 10 MiB. A compromised or MITM'd endpoint
+        # returning a multi-hundred-MB body would otherwise OOM the
+        # customer's process. Real API responses are well under this cap.
+        if len(raw_bytes) > _MAX_RESPONSE_BYTES:
+            raise VeriSwarmClientError(
+                f"VeriSwarm response exceeded {_MAX_RESPONSE_BYTES} bytes",
+                status=status,
+                code="RESPONSE_TOO_LARGE",
+            )
+        if not raw_bytes:
+            return {}
+        try:
+            return json.loads(raw_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise VeriSwarmClientError(
+                "VeriSwarm API returned invalid JSON", status=status, code="INVALID_RESPONSE"
+            ) from exc
+
+    def _send(self, request: Request) -> tuple[int, bytes]:
+        """Perform the request; every transport failure becomes VeriSwarmClientError."""
         try:
             with _OPENER.open(request, timeout=self.timeout_seconds) as response:
-                # Cap the read at 10 MiB. A compromised or MITM'd
-                # endpoint returning a multi-hundred-MB body would
-                # otherwise OOM the customer's process. Real API
-                # responses are well under this cap; if a legitimate
-                # response ever exceeds it, the API has a different
-                # bug we'd want surfaced anyway. (Audit 2026-05-08
-                # CRIT-SDK-2.)
-                _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
                 raw_bytes = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(raw_bytes) > _MAX_RESPONSE_BYTES:
-                    raise VeriSwarmClientError(
-                        f"VeriSwarm response exceeded {_MAX_RESPONSE_BYTES} bytes"
-                    )
-                raw = raw_bytes.decode("utf-8")
-                return json.loads(raw) if raw else {}
+                return getattr(response, "status", 200), raw_bytes
         except HTTPError as exc:
             # Cap embedded details. Some logging frameworks emit
             # exception messages to structured aggregators; an unbounded
@@ -1313,6 +1519,23 @@ class VeriSwarmClient:
                 details = raw_details[:500]
             except Exception:
                 details = str(exc)[:500]
-            raise VeriSwarmClientError(f"VeriSwarm API {exc.code}: {details}") from exc
+            raise VeriSwarmClientError(
+                f"VeriSwarm API {exc.code}: {details}", status=exc.code
+            ) from exc
         except URLError as exc:
-            raise VeriSwarmClientError(f"VeriSwarm request failed: {exc.reason}") from exc
+            if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+                raise self._timeout_error() from exc
+            raise VeriSwarmClientError(
+                f"VeriSwarm request failed: {exc.reason}", code="NETWORK_ERROR"
+            ) from exc
+        except (socket.timeout, TimeoutError) as exc:
+            raise self._timeout_error() from exc
+        except (OSError, HTTPException) as exc:
+            raise VeriSwarmClientError(
+                f"VeriSwarm request failed: {exc}", code="NETWORK_ERROR"
+            ) from exc
+
+    def _timeout_error(self) -> VeriSwarmClientError:
+        return VeriSwarmClientError(
+            f"VeriSwarm request timed out after {self.timeout_seconds}s", code="TIMEOUT"
+        )

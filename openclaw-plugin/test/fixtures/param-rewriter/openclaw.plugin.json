@@ -1,0 +1,4 @@
+{
+  "id": "param-rewriter",
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

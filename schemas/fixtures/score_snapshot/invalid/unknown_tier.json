@@ -1,0 +1,20 @@
+{
+  "identity": {
+    "score": 90,
+    "confidence": 0.9
+  },
+  "risk": {
+    "score": 5,
+    "confidence": 0.9
+  },
+  "reliability": {
+    "score": 80,
+    "confidence": 0.9
+  },
+  "autonomy": {
+    "score": 80,
+    "confidence": 0.9,
+    "label": "unclear"
+  },
+  "policy_tier": "tier_9"
+}

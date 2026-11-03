@@ -23,8 +23,13 @@ const DEFAULT_SIGNATURE_AGENT = "https://api.veriswarm.ai";
 const DEFAULT_EXPIRES_IN_SECONDS = 300;
 const TAG = "web-bot-auth";
 
-/** Lowercased host, with the port included only when it is non-default. */
-function deriveAuthority(url) {
+/**
+ * RFC 9421 `@authority` for a request URL: WHATWG-normalized host (IDNA →
+ * punycode, bracketed canonical IPv6, lowercase), with the port included
+ * only when it is not the scheme's default. The Python SDK matches this
+ * byte-for-byte (see testdata/webbotauth_vectors.json).
+ */
+export function deriveAuthority(url) {
   let parsed;
   try {
     parsed = new URL(url);

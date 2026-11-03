@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 try:
@@ -12,6 +13,8 @@ except ImportError:
     raise ImportError("Install langchain-core: pip install veriswarm[langchain]")
 
 from veriswarm.client import VeriSwarmClient
+
+from .guard_mixin import guard_secrets_in, guarded_excerpt, warn_rate_limited
 
 logger = logging.getLogger("veriswarm.langchain")
 
@@ -37,48 +40,53 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
         self.agent_id = agent_id
         self.enforce = enforce
         self.on_deny = on_deny
-        self._client = VeriSwarmClient(base_url, api_key, timeout_seconds=timeout_seconds)
+        # LangChain swallows callback exceptions unless raise_error is set, which
+        # would silently turn a deny into an allow.
+        self.raise_error = enforce
+        self._client = VeriSwarmClient(
+            base_url, api_key, timeout_seconds=timeout_seconds, secrets_detection=True
+        )
         self._active_tools: dict[str, float] = {}  # run_id -> start_time
 
     def on_tool_start(
         self, serialized: dict[str, Any], input_str: str, *, run_id: uuid.UUID, **kwargs: Any
     ) -> None:
-        """Record tool start time for duration calculation."""
+        """Enforce the trust decision, then record tool start time."""
+        if self.enforce:
+            self._enforce(((serialized or {}).get("name")) or kwargs.get("name") or "unknown")
         self._active_tools[str(run_id)] = time.monotonic()
 
-        if self.enforce:
-            tool_name = serialized.get("name", "unknown")
-            try:
-                # check_decision is keyword-only on the VeriSwarmClient.
-                # Calling it positionally raises TypeError, which the
-                # except branch below was silently turning into "allow"
-                # — meaning enforce=True was effectively dead code on
-                # every customer that wired this adapter. Pass keyword
-                # args to actually exercise the gate.
-                # (Audit 2026-05-08 HIGH-SDK-2.)
-                result = self._client.check_decision(
-                    agent_id=self.agent_id,
-                    action_type="tool_call",
-                    resource_type=tool_name,
-                )
-                decision = result.get("decision", "review")
-                if decision == "deny":
-                    if self.on_deny == "raise":
-                        raise PermissionError(
-                            f"VeriSwarm denied tool call '{tool_name}': {result.get('reason_code', 'unknown')}"
-                        )
-                    elif self.on_deny == "log":
-                        logger.warning(f"VeriSwarm denied tool '{tool_name}' but on_deny=log, continuing")
-                    elif self.on_deny == "skip":
-                        raise PermissionError(f"VeriSwarm denied tool '{tool_name}'")
-            except PermissionError:
-                raise
-            except Exception as e:
-                logger.warning(
-                    "VeriSwarm decision check failed for tool '%s'; "
-                    "fail-open per current config: %s",
-                    tool_name, e,
-                )
+    def _enforce(self, tool_name: str) -> None:
+        """Raise PermissionError unless the decision is an explicit "allow" (fail closed)."""
+        decision: Any = None
+        reason = "decision_unavailable"
+        try:
+            result = self._client.check_decision(
+                agent_id=self.agent_id,
+                action_type="tool_call",
+                resource_type=tool_name,
+            )
+            if isinstance(result, dict):
+                decision = result.get("decision")
+                reason = result.get("reason_code") or "policy_denied"
+        except Exception as e:  # noqa: BLE001 - fail closed on anything
+            warn_rate_limited(
+                logger, "decision-check",
+                "VeriSwarm decision check failed for tool '%s': %s", tool_name, e,
+            )
+        if decision == "allow":
+            return
+        if self.on_deny == "log":
+            logger.warning(
+                "VeriSwarm did not allow tool '%s' (decision=%s) but on_deny=log, continuing",
+                tool_name, decision,
+            )
+            return
+        if decision == "review":
+            raise PermissionError(
+                f"VeriSwarm requires review before tool '{tool_name}' can run: {reason}"
+            )
+        raise PermissionError(f"VeriSwarm denied tool call '{tool_name}': {reason}")
 
     def on_tool_end(self, output: str, *, run_id: uuid.UUID, **kwargs: Any) -> None:
         """Report successful tool call."""
@@ -89,7 +97,10 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
         self._report_event("tool.call.success", {
             "tool_name": tool_name,
             "duration_ms": duration_ms,
-            "output_summary": str(output)[:200] if output else None,
+            "output_summary": (
+                guarded_excerpt(self._client, output, 200, agent_id=self.agent_id)
+                if output else None
+            ),
         })
 
     def on_tool_error(self, error: BaseException, *, run_id: uuid.UUID, **kwargs: Any) -> None:
@@ -117,13 +128,16 @@ class VeriSwarmCallbackHandler(BaseCallbackHandler):
     def _report_event(self, event_type: str, payload: dict) -> None:
         """Fire-and-forget event reporting. Never blocks or raises."""
         try:
+            safe = guard_secrets_in(self._client, payload, agent_id=self.agent_id)
             self._client.ingest_event(
                 event_id=f"lc-{uuid.uuid4().hex[:16]}",
                 agent_id=self.agent_id,
                 source_type="agent",
                 event_type=event_type,
-                occurred_at=None,  # server will use current time
-                payload={k: v for k, v in payload.items() if v is not None},
+                occurred_at=datetime.now(timezone.utc).isoformat(),
+                payload={k: v for k, v in safe.items() if v is not None},
             )
         except Exception as e:
-            logger.debug(f"VeriSwarm event report failed (non-blocking): {e}")
+            warn_rate_limited(
+                logger, "event-report", "VeriSwarm event report failed (non-blocking): %s", e
+            )

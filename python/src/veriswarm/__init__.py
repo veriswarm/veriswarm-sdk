@@ -12,8 +12,7 @@ Usage:
         action_type="post_message",
     )
 """
-from importlib.metadata import PackageNotFoundError, version
-
+from veriswarm._version import __version__
 from veriswarm.client import VeriSwarmClient, VeriSwarmClientError
 from veriswarm.manifest_signing import (
     ManifestSigningError,
@@ -21,12 +20,6 @@ from veriswarm.manifest_signing import (
     sign_manifest,
 )
 from veriswarm.webbotauth import WebBotAuthError, WebBotAuthSigner
-
-try:
-    # Single source of truth: the version in pyproject.toml.
-    __version__ = version("veriswarm")
-except PackageNotFoundError:  # running from a source tree without installing
-    __version__ = "0.0.0"
 
 __all__ = [
     "VeriSwarmClient",

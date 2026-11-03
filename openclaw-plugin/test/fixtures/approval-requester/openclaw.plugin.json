@@ -1,0 +1,4 @@
+{
+  "id": "approval-requester",
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

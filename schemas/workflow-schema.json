@@ -18,7 +18,7 @@
         "max_duration_minutes": {
           "anyOf": [
             {
-              "maximum": 1440,
+              "maximum": 10080,
               "minimum": 1,
               "type": "integer"
             },
@@ -144,7 +144,10 @@
             "score",
             "knowledge",
             "vault_log",
-            "web_search"
+            "web_search",
+            "platform_query",
+            "send_email",
+            "a2a"
           ],
           "title": "Type",
           "type": "string"
@@ -201,8 +204,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -267,8 +269,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -282,8 +283,7 @@
             {
               "items": {
                 "additionalProperties": true,
-                "type": "object",
-                "maxProperties": 50
+                "type": "object"
               },
               "type": "array"
             },
@@ -334,8 +334,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -348,8 +347,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -532,8 +530,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -568,6 +565,18 @@
           "default": null,
           "title": "Search Type"
         },
+        "query_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query Type"
+        },
         "depends_on": {
           "anyOf": [
             {
@@ -597,9 +606,10 @@
         "timeout": {
           "anyOf": [
             {
-              "maximum": 86400,
-              "minimum": 1,
               "type": "integer"
+            },
+            {
+              "type": "string"
             },
             {
               "type": "null"
@@ -728,8 +738,7 @@
           "anyOf": [
             {
               "additionalProperties": true,
-              "type": "object",
-              "maxProperties": 50
+              "type": "object"
             },
             {
               "type": "null"
@@ -821,8 +830,7 @@
       "anyOf": [
         {
           "additionalProperties": true,
-          "type": "object",
-          "maxProperties": 50
+          "type": "object"
         },
         {
           "type": "null"

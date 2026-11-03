@@ -22,7 +22,7 @@ import functools
 import logging
 from typing import Any, Callable
 
-from .guard_mixin import GuardMixin, GuardContext
+from .guard_mixin import GuardMixin, GuardContext, run_blocking
 
 logger = logging.getLogger("veriswarm.openai_agents")
 
@@ -67,7 +67,7 @@ class VeriSwarmOpenAIGuard(GuardMixin):
 
         @functools.wraps(original_invoke)
         async def guarded_invoke(ctx, input_str: str) -> str:
-            filtered_input, gctx = guard.guard_before_tool(tool_name, input_str)
+            filtered_input, gctx = await run_blocking(guard.guard_before_tool, tool_name, input_str)
             guard._last_ctx = gctx
 
             if gctx.blocked:
@@ -75,39 +75,58 @@ class VeriSwarmOpenAIGuard(GuardMixin):
 
             try:
                 result = await original_invoke(ctx, filtered_input if isinstance(filtered_input, str) else input_str)
-                if isinstance(result, str):
-                    result = guard.guard_after_tool(tool_name, result, gctx)
-                return result
             except Exception as e:
-                guard.guard_on_error(tool_name, e, gctx)
+                await run_blocking(guard.guard_on_error, tool_name, e, gctx)
                 raise
+            if isinstance(result, str):
+                result = await run_blocking(guard.guard_after_tool, tool_name, result, gctx)
+            return result
 
         tool.on_invoke_tool = guarded_invoke
         return tool
 
     def _wrap_callable(self, fn: Callable, name: str) -> Callable:
-        """Wrap a plain callable with Guard protection."""
+        """Wrap a plain callable with Guard protection (sync stays sync, async stays async)."""
         guard = self
 
+        if _is_async(fn):
+            @functools.wraps(fn)
+            async def guarded_async(*args, **kwargs):
+                args, kwargs, ctx = await run_blocking(guard.guard_before_call, name, args, kwargs)
+                guard._last_ctx = ctx
+
+                if ctx.blocked:
+                    return ctx.block_message
+
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as e:
+                    await run_blocking(guard.guard_on_error, name, e, ctx)
+                    raise
+                if isinstance(result, str):
+                    result = await run_blocking(guard.guard_after_tool, name, result, ctx)
+                return result
+
+            return guarded_async
+
         @functools.wraps(fn)
-        async def guarded(*args, **kwargs):
-            input_str = " ".join(str(a) for a in args)
-            filtered_input, ctx = guard.guard_before_tool(name, input_str)
+        def guarded_sync(*args, **kwargs):
+            args, kwargs, ctx = guard.guard_before_call(name, args, kwargs)
             guard._last_ctx = ctx
 
             if ctx.blocked:
                 return ctx.block_message
 
             try:
-                result = await fn(*args, **kwargs) if _is_async(fn) else fn(*args, **kwargs)
-                if isinstance(result, str):
-                    result = guard.guard_after_tool(name, result, ctx)
-                return result
+                result = fn(*args, **kwargs)
             except Exception as e:
                 guard.guard_on_error(name, e, ctx)
                 raise
+            if isinstance(result, str):
+                result = guard.guard_after_tool(name, result, ctx)
+            return result
 
-        return guarded
+        return guarded_sync
 
     @property
     def last_pii_session(self) -> str | None:

@@ -44,4 +44,4 @@ build-backend = "setuptools.build_meta"
 include = ["veriswarm_mcp*"]
 
 [tool.setuptools.package-data]
-veriswarm_mcp = ["secret_rules_manifest.json"]
+veriswarm_mcp = ["secret_rules_manifest.json", "hooks/activity_logger.sh"]

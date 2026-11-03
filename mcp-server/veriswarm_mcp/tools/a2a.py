@@ -12,7 +12,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
-from ._shared import bounded_string, safe_error_response, safe_id
+from ._shared import bounded_string, call_api, safe_error_response, safe_id
 
 
 def _submitted_but_poll_failed_response(
@@ -44,10 +44,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         description suitable for an A2A discovery flow.
         """
         try:
-            result = client.get("/v1/a2a/catalog")
+            result = await call_api(client.get, "/v1/a2a/catalog")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="list_a2a_catalog")
 
@@ -65,10 +63,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         """
         try:
             agent_id = safe_id(agent_id, "agent_id")
-            result = client.get(f"/v1/a2a/{agent_id}/card")
+            result = await call_api(client.get, f"/v1/a2a/{agent_id}/card")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="get_a2a_agent_card")
 
@@ -118,10 +114,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 except json.JSONDecodeError:
                     return json.dumps({"error": "signature_json must be valid JSON"})
 
-            result = client.post(f"/v1/a2a/{agent_id}/tasks", json=payload)
+            result = await call_api(client.post, f"/v1/a2a/{agent_id}/tasks", json=payload)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="submit_a2a_task")
 
@@ -160,7 +154,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             max_wait = min(120.0, max(1.0, float(max_wait_seconds)))
             interval = min(10.0, max(0.25, float(poll_interval_seconds)))
 
-            submitted = await asyncio.to_thread(
+            submitted = await call_api(
                 client.post, f"/v1/a2a/{agent_id}/tasks", json=payload
             )
             task_id = safe_id(str(submitted.get("id", "")), "task_id")
@@ -170,14 +164,18 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             task = submitted
             while _time.monotonic() < deadline:
                 try:
-                    task = await asyncio.to_thread(
+                    task = await call_api(
                         client.get, f"/v1/a2a/{agent_id}/tasks/{task_id}"
                     )
                 except httpx.HTTPStatusError as exc:
+                    # Status code only — the response body may carry server
+                    # internals and must not reach the LLM.
                     return _submitted_but_poll_failed_response(
                         task,
                         task_id,
-                        f"Task submitted but polling failed with API error {exc.response.status_code}: {exc.response.text}",
+                        f"Task submitted but polling failed with HTTP {exc.response.status_code}. "
+                        "Use get_a2a_task with the returned id to continue polling.",
+                        "HTTPStatusError",
                     )
                 except Exception as exc:
                     return _submitted_but_poll_failed_response(
@@ -192,8 +190,6 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
             task = dict(task)
             task["timed_out"] = True
             return json.dumps(task, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="invoke_a2a_agent")
 
@@ -211,10 +207,8 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         try:
             agent_id = safe_id(agent_id, "agent_id")
             task_id = safe_id(task_id, "task_id")
-            result = client.get(f"/v1/a2a/{agent_id}/tasks/{task_id}")
+            result = await call_api(client.get, f"/v1/a2a/{agent_id}/tasks/{task_id}")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="get_a2a_task")
 
@@ -231,9 +225,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
         try:
             agent_id = safe_id(agent_id, "agent_id")
             task_id = safe_id(task_id, "task_id")
-            result = client.post(f"/v1/a2a/{agent_id}/tasks/{task_id}/cancel")
+            result = await call_api(client.post, f"/v1/a2a/{agent_id}/tasks/{task_id}/cancel")
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
             return safe_error_response(exc, context="cancel_a2a_task")

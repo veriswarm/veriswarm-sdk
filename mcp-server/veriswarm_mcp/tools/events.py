@@ -5,10 +5,10 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-import httpx
 from mcp.server.fastmcp import FastMCP
 
 from ..client import VeriSwarmAPIClient
+from ._shared import call_api, safe_error_response
 
 
 def _now_iso() -> str:
@@ -37,12 +37,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 "occurred_at": _now_iso(),
                 "payload": json.loads(payload) if payload else {},
             }
-            result = client.post("/v1/events", json=body)
+            result = await call_api(client.post, "/v1/events", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="report_action")
 
     @server.tool()
     async def report_tool_call(
@@ -72,12 +70,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 "occurred_at": _now_iso(),
                 "payload": payload,
             }
-            result = client.post("/v1/events", json=body)
+            result = await call_api(client.post, "/v1/events", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="report_tool_call")
 
     @server.tool()
     async def report_interaction(
@@ -106,12 +102,10 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                     "outcome": outcome,
                 },
             }
-            result = client.post("/v1/events", json=body)
+            result = await call_api(client.post, "/v1/events", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="report_interaction")
 
     @server.tool()
     async def report_incident(
@@ -143,9 +137,7 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
                 "occurred_at": _now_iso(),
                 "payload": payload,
             }
-            result = client.post("/v1/events", json=body)
+            result = await call_api(client.post, "/v1/events", json=body)
             return json.dumps(result, indent=2)
-        except httpx.HTTPStatusError as exc:
-            return json.dumps({"error": f"API error {exc.response.status_code}: {exc.response.text}"})
         except Exception as exc:
-            return json.dumps({"error": "VeriSwarm tool failed; check API connectivity", "type": type(exc).__name__})
+            return safe_error_response(exc, context="report_incident")

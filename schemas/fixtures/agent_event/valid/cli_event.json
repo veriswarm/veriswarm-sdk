@@ -1,0 +1,7 @@
+{
+  "event_id": "cli-1",
+  "agent_id": "agt_1",
+  "source_type": "cli",
+  "event_type": "task.completed",
+  "occurred_at": "2026-01-01T00:00:00+00:00"
+}

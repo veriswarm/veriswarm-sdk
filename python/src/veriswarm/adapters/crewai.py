@@ -66,10 +66,7 @@ class VeriSwarmCrewGuard(GuardMixin):
 
         @functools.wraps(original_run)
         def guarded_run(*args, **kwargs):
-            # Combine args into a string representation for PII scanning
-            input_str = " ".join(str(a) for a in args) + " ".join(f"{k}={v}" for k, v in kwargs.items())
-
-            filtered_input, ctx = guard.guard_before_tool(tool_name, input_str)
+            args, kwargs, ctx = guard.guard_before_call(tool_name, args, kwargs)
             guard._last_ctx = ctx
 
             if ctx.blocked:
@@ -94,9 +91,7 @@ class VeriSwarmCrewGuard(GuardMixin):
 
         @functools.wraps(fn)
         def guarded(*args, **kwargs):
-            input_str = " ".join(str(a) for a in args) + " ".join(f"{k}={v}" for k, v in kwargs.items())
-
-            filtered_input, ctx = guard.guard_before_tool(name, input_str)
+            args, kwargs, ctx = guard.guard_before_call(name, args, kwargs)
             guard._last_ctx = ctx
 
             if ctx.blocked:

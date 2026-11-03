@@ -1,0 +1,13 @@
+{
+  "name": "x",
+  "trigger": {
+    "type": "manual"
+  },
+  "steps": [
+    {
+      "id": "a",
+      "name": "A",
+      "type": "bogus"
+    }
+  ]
+}

@@ -1,24 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { VeriSwarmClient } from '../veriswarm_client.mjs';
 
-// Build a fetch mock response that matches what #request actually uses:
-// response.headers.get(...), response.arrayBuffer(), and response.ok.
-function makeFetchResponse(body, { ok = true, status = 200, contentType = 'application/json' } = {}) {
-  const encoded = new TextEncoder().encode(
-    contentType.includes('application/json') ? JSON.stringify(body) : String(body)
-  );
-  return {
-    ok,
-    status,
-    headers: {
-      get(name) {
-        if (name === 'content-type') return contentType;
-        if (name === 'content-length') return null;
-        return null;
-      },
-    },
-    arrayBuffer: () => Promise.resolve(encoded.buffer),
-  };
+// Real fetch Response, so the client's streaming body reader is exercised.
+function makeFetchResponse(body, { status = 200, contentType = 'application/json' } = {}) {
+  const text = contentType.includes('application/json') ? JSON.stringify(body) : String(body);
+  return new Response(text, { status, headers: { 'content-type': contentType } });
 }
 
 describe('VeriSwarmClient', () => {
@@ -34,7 +20,7 @@ describe('VeriSwarmClient', () => {
   });
 
   it('should throw if both keys are missing', () => {
-    expect(() => new VeriSwarmClient({ baseUrl })).toThrow('either apiKey or agentKey is required');
+    expect(() => new VeriSwarmClient({ baseUrl })).toThrow('one of apiKey, agentKey, or accountToken is required');
   });
 
   it('should format baseUrl by removing trailing slashes', () => {
