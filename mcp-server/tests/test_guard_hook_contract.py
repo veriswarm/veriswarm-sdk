@@ -1,0 +1,300 @@
+"""Guard hook behaviour against the real Claude Code hook contract.
+
+Event shapes follow the Claude Code hooks reference: common fields
+(session_id, transcript_path, cwd, permission_mode, hook_event_name),
+PreToolUse `tool_input`, PostToolUse `tool_response`, and decision output
+under `hookSpecificOutput` with `hookEventName`.
+"""
+from __future__ import annotations
+
+import importlib
+import io
+import json
+import sys
+
+import pytest
+
+GH = "ghp_" + "A" * 36
+
+PII_RESULT = {
+    "tokens_created": 1,
+    "tokenized_text": "contact [VS:EMAIL:abc123]",
+    "token_manifest": [{"type": "EMAIL"}],
+}
+
+
+def _fake_pii_tokenizer(text, **k):
+    """Behaves like the real tokenizer: only strings containing PII change."""
+    if "a@b.com" not in text:
+        return None
+    return dict(PII_RESULT, tokenized_text=text.replace("a@b.com", "[VS:EMAIL:abc123]"))
+
+
+def _reload_hook(monkeypatch, *, secrets: bool = True, api_key: str = "test-key", exempt: str | None = None):
+    if api_key:
+        monkeypatch.setenv("VERISWARM_API_KEY", api_key)
+    monkeypatch.setenv("GUARD_SECRETS_DETECTION", "1" if secrets else "")
+    if exempt is not None:
+        monkeypatch.setenv("GUARD_PII_EXEMPT_PREFIXES", exempt)
+    import veriswarm_mcp.hooks.guard_hook as gh
+
+    gh = importlib.reload(gh)
+    monkeypatch.setattr(gh, "log_pii_detected", lambda *a, **k: None)
+    monkeypatch.setattr(gh, "log_session_start", lambda *a, **k: None)
+    return gh
+
+
+def _event(hook: str, tool_name="mcp__github__create_issue", **fields) -> dict:
+    base = {
+        "session_id": "sess-123",
+        "transcript_path": "/tmp/transcript.jsonl",
+        "cwd": "/work",
+        "permission_mode": "default",
+        "hook_event_name": hook,
+        "tool_name": tool_name,
+        "tool_use_id": "toolu_01ABC",
+    }
+    base.update(fields)
+    return base
+
+
+def _run_main(gh, monkeypatch, stdin) -> int:
+    if isinstance(stdin, bytes):
+        stream = io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8")
+    else:
+        stream = io.StringIO(stdin if isinstance(stdin, str) else json.dumps(stdin))
+    monkeypatch.setattr(sys, "stdin", stream)
+    with pytest.raises(SystemExit) as exc:
+        gh.main()
+    return exc.value.code or 0
+
+
+def _output(capsys) -> dict | None:
+    out = capsys.readouterr().out.strip()
+    return json.loads(out) if out else None
+
+
+# ── PreToolUse decision shape ────────────────────────────────────────
+
+def test_pre_tool_use_modifies_input_without_auto_approving(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_tokenize", _fake_pii_tokenizer)
+
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "contact a@b.com"}))
+
+    out = _output(capsys)["hookSpecificOutput"]
+    assert code == 0
+    assert out["hookEventName"] == "PreToolUse"
+    assert out["updatedInput"] == {"body": "contact [VS:EMAIL:abc123]"}
+    # "allow" would skip the user's permission prompt for the call.
+    assert out.get("permissionDecision") != "allow"
+    assert out["permissionDecision"] == "ask"
+
+
+# ── Fail-closed after a secret is found ──────────────────────────────
+
+def test_secret_still_redacted_when_pii_manifest_is_malformed(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    # Tokenizer "succeeds" but returns a manifest entry without "type".
+    monkeypatch.setattr(
+        gh, "_tokenize",
+        lambda text, **k: {"tokens_created": 1, "tokenized_text": text, "token_manifest": [{}]},
+    )
+
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
+
+    assert code == 0
+    updated = _output(capsys)["hookSpecificOutput"]["updatedInput"]
+    assert updated["body"] == "token [VS:GITHUB_TOKEN:offline]"
+
+
+def test_secret_still_redacted_when_pii_tokenizer_raises(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    calls = {"n": 0}
+
+    def _tokenize(text, **k):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise RuntimeError("tokenizer exploded")
+        return None
+
+    monkeypatch.setattr(gh, "_tokenize", _tokenize)
+
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
+
+    assert code == 0
+    assert _output(capsys)["hookSpecificOutput"]["updatedInput"]["body"] == "token [VS:GITHUB_TOKEN:offline]"
+
+
+def test_secrets_in_dict_keys_are_redacted(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+
+    event = _event("PreToolUse", tool_input={GH: "v", "outer": {"inner": {GH: [GH]}}})
+    code = _run_main(gh, monkeypatch, event)
+
+    assert code == 0
+    updated = _output(capsys)["hookSpecificOutput"]["updatedInput"]
+    assert GH not in json.dumps(updated)
+    assert updated["[VS:GITHUB_TOKEN:offline]"] == "v"
+    assert updated["outer"]["inner"]["[VS:GITHUB_TOKEN:offline]"] == ["[VS:GITHUB_TOKEN:offline]"]
+
+
+# ── Malformed stdin ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("stdin", [
+    "[]",
+    "null",
+    "not json",
+    {"hook_event_name": "PreToolUse", "tool_name": None, "tool_input": {"a": "hello"}},
+    {"hook_event_name": "PreToolUse", "tool_name": "mcp__x__y", "tool_input": "a string"},
+    {"hook_event_name": None},
+    {"hook_event_name": "PostToolUse", "tool_name": None, "tool_response": "x" * 10},
+    b"\xff\xfe{not utf-8",
+])
+def test_malformed_stdin_exits_zero_without_output(monkeypatch, capsys, stdin):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+
+    assert _run_main(gh, monkeypatch, stdin) == 0
+    assert _output(capsys) is None
+
+
+@pytest.mark.parametrize("stdin", [
+    b"\xff\xfe" + json.dumps({"tool_input": {"body": GH}}).encode(),
+    {"hook_event_name": "PreToolUse", "tool_name": None, "tool_input": {"body": GH}},
+    {"hook_event_name": "PreToolUse", "tool_name": "mcp__x__y", "tool_input": "raw " + GH},
+])
+def test_malformed_stdin_carrying_a_secret_is_blocked(monkeypatch, capsys, stdin):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: None)
+
+    assert _run_main(gh, monkeypatch, stdin) == 2
+    assert GH not in capsys.readouterr().err
+
+
+def test_unexpected_crash_with_secret_blocks(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(gh, "_guard_strings", _boom)
+
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "token " + GH}))
+
+    assert code == 2
+
+
+# ── Overall deadline ─────────────────────────────────────────────────
+
+def test_total_api_time_is_bounded_by_the_hook_deadline(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(gh.time, "monotonic", lambda: clock["now"])
+    timeouts = []
+
+    def _slow_post(url, json=None, headers=None, timeout=None):
+        timeouts.append(timeout)
+        clock["now"] += timeout  # every call runs to its timeout
+        raise gh.httpx.TimeoutException("slow")
+
+    monkeypatch.setattr(gh.httpx, "post", _slow_post)
+
+    fields = {f"f{i}": f"value number {i}" for i in range(40)}
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input=fields))
+
+    assert code == 0
+    assert sum(timeouts) <= gh.HOOK_BUDGET_SECONDS
+    assert gh.HOOK_BUDGET_SECONDS < 10  # hook entries are installed with timeout: 10
+
+
+# ── PostToolUse contract ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("field", ["tool_response", "tool_result"])
+def test_post_tool_use_reads_tool_response_and_nests_context(monkeypatch, capsys, field):
+    gh = _reload_hook(monkeypatch)
+    seen = []
+
+    def _tokenize(text, **k):
+        seen.append(text)
+        return dict(PII_RESULT)
+
+    monkeypatch.setattr(gh, "_tokenize", _tokenize)
+    event = _event("PostToolUse", tool_input={"q": "x"}, **{field: {"content": [{"type": "text", "text": "a@b.com"}]}})
+
+    code = _run_main(gh, monkeypatch, event)
+
+    assert code == 0
+    assert "a@b.com" in seen[0]
+    out = _output(capsys)
+    assert "additionalContext" not in out
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert "PII" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_post_tool_use_tolerates_malformed_manifest(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: {"tokens_created": 2, "token_manifest": [{}, "x"]})
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response="contact a@b.com please"))
+
+    assert code == 0
+
+
+# ── PII exemption (opt-in) ───────────────────────────────────────────
+
+def test_no_tools_are_pii_exempt_by_default(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, secrets=False)
+    monkeypatch.setattr(gh, "_tokenize", _fake_pii_tokenizer)
+
+    _run_main(gh, monkeypatch, _event("PreToolUse", tool_name="mcp__notes__save", tool_input={"body": "contact a@b.com"}))
+
+    assert gh.PII_EXEMPT_PREFIXES == ()
+    assert _output(capsys)["hookSpecificOutput"]["updatedInput"]["body"] == "contact [VS:EMAIL:abc123]"
+
+
+def test_exempt_tool_skips_pii_but_still_redacts_secrets(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, exempt=" mcp__mystore__ , ")
+    calls = []
+
+    def _tokenize(text, **k):
+        calls.append(text)
+        return None
+
+    monkeypatch.setattr(gh, "_tokenize", _tokenize)
+
+    event = _event(
+        "PreToolUse", tool_name="mcp__mystore__save",
+        tool_input={"note": "Alice Smith, alice@example.com", "key": "token " + GH},
+    )
+    code = _run_main(gh, monkeypatch, event)
+
+    assert code == 0
+    updated = _output(capsys)["hookSpecificOutput"]["updatedInput"]
+    assert updated["note"] == "Alice Smith, alice@example.com"
+    assert updated["key"] == "token [VS:GITHUB_TOKEN:offline]"
+    # Only the secret-bearing value reached the tokenizer (tripwire path).
+    assert calls == ["token " + GH]
+
+
+def test_exempt_tool_gets_no_post_tool_use_pii_warning(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch, exempt="mcp__mystore__")
+    monkeypatch.setattr(gh, "_tokenize", lambda text, **k: dict(PII_RESULT))
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_name="mcp__mystore__get", tool_response="a@b.com here"))
+
+    assert code == 0
+    assert _output(capsys) is None
+
+
+# ── Session id from the hook payload ─────────────────────────────────
+
+def test_session_start_uses_payload_session_id(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(gh, "log_session_start", lambda **kw: seen.update(kw))
+
+    _run_main(gh, monkeypatch, _event("SessionStart", source="startup"))
+
+    assert seen["session_id"] == "sess-123"
