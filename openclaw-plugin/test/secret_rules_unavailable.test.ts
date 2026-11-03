@@ -1,7 +1,7 @@
 /**
  * If the vendored secret rules cannot load, the plugin fails closed: tool
- * calls are blocked and outbound messages held, with no API call made for
- * the content.
+ * calls are blocked, outbound messages held and tool results withheld, with
+ * no API call made for the content.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 
@@ -63,6 +63,17 @@ describe("secret rules unavailable", () => {
       { channelId: "test", sessionKey: "s-1" }
     );
     expect(sent.cancel).toBe(true);
+
+    const persisted = (hooks["tool_result_persist"] as any)(
+      {
+        toolName: "db",
+        toolCallId: "c-1",
+        message: { role: "toolResult", toolCallId: "c-1", toolName: "db", content: [{ type: "text", text: "rows" }] },
+      },
+      { sessionKey: "s-1", toolName: "db", toolCallId: "c-1" }
+    );
+    expect(JSON.stringify(persisted.message)).toContain("tool result withheld");
+    expect(JSON.stringify(persisted.message)).not.toContain("rows");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

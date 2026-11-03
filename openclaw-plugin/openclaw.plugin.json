@@ -90,7 +90,7 @@
       },
       "secretsDetection": {
         "type": "boolean",
-        "description": "Block tool calls and cancel outbound messages that contain provider-prefix secrets (values or keys), and also redact secrets in tool results. When off (default), secrets in tool params and outbound messages are redacted locally instead (a call whose top-level parameter name is a secret is still blocked). Either way secrets are never sent to the VeriSwarm API.",
+        "description": "Block tool calls and cancel outbound messages that contain provider-prefix secrets (values or keys). When off (default), secrets in tool params and outbound messages are redacted locally instead (a call whose top-level parameter name is a secret is still blocked). Either way secrets are never sent to the VeriSwarm API, and secrets in tool results are always redacted locally.",
         "default": false
       },
       "sessionScan": {

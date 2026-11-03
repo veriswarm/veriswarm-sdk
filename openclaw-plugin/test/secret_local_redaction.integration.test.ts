@@ -168,6 +168,27 @@ describe("secrets are redacted locally before any API call (secretsDetection off
     expectNoSecretSent();
   });
 
+  it("redacts secrets in tool results via tool_result_persist, with no API call", () => {
+    const message = {
+      role: "toolResult",
+      toolCallId: "call-tr",
+      toolName: "db_query",
+      content: [{ type: "text", text: `row key=${GH_PAT}` }],
+      details: { [GH_PAT]: { token: GH_PAT } },
+      isError: false,
+      timestamp: 0,
+    };
+
+    const out = host.hookRunner.runToolResultPersist(
+      { toolName: "db_query", toolCallId: "call-tr", message },
+      { sessionKey: "session-A", toolName: "db_query", toolCallId: "call-tr" }
+    );
+
+    expect(textOf(out.message)).toBe(`row key=${REDACTED}`);
+    expect(JSON.stringify(out.message)).not.toContain(GH_PAT);
+    expect(calls).toEqual([]);
+  });
+
   it("redacts a secret in outbound message content before Sentry and tokenize", async () => {
     const result = await host.hookRunner.runMessageSending(
       { to: "user-1", content: `your key is ${GH_PAT}, mail ${EMAIL}` },

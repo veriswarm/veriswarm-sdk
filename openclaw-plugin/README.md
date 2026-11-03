@@ -22,7 +22,7 @@ export VERISWARM_API_KEY=vsk_your_key_here
 | **PII Tokenization** | Personal data (names, emails, phones, SSNs, addresses, cards) tokenized in tool-call parameters before the tool runs and in outbound messages before delivery. See [Tool output and PII](#tool-output-and-pii) for tool results. |
 | **Tool Policy** | Blocked tools return errors. Allowlist mode restricts to approved tools only. |
 | **Injection Scan** | Tool results scanned for prompt injection patterns; a warning banner is added to the persisted tool result |
-| **Secret Protection** | Provider-prefix secrets (`ghp_`, `sk-`, `AKIA`, …) in tool-call parameters and outbound messages are redacted locally before anything is sent to VeriSwarm, so a secret never reaches the API. With `secretsDetection: true` they block the tool call / cancel the message instead. |
+| **Secret Protection** | Provider-prefix secrets (`ghp_`, `sk-`, `AKIA`, …) in tool-call parameters and outbound messages are redacted locally before anything is sent to VeriSwarm, so a secret never reaches the API. With `secretsDetection: true` they block the tool call / cancel the message instead. Secrets in tool results are always redacted locally. With `secretsDetection` off, a tool can still receive a raw secret when another plugin requests approval for the call (see below). |
 | **Tool Output Redaction** | Secrets and structured PII (emails, SSNs, phones, cards, IPv4) redacted locally from tool results |
 | **Audit** | Every tool call, block, and PII event logged to VeriSwarm Vault |
 | **Session Sentry** | Multi-turn exfiltration detection: each outbound message is scanned against the full conversation history. If the session-level risk score crosses the configured threshold, delivery of the outbound message is cancelled. Fails closed by default (an API error also cancels delivery); see `failOpen`. |
@@ -64,7 +64,7 @@ export VERISWARM_API_KEY=vsk_your_key_here
 
 - **Blocks and cancels are guaranteed.** OpenClaw treats `block` / `cancel` as sticky and terminal, whatever other plugins return. Policy violations, secrets (with `secretsDetection: true`), and Guard failures all use them.
 - **Secrets never reach the VeriSwarm API.** Every string in tool params and outbound messages is redacted locally before PII tokenization or Session Sentry sees it.
-- **Turn on `secretsDetection` to keep secrets from the tool itself.** By default secrets in tool params are redacted by rewriting the params, and a params rewrite is not guaranteed to reach the tool: when another plugin requests approval for the same call, OpenClaw runs the tool with the approver's params merged over the *original* params and drops VeriSwarm's rewrite, so the tool receives the raw secret. With `secretsDetection: true` the call is blocked instead, which always holds. A secret used as a top-level parameter name is always blocked (see below).
+- **Turn on `secretsDetection` to keep secrets from the tool itself.** By default secrets in tool params are redacted by rewriting the params, and a params rewrite is not guaranteed to reach the tool: when another plugin requests approval for the same call, OpenClaw runs the tool with the approver's params merged over the *original* params and drops VeriSwarm's rewrite, so the tool receives the raw secret (it is still never sent to the VeriSwarm API). With `secretsDetection: true` the call is blocked instead, which always holds. A secret used as a top-level parameter name is always blocked (see below).
 - **PII tokenization of params and messages is a best-effort rewrite.** It applies unless another plugin's approval request on the same call takes precedence. Each handler receives the *original* event, and VeriSwarm builds its rewrite from it, so when VeriSwarm rewrites params or content it replaces any changes other plugins made to them; values another plugin adds in its own rewrite are not seen by VeriSwarm. A rewrite that would rename a top-level parameter is blocked instead, because OpenClaw shallow-merges rewrites over the original params.
 - **`tool_result_persist` runs in sequence**, so VeriSwarm's redaction sees, and is applied after, other plugins' result rewrites.
 
@@ -76,7 +76,7 @@ The plugin ships an `openclaw.plugin.json` manifest declaring its config schema 
 
 OpenClaw's only result-rewriting hook available to external plugins, `tool_result_persist`, is synchronous (its asynchronous tool-result middleware is restricted to plugins bundled with OpenClaw), so tool results cannot be sent to the VeriSwarm API. Instead the plugin redacts them locally, with no network call:
 
-- **Secrets** — provider-prefix keys and tokens, using the same offline rules as the secret tripwire (when `secretsDetection` is on; tool results are not redacted for secrets when it is off).
+- **Secrets** — provider-prefix keys and tokens, using the same offline rules as the secret tripwire. Always on, whatever `secretsDetection` is set to.
 - **Structured PII** — emails, US SSNs, phone numbers, payment card numbers (Luhn-checked) and IPv4 addresses, replaced with `[VS:<TYPE>:local]` markers (when `piiEnabled` is on). Local redaction is irreversible and pattern-based: it does not catch names or free-text PII.
 
 Full NER tokenization through the VeriSwarm API applies to tool-call parameters and outbound messages. Redaction is applied to the tool result OpenClaw persists to the session transcript.
@@ -87,7 +87,7 @@ Full NER tokenization through the VeriSwarm API applies to tool-call parameters 
 
 ### Failure behavior
 
-PII tokenization and Session Sentry **fail closed** by default: if the VeriSwarm API errors, times out, or returns an unexpected response, the tool call is blocked or the message delivery is cancelled. The same applies to any unexpected error inside a VeriSwarm hook (OpenClaw's own default for most hooks is to log the error and continue): the tool call is blocked, the message held, or the tool result withheld. Set `failOpen: true` to let traffic through without PII tokenization or Session Sentry instead (a `[VeriSwarm] … failed` warning is logged either way). The secret tripwire is local and needs no API, so its redaction and blocks apply regardless of `failOpen`, except that with `failOpen: true` an unexpected crash inside a hook lets that call or message through unchecked. If the bundled secret rules cannot load at all, every tool call is blocked and every message held, whatever `failOpen` says.
+PII tokenization and Session Sentry **fail closed** by default: if the VeriSwarm API errors, times out, or returns an unexpected response, the tool call is blocked or the message delivery is cancelled. The same applies to any unexpected error inside a VeriSwarm hook (OpenClaw's own default for most hooks is to log the error and continue): the tool call is blocked, the message held, or the tool result withheld. Set `failOpen: true` to let traffic through without PII tokenization or Session Sentry instead (a `[VeriSwarm] … failed` warning is logged either way). The secret tripwire is local and needs no API, so its redaction and blocks apply regardless of `failOpen`, except that with `failOpen: true` an unexpected crash inside a hook lets that call or message through unchecked. If the bundled secret rules cannot load at all, every tool call is blocked, every message held and every tool result withheld, whatever `failOpen` says.
 
 If an operator sets an OpenClaw hook timeout (`plugins.entries.veriswarm.hooks.timeoutMs` / `timeouts`) shorter than the plugin's 10-second API timeout, OpenClaw abandons the handler on timeout and, for `message_sending`, delivers the message. Leave those unset or above 10 s.
 
@@ -113,7 +113,7 @@ If an operator sets an OpenClaw hook timeout (`plugins.entries.veriswarm.hooks.t
           sessionScan: true,                    // Session Sentry multi-turn exfil detection (default: true)
           blockedTools: ["dangerous_tool"],      // Optional blocklist
           allowedTools: [],                     // Optional allowlist (empty = allow all)
-          secretsDetection: false,              // Block/cancel on secrets and redact them in results; off = redact locally (default: false)
+          secretsDetection: false,              // Block/cancel on secrets in params/messages; off = redact locally (default: false)
           failOpen: false,                      // Skip PII/Sentry if VeriSwarm is unreachable (default: false)
         }
       }

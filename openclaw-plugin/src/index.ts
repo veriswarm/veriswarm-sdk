@@ -316,17 +316,16 @@ async function tokenizeParamsPii(
 }
 
 // Synchronous redaction of a tool result for tool_result_persist: offline
-// secret rules (when secretsDetection is on) and local PII patterns (when
-// piiEnabled). Image blocks are left alone. Returns null when nothing changed.
+// secret rules (always) and local PII patterns (when piiEnabled). Image
+// blocks are left alone. Returns null when nothing changed.
 function redactToolResultMessage(
-  message: Record<string, unknown>
+  message: Record<string, unknown>,
+  tripwire: SecretTripwire
 ): { message: Record<string, unknown>; entities: Set<string> } | null {
-  const tripwire = state.secretsDetection ? state.tripwire : null;
-  if (!tripwire && !state.piiEnabled) return null;
   const entities = new Set<string>();
   const redactText = (text: string) => {
     let out = text;
-    if (tripwire && tripwire.scan(out).length > 0) {
+    if (tripwire.scan(out).length > 0) {
       out = tripwire.redactOffline(out);
       entities.add("SECRET");
     }
@@ -717,10 +716,11 @@ export const pluginEntry: PluginEntry = {
         type: "boolean",
         description:
           "Block tool calls and cancel outbound messages that contain provider-prefix " +
-          "secrets (values or keys), and also redact secrets in tool results. When off " +
+          "secrets (values or keys). When off " +
           "(default), secrets in tool params and outbound messages are redacted locally " +
           "instead (a call whose top-level parameter name is a secret is still blocked). " +
-          "Either way secrets are never sent to the VeriSwarm API.",
+          "Either way secrets are never sent to the VeriSwarm API, and secrets in tool " +
+          "results are always redacted locally.",
         default: false,
       },
       sessionScan: {
@@ -927,7 +927,8 @@ export const pluginEntry: PluginEntry = {
 
     // Hook: tool_result_persist — the host's result-rewriting hook. It is
     // SYNCHRONOUS (a returned Promise is ignored by the host), so only local
-    // checks run here: offline secret redaction, local PII-pattern redaction
+    // checks run here: offline secret redaction (always on, independent of
+    // secretsDetection), local PII-pattern redaction
     // (emails, SSNs, phones, Luhn-valid cards, IPv4) and the injection banner.
     // API-based NER tokenization applies to tool inputs and outbound messages.
     api.on(
@@ -938,8 +939,10 @@ export const pluginEntry: PluginEntry = {
         if (!isRecord(original)) return;
         const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null;
 
+        // Missing secret rules withhold the result whatever failOpen says.
+        if (!state.tripwire) return withheldToolResult(event);
         let message = original;
-        const redacted = redactToolResultMessage(original);
+        const redacted = redactToolResultMessage(original, state.tripwire);
         if (redacted) {
           message = redacted.message;
           void logEvent("tool.output.redacted", {

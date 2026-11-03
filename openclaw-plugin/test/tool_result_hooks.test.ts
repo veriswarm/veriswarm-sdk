@@ -124,11 +124,14 @@ describe("tool_result_persist local redaction", () => {
     expect(JSON.stringify(out.message)).not.toContain("415-555-0132");
   });
 
-  it("skips secrets when secretsDetection is off and PII patterns when piiEnabled is off", () => {
+  it("redacts secrets even when secretsDetection is off; skips PII patterns when piiEnabled is off", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...REDACT_CONFIG, secretsDetection: false, piiEnabled: false });
 
-    expect(persist(hooks, toolResult([{ type: "text", text: `alice@example.com ${GH_PAT}` }]))).toBeUndefined();
+    const out = persist(hooks, toolResult([{ type: "text", text: `alice@example.com ${GH_PAT}` }]));
+    const text = JSON.stringify(out.message);
+    expect(text).not.toContain(GH_PAT);
+    expect(text).toContain("alice@example.com");
   });
 });
 
