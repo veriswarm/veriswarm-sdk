@@ -154,12 +154,12 @@ client.unkill_agent("agt_123")
 
 # Guard findings
 findings = client.list_guard_findings(agent_id="agt_123")
-client.update_guard_finding(finding_id=1, updates={"status": "resolved"})
+client.update_guard_finding(1, new_status="resolved")  # open | false_positive | mitigated | resolved
 
 # Guard policies
 policies = client.list_guard_policies()
 client.create_guard_policy({"name": "block-sql", "pattern": "DROP TABLE", "action": "block"})
-client.update_guard_policy(policy_id=1, updates={"enabled": False})
+client.update_guard_policy(1, is_active=False)
 client.delete_guard_policy(policy_id=1)
 ```
 
@@ -331,7 +331,8 @@ client.mark_all_notifications_read()
 allowlist = client.get_ip_allowlist()
 
 # Set allowlist
-client.set_ip_allowlist(cidrs=["10.0.0.0/8", "192.168.1.0/24"], enabled=True)
+client.set_ip_allowlist(cidrs=["10.0.0.0/8", "192.168.1.0/24"])
+client.set_ip_allowlist(enabled=False)  # disable explicitly; an empty cidrs list is refused
 ```
 
 ## Custom Domains
@@ -368,7 +369,7 @@ url = client.get_badge_url("my-agent", style="compact", theme="dark")
 ## Reputation Lookup
 
 ```python
-rep = client.reputation_lookup(slug="my-agent")
+rep = client.reputation_lookup("my-agent")  # email, URL, slug, or other reference
 ```
 
 ## Platform Status
@@ -429,12 +430,12 @@ Use the `veriswarm` package for trust, Guard, Passport, Vault, A2A, approvals, a
 | `scan_injection(text)` | Guard injection scanning |
 | `list_guard_policies()` | List Guard policies |
 | `create_guard_policy(policy)` | Create Guard policy |
-| `update_guard_policy(id, updates)` | Update Guard policy |
+| `update_guard_policy(id, is_active=)` | Activate/deactivate Guard policy |
 | `delete_guard_policy(id)` | Delete Guard policy |
 | `kill_agent(agent_id, reason)` | Activate kill switch |
 | `unkill_agent(agent_id)` | Deactivate kill switch |
 | `list_guard_findings(...)` | List Guard findings |
-| `update_guard_finding(id, updates)` | Update Guard finding |
+| `update_guard_finding(id, new_status=)` | Set Guard finding status |
 | `verify_agent_identity(agent_id)` | Passport identity verification |
 | `create_delegation(delegation)` | Create Passport delegation |
 | `list_delegations()` | List Passport delegations |
@@ -454,7 +455,7 @@ Use the `veriswarm` package for trust, Guard, Passport, Vault, A2A, approvals, a
 | `mark_notification_read(id)` | Mark notification read |
 | `mark_all_notifications_read()` | Mark all notifications read |
 | `get_ip_allowlist()` | Get IP allowlist |
-| `set_ip_allowlist(cidrs, enabled)` | Set IP allowlist |
+| `set_ip_allowlist(cidrs, enabled)` | Set IP allowlist (`enabled=False` disables) |
 | `get_custom_domain()` | Get custom domain config |
 | `set_custom_domain(domain)` | Set custom domain |
 | `verify_custom_domain()` | Verify custom domain DNS |
@@ -464,7 +465,7 @@ Use the `veriswarm` package for trust, Guard, Passport, Vault, A2A, approvals, a
 | `remove_team_member(user_id)` | Remove team member |
 | `list_workspaces()` | List user workspaces |
 | `switch_workspace(tenant_id)` | Switch active workspace |
-| `reputation_lookup(slug)` | Shared reputation lookup |
+| `reputation_lookup(agent_ref)` | Shared reputation lookup |
 | `get_badge_url(slug, ...)` | Embeddable badge URL |
 | `get_platform_status()` | Platform health check |
 | **Cortex Workflows** | |

@@ -130,12 +130,12 @@ await client.unkillAgent("agt_123");
 
 // Guard findings
 const findings = await client.listGuardFindings("agt_123");
-await client.updateGuardFinding(1, { status: "resolved" });
+await client.updateGuardFinding(1, { newStatus: "resolved" }); // open | false_positive | mitigated | resolved
 
 // Guard policies
 const policies = await client.listGuardPolicies();
 await client.createGuardPolicy({ name: "block-sql", pattern: "DROP TABLE", action: "block" });
-await client.updateGuardPolicy(1, { enabled: false });
+await client.updateGuardPolicy(1, { isActive: false });
 await client.deleteGuardPolicy(1);
 ```
 
@@ -243,7 +243,8 @@ await client.markAllNotificationsRead();
 
 ```javascript
 const allowlist = await client.getIpAllowlist();
-await client.setIpAllowlist({ cidrs: ["10.0.0.0/8"], enabled: true });
+await client.setIpAllowlist({ cidrs: ["10.0.0.0/8"] });
+await client.setIpAllowlist({ enabled: false }); // disable explicitly; an empty cidrs list is refused
 ```
 
 ## Custom Domains
@@ -279,7 +280,7 @@ const url = client.getBadgeUrl("my-agent", { style: "card", theme: "dark" });
 ## Reputation Lookup
 
 ```javascript
-const rep = await client.reputationLookup("my-agent");
+const rep = await client.reputationLookup("my-agent"); // email, URL, slug, or other reference
 ```
 
 ## OpenAI-Compatible LLM Proxy
@@ -333,12 +334,12 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `scanInjection({ text })` | Guard injection scanning |
 | `listGuardPolicies()` | List Guard policies |
 | `createGuardPolicy(policy)` | Create Guard policy |
-| `updateGuardPolicy(id, updates)` | Update Guard policy |
+| `updateGuardPolicy(id, { isActive })` | Activate/deactivate Guard policy |
 | `deleteGuardPolicy(id)` | Delete Guard policy |
 | `killAgent(agentId, reason)` | Activate kill switch |
 | `unkillAgent(agentId)` | Deactivate kill switch |
 | `listGuardFindings(agentId?)` | List Guard findings |
-| `updateGuardFinding(id, updates)` | Update Guard finding |
+| `updateGuardFinding(id, { newStatus })` | Set Guard finding status |
 | `verifyAgentIdentity(agentId)` | Passport identity verification |
 | `createDelegation(delegation)` | Create Passport delegation |
 | `listDelegations()` | List Passport delegations |
@@ -358,7 +359,7 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `markNotificationRead(id)` | Mark notification read |
 | `markAllNotificationsRead()` | Mark all notifications read |
 | `getIpAllowlist()` | Get IP allowlist |
-| `setIpAllowlist({ cidrs, enabled })` | Set IP allowlist |
+| `setIpAllowlist({ cidrs, enabled })` | Set IP allowlist (`enabled: false` disables) |
 | `getCustomDomain()` | Get custom domain config |
 | `setCustomDomain(domain)` | Set custom domain |
 | `verifyCustomDomain()` | Verify custom domain DNS |
@@ -368,7 +369,7 @@ Use this SDK (`@veriswarm/sdk`) for trust, Guard, Passport, Vault, A2A, approval
 | `removeTeamMember(userId)` | Remove team member |
 | `listWorkspaces()` | List user workspaces |
 | `switchWorkspace(tenantId)` | Switch active workspace |
-| `reputationLookup(slug)` | Shared reputation lookup |
+| `reputationLookup(agentRef)` | Shared reputation lookup |
 | `getBadgeUrl(slug, options?)` | Embeddable badge URL |
 | `getPlatformStatus()` | Platform health check |
 | **Web Bot Auth** (`webbotauth.mjs`, separate entry point) | |

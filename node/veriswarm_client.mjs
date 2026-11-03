@@ -42,6 +42,16 @@ export class VeriSwarmError extends Error {
   }
 }
 
+/** Join a CIDR list (array or comma/newline-separated string) into the server's format. */
+function normalizeCidrs(cidrs) {
+  if (cidrs === null || cidrs === undefined) return "";
+  const parts = Array.isArray(cidrs) ? cidrs : String(cidrs).split(/[,\n]/);
+  return parts
+    .map((part) => String(part).trim())
+    .filter((part) => part !== "")
+    .join(",");
+}
+
 /** Tagged template: every interpolated value becomes one encoded path segment. */
 function apiPath(strings, ...values) {
   return strings.reduce(
@@ -339,9 +349,20 @@ export class VeriSwarmClient {
     return this.#request("/v1/suite/guard/policies", { method: "POST", body: policy });
   }
 
-  /** Update a Guard policy rule. */
-  async updateGuardPolicy(policyId, updates) {
-    return this.#request(apiPath`/v1/suite/guard/policies/${policyId}`, { method: "PATCH", body: updates });
+  /**
+   * Activate or deactivate a Guard policy rule.
+   * @param {number|string} policyId
+   * @param {{isActive?: boolean, is_active?: boolean}} updates
+   */
+  async updateGuardPolicy(policyId, { isActive, is_active: isActiveSnake } = {}) {
+    const active = isActive ?? isActiveSnake;
+    if (typeof active !== "boolean") {
+      throw new TypeError("updateGuardPolicy requires { isActive: boolean }");
+    }
+    return this.#request(apiPath`/v1/suite/guard/policies/${policyId}`, {
+      method: "PATCH",
+      query: { is_active: active },
+    });
   }
 
   /** Delete a Guard policy rule. */
@@ -368,10 +389,21 @@ export class VeriSwarmClient {
     return this.#request("/v1/suite/guard/findings", { query: { agent_id: agentId || null } });
   }
 
-  /** Update a Guard finding (e.g. resolve, dismiss). */
-  async updateGuardFinding(findingId, updates) {
+  /**
+   * Set a Guard finding's status.
+   * @param {number|string} findingId
+   * @param {{newStatus?: "open"|"false_positive"|"mitigated"|"resolved", new_status?: string, status?: string}} updates
+   */
+  async updateGuardFinding(findingId, { newStatus, new_status: newStatusSnake, status } = {}) {
     this.#requireAccountToken("updateGuardFinding");
-    return this.#request(apiPath`/v1/suite/guard/findings/${findingId}`, { method: "PATCH", body: updates });
+    const value = newStatus ?? newStatusSnake ?? status;
+    if (typeof value !== "string" || value === "") {
+      throw new TypeError("updateGuardFinding requires { newStatus: string }");
+    }
+    return this.#request(apiPath`/v1/suite/guard/findings/${findingId}`, {
+      method: "PATCH",
+      query: { new_status: value },
+    });
   }
 
   // --- Passport Delegations ---
@@ -468,10 +500,25 @@ export class VeriSwarmClient {
     return this.#request("/v1/public/providers/ip-allowlist");
   }
 
-  /** Set the IP allowlist for the workspace. */
-  async setIpAllowlist({ cidrs, enabled = true }) {
+  /**
+   * Set the IP allowlist for the workspace.
+   * The server stores a comma-separated CIDR string and treats an empty one
+   * as "disable", so an empty list is refused unless `enabled: false` is
+   * passed explicitly.
+   * @param {{cidrs?: string[]|string, enabled?: boolean}} options
+   */
+  async setIpAllowlist({ cidrs, enabled = true } = {}) {
     this.#requireAccountToken("setIpAllowlist");
-    return this.#request("/v1/public/providers/ip-allowlist", { method: "POST", body: { cidrs, enabled } });
+    const ipAllowlist = enabled ? normalizeCidrs(cidrs) : "";
+    if (enabled && ipAllowlist === "") {
+      throw new TypeError(
+        "setIpAllowlist: cidrs is empty; pass { enabled: false } to disable the allowlist",
+      );
+    }
+    return this.#request("/v1/public/providers/ip-allowlist", {
+      method: "POST",
+      body: { ip_allowlist: ipAllowlist },
+    });
   }
 
   // --- Custom Domains ---
@@ -536,9 +583,10 @@ export class VeriSwarmClient {
 
   // --- Reputation Lookup ---
 
-  /** Look up an agent's shared reputation by slug. */
-  async reputationLookup(slug) {
-    return this.#request("/v1/public/reputation/lookup", { query: { slug } });
+  /** Look up an agent's shared reputation by reference (email, URL, slug, ...). */
+  async reputationLookup(agentRef) {
+    if (!agentRef) throw new TypeError("reputationLookup requires agentRef");
+    return this.#request("/v1/public/reputation/lookup", { query: { agent_ref: agentRef } });
   }
 
   // --- Trust Badges ---

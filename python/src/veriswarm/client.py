@@ -35,6 +35,14 @@ def _with_query(path: str, query: dict[str, Any] | None) -> str:
     return f"{path}?{_qs(pairs)}" if pairs else path
 
 
+def _normalize_cidrs(cidrs: list[str] | str | None) -> str:
+    """Join a CIDR list (or comma/newline-separated string) into the server's format."""
+    if cidrs is None:
+        return ""
+    parts = cidrs.replace("\n", ",").split(",") if isinstance(cidrs, str) else cidrs
+    return ",".join(p.strip() for p in (str(x) for x in parts) if p.strip())
+
+
 def _query_value(value: Any) -> str:
     # Match the Node SDK / server expectations for booleans.
     if isinstance(value, bool):
@@ -409,9 +417,22 @@ class VeriSwarmClient:
         """Create a new Guard policy rule."""
         return self._post("/v1/suite/guard/policies", policy)
 
-    def update_guard_policy(self, policy_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        """Update a Guard policy rule."""
-        return self._request(f"/v1/suite/guard/policies/{_path(policy_id)}", method="PATCH", body=updates)
+    def update_guard_policy(
+        self,
+        policy_id: int,
+        updates: dict[str, Any] | None = None,
+        *,
+        is_active: bool | None = None,
+    ) -> dict[str, Any]:
+        """Activate or deactivate a Guard policy rule (``is_active``)."""
+        active = is_active if is_active is not None else (updates or {}).get("is_active")
+        if not isinstance(active, bool):
+            raise ValueError("update_guard_policy requires is_active=True/False")
+        return self._request(
+            f"/v1/suite/guard/policies/{_path(policy_id)}",
+            method="PATCH",
+            query={"is_active": active},
+        )
 
     def delete_guard_policy(self, policy_id: int) -> dict[str, Any]:
         """Delete a Guard policy rule."""
@@ -434,9 +455,23 @@ class VeriSwarmClient:
         return self._get("/v1/suite/guard/findings", query={"agent_id": agent_id or None})
 
     @_requires_account_token
-    def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-        """Update a Guard finding (e.g. resolve, dismiss)."""
-        return self._request(f"/v1/suite/guard/findings/{_path(finding_id)}", method="PATCH", body=updates)
+    def update_guard_finding(
+        self,
+        finding_id: int,
+        updates: dict[str, Any] | None = None,
+        *,
+        new_status: str | None = None,
+    ) -> dict[str, Any]:
+        """Set a Guard finding's status: open, false_positive, mitigated, or resolved."""
+        given = updates or {}
+        value = new_status or given.get("new_status") or given.get("status")
+        if not isinstance(value, str) or not value:
+            raise ValueError("update_guard_finding requires new_status")
+        return self._request(
+            f"/v1/suite/guard/findings/{_path(finding_id)}",
+            method="PATCH",
+            query={"new_status": value},
+        )
 
     # --- Passport Delegations ---
 
@@ -521,9 +556,24 @@ class VeriSwarmClient:
         return self._get("/v1/public/providers/ip-allowlist")
 
     @_requires_account_token
-    def set_ip_allowlist(self, *, cidrs: list[str], enabled: bool = True) -> dict[str, Any]:
-        """Set the IP allowlist for the workspace."""
-        return self._post("/v1/public/providers/ip-allowlist", {"cidrs": cidrs, "enabled": enabled})
+    def set_ip_allowlist(
+        self,
+        *,
+        cidrs: list[str] | str | None = None,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Set the IP allowlist for the workspace.
+
+        The server stores a comma-separated CIDR string and treats an empty
+        one as "disable", so an empty list is refused unless
+        ``enabled=False`` is passed explicitly.
+        """
+        ip_allowlist = _normalize_cidrs(cidrs) if enabled else ""
+        if enabled and not ip_allowlist:
+            raise ValueError(
+                "set_ip_allowlist: cidrs is empty; pass enabled=False to disable the allowlist"
+            )
+        return self._post("/v1/public/providers/ip-allowlist", {"ip_allowlist": ip_allowlist})
 
     # --- Custom Domains ---
 
@@ -578,9 +628,17 @@ class VeriSwarmClient:
 
     # --- Reputation Lookup ---
 
-    def reputation_lookup(self, *, slug: str) -> dict[str, Any]:
-        """Look up an agent's shared reputation by slug."""
-        return self._get("/v1/public/reputation/lookup", query={"slug": slug})
+    def reputation_lookup(
+        self, agent_ref: str | None = None, *, slug: str | None = None
+    ) -> dict[str, Any]:
+        """Look up an agent's shared reputation by reference (email, URL, slug, ...).
+
+        ``slug=`` is accepted as an alias for ``agent_ref``.
+        """
+        ref = agent_ref if agent_ref is not None else slug
+        if not ref:
+            raise ValueError("reputation_lookup requires agent_ref")
+        return self._get("/v1/public/reputation/lookup", query={"agent_ref": ref})
 
     # --- Badges ---
 
