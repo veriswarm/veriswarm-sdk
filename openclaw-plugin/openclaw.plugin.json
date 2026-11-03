@@ -1,0 +1,107 @@
+{
+  "id": "veriswarm",
+  "name": "VeriSwarm Guard",
+  "description": "Trust scoring, PII tokenization, policy enforcement, and audit for OpenClaw agents. Protects against data exposure, prompt injection, and unauthorized tool usage.",
+  "version": "0.1.0",
+  "uiHints": {
+    "apiKey": {
+      "label": "VeriSwarm API key",
+      "placeholder": "vsk_...",
+      "sensitive": true
+    },
+    "agentKey": {
+      "label": "Agent API key",
+      "placeholder": "agta_...",
+      "sensitive": true
+    }
+  },
+  "contracts": {
+    "tools": [
+      "veriswarm_check_trust",
+      "veriswarm_check_decision",
+      "veriswarm_score_history",
+      "veriswarm_rehydrate",
+      "veriswarm_guard_status",
+      "veriswarm_findings",
+      "veriswarm_get_credentials",
+      "veriswarm_verify_credential",
+      "veriswarm_query_ledger",
+      "veriswarm_verify_chain",
+      "veriswarm_status"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "description": "VeriSwarm workspace API key (vsk_...)"
+      },
+      "apiUrl": {
+        "type": "string",
+        "description": "VeriSwarm API URL",
+        "default": "https://api.veriswarm.ai"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent ID for this OpenClaw instance",
+        "default": ""
+      },
+      "agentKey": {
+        "type": "string",
+        "description": "Agent API key (agta_...) for credential issuance and self-reporting",
+        "default": ""
+      },
+      "piiEnabled": {
+        "type": "boolean",
+        "description": "Enable PII tokenization on outbound messages and tool-call params",
+        "default": true
+      },
+      "policyEnabled": {
+        "type": "boolean",
+        "description": "Enable tool policy enforcement",
+        "default": true
+      },
+      "injectionScan": {
+        "type": "boolean",
+        "description": "Enable prompt injection scanning on tool outputs",
+        "default": true
+      },
+      "auditEnabled": {
+        "type": "boolean",
+        "description": "Enable audit logging to VeriSwarm Vault",
+        "default": true
+      },
+      "blockedTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Tools to block",
+        "default": []
+      },
+      "allowedTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Only these tools allowed (allowlist mode). Empty = allow all.",
+        "default": []
+      },
+      "secretsDetection": {
+        "type": "boolean",
+        "description": "Scan outbound tool-call args for provider-prefix secrets. On a hit, tokenize via the API when online, or redact locally (fail-closed) when offline. Default off.",
+        "default": false
+      },
+      "sessionScan": {
+        "type": "boolean",
+        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. Fail-open: any API error is logged and the message is sent unmodified. Safe to leave on while the platform flag is dormant — the server returns {enabled:false, blocked:false}. Default: true.",
+        "default": true
+      }
+    },
+    "required": [
+      "apiKey"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -2,12 +2,21 @@
   "name": "@veriswarm/openclaw-plugin",
   "version": "0.1.0",
   "description": "VeriSwarm Guard plugin for OpenClaw — PII tokenization, trust scoring, policy enforcement, and audit for AI agents",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "openclaw.plugin.json",
+    "README.md",
+    "SKILL.md"
+  ],
   "scripts": {
     "build": "tsc && cp src/secret_rules_manifest.json dist/secret_rules_manifest.json",
     "dev": "tsc --watch",
-    "test": "vitest run"
+    "pretest": "npm run build",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "openclaw": {
     "extensions": [
@@ -27,7 +36,8 @@
   "devDependencies": {
     "@types/node": "^25.9.1",
     "typescript": "^5.4",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.7",
+    "openclaw": "2026.5.27"
   },
   "peerDependencies": {
     "openclaw": ">=2026.2"
