@@ -317,12 +317,31 @@ def maybe_flush(buffer_count: int) -> None:
         pid = os.fork()
         if pid == 0:
             try:
+                _detach_from_hook_io()
                 flush_to_api()
             except Exception:
                 pass
             os._exit(0)
     except OSError:
         pass
+
+
+def _detach_from_hook_io() -> None:
+    """In the flush child: leave the hook's session and release its stdio.
+
+    Claude Code waits for the hook's stdout to close; a child still holding
+    it would stretch the hook to the length of the upload (and past the
+    hook timeout).
+    """
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    if devnull > 2:
+        os.close(devnull)
 
 
 def log_session_start(cwd: str = "", session_id: str = "", **kwargs) -> None:

@@ -83,6 +83,8 @@ def test_flush_requeues_unsent_events(monkeypatch, tmp_path):
 # ── Config precedence, buffer bounds, error handling ─────────────────
 
 import os
+import sys
+import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -313,3 +315,25 @@ def test_activity_logger_stops_appending_at_max_buffer(tmp_path, _isolated_home)
     _run_logger(_isolated_home)
 
     assert len(buffer_file.read_text().splitlines()) == activity_reporter.MAX_BUFFER_SIZE
+
+
+def test_forked_flush_does_not_hold_the_hook_output_pipe(tmp_path, _isolated_home):
+    """The hook's caller waits for stdout EOF; a flush child that inherits
+    stdout would keep the hook 'running' until the upload finishes."""
+    script = tmp_path / "hook_like.py"
+    script.write_text(
+        "import time\n"
+        "from veriswarm_mcp.hooks import activity_reporter as ar\n"
+        "ar.flush_to_api = lambda: time.sleep(3)\n"
+        "ar.maybe_flush(ar.FLUSH_THRESHOLD)\n"
+        "print('done', flush=True)\n"
+    )
+    start = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=20,
+        env={**os.environ, "HOME": str(_isolated_home)},
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.stdout.strip() == "done"
+    assert elapsed < 2.0
