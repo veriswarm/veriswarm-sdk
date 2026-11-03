@@ -90,17 +90,17 @@
       },
       "secretsDetection": {
         "type": "boolean",
-        "description": "Scan tool-call params (values and keys) for provider-prefix secrets and block the call on a hit; also redact secrets in tool results. Local rules, no API call needed. Default off.",
+        "description": "Block tool calls and cancel outbound messages that contain provider-prefix secrets (values or keys), and also redact secrets in tool results. When off (default), secrets in tool params and outbound messages are redacted locally instead (a call whose top-level parameter name is a secret is still blocked). Either way secrets are never sent to the VeriSwarm API.",
         "default": false
       },
       "sessionScan": {
         "type": "boolean",
-        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. An API error also cancels delivery unless failOpen is set. Safe to leave on while the platform flag is dormant — the server returns {enabled:false, blocked:false}. Default: true.",
+        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. An API error also cancels delivery unless failOpen is set. Safe to leave on while the platform flag is dormant \u2014 the server returns {enabled:false, blocked:false}. Default: true.",
         "default": true
       },
       "failOpen": {
         "type": "boolean",
-        "description": "Let tool calls and messages through when PII tokenization or Session Sentry is unreachable or returns an unexpected response. Default false: the tool call is blocked or the message delivery cancelled. The secret tripwire always falls back to local redaction regardless of this flag.",
+        "description": "Let tool calls and messages through without PII tokenization or Session Sentry when the VeriSwarm API is unreachable or returns an unexpected response, and let them through unchecked when a Guard hook fails unexpectedly. Default false: the tool call is blocked, the message delivery cancelled, or the tool result withheld. Local secret redaction and blocks need no API and are not relaxed by this flag.",
         "default": false
       }
     },

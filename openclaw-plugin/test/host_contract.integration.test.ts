@@ -233,6 +233,28 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     expect(scan?.body.session_id).toBe("session-A");
   });
 
+  it("cancels an outbound message carrying a secret, without sending it anywhere", async () => {
+    sentryMode = "allow";
+    const result = await host.hookRunner.runMessageSending(
+      { to: "user-1", content: `here you go: ${GH_PAT}` },
+      { channelId: "telegram", sessionKey: "session-A" }
+    );
+
+    expect(result?.cancel).toBe(true);
+    expect(result?.cancelReason).toContain("credential");
+    expect(result?.cancelReason).not.toContain(GH_PAT);
+    for (const call of calls) expect(JSON.stringify(call.body)).not.toContain(GH_PAT);
+  });
+
+  it("never sends a secret in tool params to the API (blocked before tokenize)", async () => {
+    const { tool } = fakeTool("send_note");
+    await host
+      .wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" })
+      .execute("call-3c", { body: `contact ${EMAIL} token=${GH_PAT}` });
+
+    for (const call of calls) expect(JSON.stringify(call.body)).not.toContain(GH_PAT);
+  });
+
   it("Session Sentry API failure cancels delivery (fail closed)", async () => {
     sentryMode = "error";
     const result = await host.hookRunner.runMessageSending(

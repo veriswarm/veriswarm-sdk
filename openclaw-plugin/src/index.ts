@@ -4,13 +4,15 @@
  * Complete VeriSwarm suite integration for OpenClaw agents:
  *
  * GUARD (automatic, transparent — OpenClaw plugin hooks):
- *   - before_tool_call: policy enforcement (allowlist/blocklist), secret
- *     tripwire (blocks the call), PII tokenization of tool-call params
+ *   - before_tool_call: policy enforcement (allowlist/blocklist), local
+ *     secret redaction (or a block, with secretsDetection), PII tokenization
+ *     of tool-call params
  *   - tool_result_persist: local secret + structured-PII redaction and a
  *     prompt-injection banner on tool results
  *   - message_received: links channel conversations to their session
  *   - after_tool_call: audit logging of tool calls to VeriSwarm Vault
- *   - message_sending: Session Sentry (cancels delivery on block) and PII
+ *   - message_sending: local secret redaction (or a cancel, with
+ *     secretsDetection), Session Sentry (cancels delivery on block) and PII
  *     tokenization of outbound messages
  *
  * GATE (tools the agent can call):
@@ -256,19 +258,25 @@ function assertTokenizeResult(result: TokenizeResult): TokenizeResult {
   return result;
 }
 
-// Names of the secret rules that match anywhere in `value` — string values
-// and object keys, at any depth. Local and synchronous (no API call).
-function findSecretRules(value: unknown, tripwire: SecretTripwire): Set<string> {
+// Redact secrets in every string of `value` — values and object keys, at
+// any depth — and name the rules that matched. Local and synchronous: runs
+// before any API call, so a secret is never sent to VeriSwarm.
+function redactSecrets(
+  value: unknown,
+  tripwire: SecretTripwire
+): { value: unknown; changed: boolean; rules: Set<string> } {
   const rules = new Set<string>();
-  mapStringLeavesSync(
+  const mapped = mapStringLeavesSync(
     value,
     (text) => {
-      for (const hit of tripwire.scan(text)) rules.add(hit.ruleName);
-      return text;
+      const hits = tripwire.scan(text);
+      if (hits.length === 0) return text;
+      for (const hit of hits) rules.add(hit.ruleName);
+      return tripwire.redactOffline(text);
     },
     { keys: true }
   );
-  return rules;
+  return { value: mapped.value, changed: mapped.changed, rules };
 }
 
 // Tokenize PII in every string leaf of the tool params. On an API error or
@@ -419,6 +427,31 @@ function initialState(): PluginState {
   };
 }
 
+// Build the secret tripwire from the vendored manifest so it is live from
+// the very first hook call, then refresh it from the API in the background
+// (keeping the vendored baseline if that fails). register is synchronous,
+// so the network is not awaited. If even the vendored rules cannot load,
+// the tripwire stays null and the hooks block / cancel (fail closed).
+function startTripwire(client: VeriSwarmClient): void {
+  const registeredState = state;
+  try {
+    registeredState.tripwire = new SecretTripwire(loadVendoredManifest());
+  } catch (e) {
+    console.warn(
+      "[VeriSwarm] Secret rules failed to load; tool calls and messages will be blocked. " +
+        `Error: ${(e as Error)?.message ?? String(e)}`
+    );
+    return;
+  }
+  ensureTripwire({ fetchManifest: async () => client.getSecretRules() })
+    .then((tw) => {
+      registeredState.tripwire = tw;
+    })
+    .catch(() => {
+      /* keep vendored baseline — offline is fine */
+    });
+}
+
 function toolNameList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -468,6 +501,13 @@ const NOT_CONFIGURED = "VeriSwarm not configured";
 function textResult(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
+
+const SECRET_MESSAGE_CANCEL_REASON =
+  "Message blocked by VeriSwarm Guard: it contains a credential (API key, token or secret).";
+const SECRET_CHECK_UNAVAILABLE_TOOL_REASON =
+  "[VeriSwarm Guard] Tool call blocked: the secret rules could not be loaded. Reinstall the plugin.";
+const SECRET_CHECK_UNAVAILABLE_MESSAGE_REASON =
+  "Message held by VeriSwarm Guard: the secret rules could not be loaded.";
 
 function secretBlockReason(rules: Set<string>): string {
   return (
@@ -676,9 +716,11 @@ export const pluginEntry: PluginEntry = {
       secretsDetection: {
         type: "boolean",
         description:
-          "Scan tool-call params (values and keys) for provider-prefix secrets " +
-          "and block the call on a hit; also redact secrets in tool results. " +
-          "Local rules, no API call needed. Default off.",
+          "Block tool calls and cancel outbound messages that contain provider-prefix " +
+          "secrets (values or keys), and also redact secrets in tool results. When off " +
+          "(default), secrets in tool params and outbound messages are redacted locally " +
+          "instead (a call whose top-level parameter name is a secret is still blocked). " +
+          "Either way secrets are never sent to the VeriSwarm API.",
         default: false,
       },
       sessionScan: {
@@ -696,10 +738,12 @@ export const pluginEntry: PluginEntry = {
       failOpen: {
         type: "boolean",
         description:
-          "Let tool calls and messages through when PII tokenization or Session " +
-          "Sentry is unreachable or returns an unexpected response. Default false: " +
-          "the tool call is blocked or the message delivery cancelled. The secret " +
-          "tripwire always falls back to local redaction regardless of this flag.",
+          "Let tool calls and messages through without PII tokenization or Session " +
+          "Sentry when the VeriSwarm API is unreachable or returns an unexpected " +
+          "response, and let them through unchecked when a Guard hook fails " +
+          "unexpectedly. Default false: the tool call is blocked, the message delivery " +
+          "cancelled, or the tool result withheld. Local secret redaction and blocks " +
+          "need no API and are not relaxed by this flag.",
         default: false,
       },
     },
@@ -753,26 +797,10 @@ export const pluginEntry: PluginEntry = {
     state.sessionScan = cfg.sessionScan ?? true;
     state.failOpen = cfg.failOpen === true;
 
+    // secretsDetection only chooses between blocking and redacting on a
+    // hit; the tripwire itself always runs.
     state.secretsDetection = cfg.secretsDetection === true;
-    if (state.secretsDetection) {
-      // Build immediately from the vendored manifest so the tripwire is
-      // live from the very first tool call (no startup race window).
-      // Then refresh from the API in the background; if that fetch fails
-      // we keep the vendored baseline. (register is synchronous, so we
-      // must not await the network here.)
-      const client = state.client;
-      const registeredState = state;
-      state.tripwire = new SecretTripwire(loadVendoredManifest());
-      ensureTripwire({
-        fetchManifest: async () => client.getSecretRules(),
-      })
-        .then((tw) => {
-          registeredState.tripwire = tw;
-        })
-        .catch(() => {
-          /* keep vendored baseline — offline is fine */
-        });
-    }
+    startTripwire(state.client);
 
     // Always assigned (even when empty) so a previous config's lists never
     // survive a re-register. An empty allowlist means "allow all". Entries
@@ -789,7 +817,7 @@ export const pluginEntry: PluginEntry = {
 
     // ── HOOKS: Transparent Protection ─────────────────────────────────
 
-    // Hook: before_tool_call — policy check, secret tripwire, PII tokenize params.
+    // Hook: before_tool_call — policy check, secret redaction/block, PII tokenize params.
     // Host event: { toolName, params, toolCallId?, runId? }; ctx carries
     // sessionKey/sessionId. Host result: { block, blockReason } or { params }.
     //
@@ -797,8 +825,9 @@ export const pluginEntry: PluginEntry = {
     // sticky and terminal). A params rewrite is NOT guaranteed: when another
     // plugin requests approval for the same call, the host runs the tool with
     // the approver's params over the ORIGINAL params and drops this rewrite.
-    // So anything that must never reach the tool (secrets) is blocked, and
-    // only PII is tokenized by rewrite.
+    // Secrets are redacted locally before PII tokenization, so they never
+    // reach the VeriSwarm API either way; with secretsDetection on they
+    // block the call, which also keeps them from the tool on that path.
     api.on(
       "before_tool_call",
       guardAsyncHook(
@@ -823,27 +852,35 @@ export const pluginEntry: PluginEntry = {
           if (!isRecord(params)) return;
 
           // Secret tripwire: provider-prefix secrets anywhere in the params
-          // (values or keys, any depth) block the call. An unnamed call is
-          // scanned too.
-          if (state.secretsDetection && state.tripwire) {
-            const rules = findSecretRules(params, state.tripwire);
-            if (rules.size > 0) {
-              void logEvent("secret.tripwire", {
-                tool_name: toolName ?? null,
-                rules: Array.from(rules),
-                mode: "blocked",
-              }).catch(() => {});
-              return { block: true, blockReason: secretBlockReason(rules) };
+          // (values or keys, any depth) are redacted locally, or block the
+          // call when secretsDetection is on. An unnamed call is scanned too.
+          const tripwire = state.tripwire;
+          if (!tripwire) return { block: true, blockReason: SECRET_CHECK_UNAVAILABLE_TOOL_REASON };
+          const secrets = redactSecrets(params, tripwire);
+          if (secrets.rules.size > 0) {
+            void logEvent("secret.tripwire", {
+              tool_name: toolName ?? null,
+              rules: Array.from(secrets.rules),
+              mode: state.secretsDetection ? "blocked" : "redacted",
+            }).catch(() => {});
+            if (state.secretsDetection) {
+              return { block: true, blockReason: secretBlockReason(secrets.rules) };
             }
           }
+          let nextParams = secrets.value as Record<string, unknown>;
+          // The host shallow-merges {...original, ...rewrite}: a renamed
+          // top-level key would leave the original key in place.
+          if (topLevelKeysChanged(params, nextParams)) {
+            return { block: true, blockReason: KEY_REWRITE_BLOCK_REASON };
+          }
+          if (!state.piiEnabled) return secrets.changed ? { params: nextParams } : undefined;
 
-          if (!state.piiEnabled) return;
           const scanName = toolName ?? "_unidentified";
           const conversationId = resolveConversationId(ctx, event);
           const key = conversationId ? piiSessionKey(scanName, conversationId) : null;
           let tokenized: { value: unknown; changed: boolean };
           try {
-            tokenized = await tokenizeParamsPii(params, state, scanName, key);
+            tokenized = await tokenizeParamsPii(nextParams, state, scanName, key);
           } catch (e) {
             if (!(e instanceof GuardUnavailableError)) throw e;
             console.warn(
@@ -856,10 +893,8 @@ export const pluginEntry: PluginEntry = {
             }).catch(() => {});
             return { block: true, blockReason: PII_UNAVAILABLE_TOOL_REASON };
           }
-          if (!tokenized.changed) return;
-          const nextParams = tokenized.value as Record<string, unknown>;
-          // The host shallow-merges {...original, ...rewrite}: a renamed
-          // top-level key would leave the original key in place.
+          if (!tokenized.changed && !secrets.changed) return;
+          nextParams = tokenized.value as Record<string, unknown>;
           if (topLevelKeysChanged(params, nextParams)) {
             return { block: true, blockReason: KEY_REWRITE_BLOCK_REASON };
           }
@@ -956,7 +991,9 @@ export const pluginEntry: PluginEntry = {
       )
     );
 
-    // Hook: message_sending — Session Sentry + PII tokenize outbound content.
+    // Hook: message_sending — secret redaction/cancel, Session Sentry, and
+    // PII tokenization of outbound content. Secrets are redacted locally
+    // first, so neither Session Sentry nor tokenization ever receives one.
     // Host event: { to, content, ... }; ctx carries channelId/conversationId
     // and, on agent paths, sessionKey. Host result: { content } to rewrite,
     // { cancel, cancelReason } to stop delivery (cancel is terminal).
@@ -966,6 +1003,24 @@ export const pluginEntry: PluginEntry = {
         if (!state.client) return warnUnconfiguredOnce();
         const content = typeof event?.content === "string" ? event.content : "";
         if (!content) return;
+
+        // ── Secret tripwire (local) ───────────────────────────────────
+        const tripwire = state.tripwire;
+        if (!tripwire) return { cancel: true, cancelReason: SECRET_CHECK_UNAVAILABLE_MESSAGE_REASON };
+        let outbound = content;
+        const secretHits = tripwire.scan(content);
+        if (secretHits.length > 0) {
+          void logEvent("secret.tripwire", {
+            surface: "message_sending",
+            rules: Array.from(new Set(secretHits.map((h) => h.ruleName))),
+            mode: state.secretsDetection ? "blocked" : "redacted",
+          }).catch(() => {});
+          if (state.secretsDetection) {
+            return { cancel: true, cancelReason: SECRET_MESSAGE_CANCEL_REASON };
+          }
+          outbound = tripwire.redactOffline(content);
+        }
+        const rewrite = () => (outbound === content ? undefined : { content: outbound });
 
         const conversationId = resolveConversationId(ctx, event);
         const sessionId = sentrySessionId(conversationId ?? NO_CONVERSATION);
@@ -987,7 +1042,7 @@ export const pluginEntry: PluginEntry = {
               session_id: sessionId,
               turn_index: turnIndex,
               // Only the outbound (agent) side is visible to message_sending.
-              agent_text: content,
+              agent_text: outbound,
               user_text: "",
               system_prompt: "",
               agent_id: agentId,
@@ -1031,11 +1086,11 @@ export const pluginEntry: PluginEntry = {
         }
 
         // ── PII tokenization ──────────────────────────────────────────
-        if (state.piiEnabled && content.length >= MIN_PII_TEXT_LENGTH) {
+        if (state.piiEnabled && outbound.length >= MIN_PII_TEXT_LENGTH) {
           const key = conversationId ? piiSessionKey("__message__", conversationId) : null;
           try {
             const result = assertTokenizeResult(
-              await state.client.tokenizePii(content, key ? state.piiSessions.get(key) : undefined)
+              await state.client.tokenizePii(outbound, key ? state.piiSessions.get(key) : undefined)
             );
             if (result.tokens_created > 0) {
               if (key && result.session_id) {
@@ -1058,12 +1113,12 @@ export const pluginEntry: PluginEntry = {
             }
             console.warn(
               `[VeriSwarm] PII tokenization (outbound message) failed; ` +
-                `passing through unredacted (failOpen). Error: ${message}`
+                `passing through without PII tokenization (failOpen). Error: ${message}`
             );
           }
         }
 
-        return;
+        return rewrite();
       }, { cancel: true, cancelReason: HOOK_ERROR_MESSAGE_REASON }),
       { priority: GUARD_HOOK_PRIORITY }
     );

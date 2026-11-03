@@ -25,7 +25,7 @@ Protect your OpenClaw agent with VeriSwarm's full trust and security suite.
 - Redacts secrets and structured PII (emails, SSNs, phones, cards, IPv4) from tool outputs locally; full NER tokenization applies to tool inputs and messages
 - Scans tool outputs for prompt injection attempts
 - Enforces tool allowlists and blocklists
-- Blocks tool calls whose parameters contain an API key or token (when `secretsDetection` is on)
+- Redacts API keys and tokens in tool parameters and outbound messages locally, before anything is sent to VeriSwarm; blocks the call or cancels the message instead when `secretsDetection` is on
 - Fails closed: if VeriSwarm is unreachable, tool calls are blocked and messages held (opt out with `failOpen: true`)
 - Logs every action to VeriSwarm's tamper-proof audit ledger
 

@@ -115,10 +115,26 @@ describe("before_tool_call secret tripwire", () => {
     expect(await callTool(hooks, "http_post", { body: "no secrets here" })).toBeUndefined();
   });
 
-  it("does nothing when secretsDetection is off", async () => {
+  it("redacts locally instead of blocking when secretsDetection is off, without any API call", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, { ...BASE_CONFIG, secretsDetection: false });
+    fetchSpy.mockClear();
+
+    expect(await callTool(hooks, "http_post", { body: `token=${GH_PAT}`, n: 1 })).toEqual({
+      params: { body: "token=[VS:GITHUB_TOKEN:offline]", n: 1 },
+    });
+    const apiCalls = fetchSpy.mock.calls.filter(([url]) => !String(url).endsWith("/secret-rules"));
+    expect(apiCalls).toEqual([]);
+  });
+
+  it("still blocks a top-level secret key when secretsDetection is off", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, secretsDetection: false });
 
-    expect(await callTool(hooks, "http_post", { body: `token=${GH_PAT}` })).toBeUndefined();
+    const res = await callTool(hooks, "http_post", { [GH_PAT]: "x" });
+    expect(res.block).toBe(true);
+    expect(res.blockReason).not.toContain(GH_PAT);
   });
+
 });

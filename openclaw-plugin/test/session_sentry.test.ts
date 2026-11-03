@@ -277,11 +277,13 @@ describe("message_sending — Session Sentry", () => {
   // ── Dormant server ─────────────────────────────────────────────────
 
   it("passes message through when server returns enabled:false (dormant mode)", async () => {
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({ blocked: false, enabled: false }),
-        { status: 200, headers: { "content-type": "application/json" } }
-      )
+    // A fresh Response per call: the background secret-rules refresh also fetches.
+    fetchSpy = mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({ blocked: false, enabled: false }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
     );
 
     const { api, hooks } = makeApi();
