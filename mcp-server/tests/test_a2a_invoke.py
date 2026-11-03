@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 from unittest.mock import patch
 
@@ -126,6 +127,59 @@ def test_invoke_returns_task_id_when_polling_fails_after_submit():
     assert data["status"] == "submitted"
     assert data["poll_failed"] is True
     assert "get_a2a_task" in data["error"]
+
+
+def test_invoke_submit_does_not_block_event_loop():
+    client = VeriSwarmAPIClient("https://api.veriswarm.ai", api_key="k")
+    post_started = asyncio.Event()
+    post_finished = threading.Event()
+    allow_post_to_finish = threading.Event()
+    ticker_ran_during_post = asyncio.Event()
+
+    def fake_post(path, json=None, **kw):
+        post_started_loop.call_soon_threadsafe(post_started.set)
+        allow_post_to_finish.wait(timeout=0.5)
+        post_finished.set()
+        return {"id": "a2a_task_1", "status": "submitted"}
+
+    def fake_get(path, **kw):
+        return {"id": "a2a_task_1", "status": "completed"}
+
+    async def run_invoke_and_ticker():
+        nonlocal post_started_loop
+        post_started_loop = asyncio.get_running_loop()
+        fn = _get_invoke_tool(client)
+
+        async def ticker():
+            await post_started.wait()
+            if not post_finished.is_set():
+                ticker_ran_during_post.set()
+                allow_post_to_finish.set()
+
+        task = asyncio.create_task(
+            fn(
+                "agt_x",
+                "agt_req",
+                json.dumps([{"role": "user", "content": "go"}]),
+                max_wait_seconds=5,
+                poll_interval_seconds=0.25,
+            )
+        )
+        ticker_task = asyncio.create_task(ticker())
+        out = await task
+        observed = ticker_ran_during_post.is_set()
+        ticker_task.cancel()
+        await asyncio.gather(ticker_task, return_exceptions=True)
+        return out, observed
+
+    post_started_loop = None
+    with patch.object(client, "post", side_effect=fake_post), \
+         patch.object(client, "get", side_effect=fake_get):
+        out, ticker_ran_before_post_finished = asyncio.run(run_invoke_and_ticker())
+
+    data = json.loads(out)
+    assert data["status"] == "completed"
+    assert ticker_ran_before_post_finished
 
 
 def test_invoke_polling_does_not_block_event_loop():
