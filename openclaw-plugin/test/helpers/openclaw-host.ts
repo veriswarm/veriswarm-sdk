@@ -38,8 +38,16 @@ export interface LoadedHost {
   wrapWithBeforeToolCall: (tool: any, ctx: Record<string, unknown>) => any;
 }
 
-/** Load the built plugin from PLUGIN_ROOT through the host's own plugin loader. */
-export async function loadPluginInHost(pluginConfig: Record<string, unknown>): Promise<LoadedHost> {
+export const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url));
+
+/**
+ * Load the built plugin from PLUGIN_ROOT through the host's own plugin
+ * loader, optionally alongside other (fixture) plugins by id + directory.
+ */
+export async function loadPluginInHost(
+  pluginConfig: Record<string, unknown>,
+  extraPlugins: { id: string; dir: string }[] = []
+): Promise<LoadedHost> {
   const loadOpenClawPlugins = await importHostSymbol("loadOpenClawPlugins");
   const resolvePluginTools = await importHostSymbol("resolvePluginTools");
   const wrapToolWithBeforeToolCallHook = await importHostSymbol("wrapToolWithBeforeToolCallHook");
@@ -49,8 +57,11 @@ export async function loadPluginInHost(pluginConfig: Record<string, unknown>): P
   const env = { ...process.env, HOME: home, OPENCLAW_STATE_DIR: home };
   const config = {
     plugins: {
-      load: { paths: [PLUGIN_ROOT] },
-      entries: { veriswarm: { enabled: true, config: pluginConfig } },
+      load: { paths: [PLUGIN_ROOT, ...extraPlugins.map((p) => p.dir)] },
+      entries: {
+        veriswarm: { enabled: true, config: pluginConfig },
+        ...Object.fromEntries(extraPlugins.map((p) => [p.id, { enabled: true, config: {} }])),
+      },
     },
   };
 
@@ -59,7 +70,7 @@ export async function loadPluginInHost(pluginConfig: Record<string, unknown>): P
     env,
     workspaceDir: home,
     cache: false,
-    onlyPluginIds: ["veriswarm"],
+    onlyPluginIds: ["veriswarm", ...extraPlugins.map((p) => p.id)],
     logger: silentLogger,
   });
 

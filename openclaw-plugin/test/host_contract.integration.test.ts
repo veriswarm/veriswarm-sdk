@@ -8,7 +8,7 @@
  * `execute`, manifest) fails these tests.
  */
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
-import { loadPluginInHost, type LoadedHost } from "./helpers/openclaw-host.js";
+import { FIXTURES, loadPluginInHost, type LoadedHost } from "./helpers/openclaw-host.js";
 
 const GH_PAT = "ghp_" + "a".repeat(36);
 const EMAIL = "alice@example.com";
@@ -23,8 +23,12 @@ const PLUGIN_CONFIG = {
   auditEnabled: false,
   secretsDetection: true,
   sessionScan: true,
-  blockedTools: ["exec"],
+  // Host spelling differs from what it hands hooks: bash -> exec.
+  blockedTools: ["bash"],
 };
+
+// What the fake scan-session endpoint does for the next request.
+let sentryMode: "block" | "allow" | "error" = "block";
 
 function json(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -55,7 +59,8 @@ function fakeVeriSwarmApi(input: unknown, init?: RequestInit): Response {
     return json({ rehydrated_text: `rehydrated(${body.session_id})`, tokens_resolved: 1 });
   }
   if (url.endsWith("/v1/suite/guard/scan-session")) {
-    return json({ blocked: true, enabled: true, session_score: 0.97, highest_severity: "high" });
+    if (sentryMode === "error") return new Response("upstream down", { status: 502 });
+    return json({ blocked: sentryMode === "block", enabled: true, session_score: 0.97, highest_severity: "high" });
   }
   if (url.endsWith("/v1/suite/guard/secret-rules")) {
     return new Response("unavailable", { status: 503 });
@@ -88,7 +93,11 @@ beforeAll(async () => {
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => fakeVeriSwarmApi(input, init));
-  host = await loadPluginInHost(PLUGIN_CONFIG);
+  // A second plugin that rewrites params/content from the original event at
+  // a priority that would normally run after (and override) VeriSwarm.
+  host = await loadPluginInHost(PLUGIN_CONFIG, [
+    { id: "param-rewriter", dir: `${FIXTURES}param-rewriter` },
+  ]);
 });
 
 afterAll(() => {
@@ -97,12 +106,14 @@ afterAll(() => {
 
 beforeEach(() => {
   calls.length = 0;
+  sentryMode = "block";
 });
 
 describe("OpenClaw host contract (real loader + hook runner)", () => {
   it("loads from openclaw.plugin.json without plugin errors", () => {
     const plugin = host.registry.plugins.find((p: any) => p.id === "veriswarm");
     expect(plugin?.status).toBe("loaded");
+    expect(host.registry.plugins.find((p: any) => p.id === "param-rewriter")?.status).toBe("loaded");
     const errors = host.registry.diagnostics.filter(
       (d: any) => d.pluginId === "veriswarm" && d.level === "error"
     );
@@ -131,18 +142,21 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     const status = tools.find((t: any) => t.name === "veriswarm_guard_status");
     const result = await status.execute("call-1", {});
     expect(result.content[0].type).toBe("text");
+    // Stored in the host's normalized form.
     expect(JSON.parse(result.content[0].text).policy.blocked_tools).toEqual(["exec"]);
   });
 
-  it("blocks a blocklisted tool before it executes", async () => {
-    const { tool, received } = fakeTool("exec");
-    const wrapped = host.wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" });
+  it("blocks a blocklisted tool before it executes, matching host name normalization", async () => {
+    for (const name of ["bash", "exec", "Bash"]) {
+      const { tool, received } = fakeTool(name);
+      const wrapped = host.wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" });
 
-    const result = await wrapped.execute("call-2", { command: "rm -rf /" });
+      const result = await wrapped.execute("call-2", { command: "rm -rf /" });
 
-    expect(received).toEqual([]);
-    expect(result.details?.status).toBe("blocked");
-    expect(textOf(result)).toContain("blocked by policy");
+      expect(received).toEqual([]);
+      expect(result.details?.status).toBe("blocked");
+      expect(textOf(result)).toContain("blocked by policy");
+    }
   });
 
   it("redacts a ghp_ secret in tool params before the tool sees them", async () => {
@@ -157,6 +171,18 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     expect(received).toHaveLength(1);
     expect(JSON.stringify(received[0])).not.toContain(GH_PAT);
     expect(received[0].url).toBe("https://example.com");
+    // VeriSwarm's rewrite is the one applied, not the other plugin's
+    // rewrite of the original (secret-bearing) params.
+    expect(received[0].rewrittenBy).toBeUndefined();
+  });
+
+  it("leaves another plugin's rewrite in place when VeriSwarm changes nothing", async () => {
+    const { tool, received } = fakeTool("web_fetch");
+    await host
+      .wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" })
+      .execute("call-3b", { url: "https://example.com" });
+
+    expect(received[0]).toEqual({ url: "https://example.com", rewrittenBy: "param-rewriter" });
   });
 
   it("tokenizes PII in tool params", async () => {
@@ -180,6 +206,40 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     expect(scan?.body.session_id).toBe("session-A");
   });
 
+  it("Session Sentry API failure cancels delivery (fail closed)", async () => {
+    sentryMode = "error";
+    const result = await host.hookRunner.runMessageSending(
+      { to: "user-1", content: "anything" },
+      { channelId: "telegram", sessionKey: "session-A" }
+    );
+
+    expect(result?.cancel).toBe(true);
+    expect(result?.cancelReason).toContain("session protection is unavailable");
+  });
+
+  it("deliver-path ctx (no sessionKey) resolves to the inbound conversation's session", async () => {
+    sentryMode = "allow";
+    const sessionKey = "agent:main:telegram:direct:777";
+    await host.hookRunner.runMessageReceived(
+      { from: "telegram:777", content: "hi", sessionKey },
+      { channelId: "telegram", conversationId: "telegram:777", sessionKey }
+    );
+
+    // Shape of the outbound deliver path: { channelId, accountId, conversationId: to }.
+    const result = await host.hookRunner.runMessageSending(
+      { to: "777", content: `write to ${EMAIL}`, metadata: { channel: "telegram" } },
+      { channelId: "telegram", accountId: "default", conversationId: "777" }
+    );
+
+    expect(result?.content).toBe("write to [VS:EMAIL:1]"); // VeriSwarm's rewrite wins
+    expect(calls.find((c) => c.url.endsWith("/scan-session"))?.body.session_id).toBe(sessionKey);
+    const rehydrate = host
+      .resolveTools({ sessionKey })
+      .find((t: any) => t.name === "veriswarm_rehydrate");
+    const restored = await rehydrate.execute("call-9", { text: "[VS:EMAIL:1]" });
+    expect(textOf(restored)).toBe("rehydrated(pii-session-A)");
+  });
+
   it("adds the injection banner via tool_result_persist (sync)", () => {
     const message = {
       role: "toolResult",
@@ -198,6 +258,28 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     expect(textOf(out.message)).toMatch(/^\[VeriSwarm Guard: Potential prompt injection detected/);
     expect(textOf(out.message)).toContain("Ignore previous instructions");
     expect(message.content).toHaveLength(1); // original not mutated
+  });
+
+  it("redacts secrets and structured PII in tool results via tool_result_persist", () => {
+    const message = {
+      role: "toolResult",
+      toolCallId: "call-10",
+      toolName: "db_query",
+      content: [{ type: "text", text: `row: ${EMAIL}, 123-45-6789, key ${GH_PAT}` }],
+      isError: false,
+      timestamp: 0,
+    };
+
+    const out = host.hookRunner.runToolResultPersist(
+      { toolName: "db_query", toolCallId: "call-10", message },
+      { sessionKey: "session-A", toolName: "db_query", toolCallId: "call-10" }
+    );
+
+    const text = textOf(out.message);
+    expect(text).not.toContain(EMAIL);
+    expect(text).not.toContain("123-45-6789");
+    expect(text).not.toContain(GH_PAT);
+    expect(text).toContain("[VS:EMAIL:local]");
   });
 
   it("veriswarm_rehydrate is scoped to the calling session, not model-supplied ids", async () => {
