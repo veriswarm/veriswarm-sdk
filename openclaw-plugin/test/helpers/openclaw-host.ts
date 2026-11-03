@@ -35,7 +35,11 @@ export interface LoadedHost {
   config: any;
   env: NodeJS.ProcessEnv;
   resolveTools: (ctx: Record<string, unknown>) => any[];
-  wrapWithBeforeToolCall: (tool: any, ctx: Record<string, unknown>) => any;
+  wrapWithBeforeToolCall: (
+    tool: any,
+    ctx: Record<string, unknown>,
+    options?: { approvalMode?: "report" }
+  ) => any;
 }
 
 export const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url));
@@ -85,6 +89,6 @@ export async function loadPluginInHost(
         env,
         onlyPluginIds: ["veriswarm"],
       }).filter((t: any) => String(t.name).startsWith("veriswarm_")),
-    wrapWithBeforeToolCall: (tool, ctx) => wrapToolWithBeforeToolCallHook(tool, ctx),
+    wrapWithBeforeToolCall: (tool, ctx, options) => wrapToolWithBeforeToolCallHook(tool, ctx, options),
   };
 }

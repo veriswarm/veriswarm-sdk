@@ -97,6 +97,7 @@ beforeAll(async () => {
   // a priority that would normally run after (and override) VeriSwarm.
   host = await loadPluginInHost(PLUGIN_CONFIG, [
     { id: "param-rewriter", dir: `${FIXTURES}param-rewriter` },
+    { id: "approval-requester", dir: `${FIXTURES}approval-requester` },
   ]);
 });
 
@@ -159,21 +160,47 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
     }
   });
 
-  it("redacts a ghp_ secret in tool params before the tool sees them", async () => {
-    const { tool, received } = fakeTool("web_fetch");
-    const wrapped = host.wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" });
+  it("blocks a call whose params carry a ghp_ secret (value or top-level key)", async () => {
+    for (const params of [
+      { url: "https://example.com", headers: { Authorization: `Bearer ${GH_PAT}` } },
+      // The host shallow-merges {...original, ...rewrite}: a redacted key
+      // would leave the original secret-named key in place.
+      { url: "https://example.com", [GH_PAT]: "x" },
+    ]) {
+      const { tool, received } = fakeTool("web_fetch");
+      const wrapped = host.wrapWithBeforeToolCall(tool, { sessionKey: "session-A", agentId: "a" });
 
-    await wrapped.execute("call-3", {
-      url: "https://example.com",
-      headers: { Authorization: `Bearer ${GH_PAT}` },
-    });
+      const result = await wrapped.execute("call-3", params);
 
-    expect(received).toHaveLength(1);
-    expect(JSON.stringify(received[0])).not.toContain(GH_PAT);
-    expect(received[0].url).toBe("https://example.com");
-    // VeriSwarm's rewrite is the one applied, not the other plugin's
-    // rewrite of the original (secret-bearing) params.
-    expect(received[0].rewrittenBy).toBeUndefined();
+      expect(received).toEqual([]);
+      expect(result.details?.status).toBe("blocked");
+      expect(textOf(result)).toContain("contain a credential");
+      expect(textOf(result)).not.toContain(GH_PAT);
+    }
+  });
+
+  it("blocks a secret even when another plugin requests approval for the call", async () => {
+    // Merged decision from the host runner: VeriSwarm's block wins over the
+    // approval request (block is sticky and checked first).
+    const decision = await host.hookRunner.runBeforeToolCall(
+      { toolName: "deploy", params: { token: GH_PAT } },
+      { toolName: "deploy", sessionKey: "session-A" }
+    );
+    expect(decision?.block).toBe(true);
+    expect(decision?.requireApproval).toBeDefined();
+
+    // End to end through the real wrapper ("report" mode surfaces which
+    // decision won instead of waiting on a gateway approval).
+    const { tool, received } = fakeTool("deploy");
+    const wrapped = host.wrapWithBeforeToolCall(
+      tool,
+      { sessionKey: "session-A", agentId: "a" },
+      { approvalMode: "report" }
+    );
+    const result = await wrapped.execute("call-3a", { target: "prod", token: GH_PAT });
+
+    expect(received).toEqual([]);
+    expect(textOf(result)).toContain("contain a credential");
   });
 
   it("leaves another plugin's rewrite in place when VeriSwarm changes nothing", async () => {
@@ -238,6 +265,52 @@ describe("OpenClaw host contract (real loader + hook runner)", () => {
       .find((t: any) => t.name === "veriswarm_rehydrate");
     const restored = await rehydrate.execute("call-9", { text: "[VS:EMAIL:1]" });
     expect(textOf(restored)).toBe("rehydrated(pii-session-A)");
+  });
+
+  it("unexpected handler errors fail closed through the real host", async () => {
+    // before_tool_call: a ctx field whose getter throws (the host itself
+    // serializes params before hooks, so params can't carry the fault).
+    const ctx: Record<string, unknown> = { sessionKey: "session-A" };
+    Object.defineProperty(ctx, "toolName", {
+      get: () => {
+        throw new Error("bad getter");
+      },
+    });
+    const decision = await host.hookRunner.runBeforeToolCall(
+      { toolName: "send_note", params: { body: "hi" } },
+      ctx
+    );
+    expect(decision?.block).toBe(true);
+    expect(decision?.blockReason).toContain("Guard could not check this call");
+
+    // message_sending: the host's default for this hook swallows handler
+    // errors and delivers; VeriSwarm's own wrapper turns it into a cancel.
+    sentryMode = "allow";
+    const event: Record<string, unknown> = { to: "user-1" };
+    Object.defineProperty(event, "content", {
+      get: () => {
+        throw new Error("bad getter");
+      },
+    });
+    const sent = await host.hookRunner.runMessageSending(event, {
+      channelId: "telegram",
+      sessionKey: "session-A",
+    });
+    expect(sent?.cancel).toBe(true);
+    expect(sent?.cancelReason).toContain("Guard could not check this message");
+
+    // tool_result_persist: the result is withheld rather than persisted unchecked.
+    const message: Record<string, unknown> = { role: "toolResult", toolCallId: "call-12", toolName: "db" };
+    Object.defineProperty(message, "content", {
+      get: () => {
+        throw new Error("bad getter");
+      },
+    });
+    const persisted = host.hookRunner.runToolResultPersist(
+      { toolName: "db", toolCallId: "call-12", message },
+      { sessionKey: "session-A", toolName: "db", toolCallId: "call-12" }
+    );
+    expect(textOf(persisted.message)).toContain("tool result withheld");
   });
 
   it("adds the injection banner via tool_result_persist (sync)", () => {
