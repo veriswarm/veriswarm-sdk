@@ -17,7 +17,7 @@ veriswarm-setup
 
 The setup wizard configures everything for your platform (Claude Code, Gemini CLI, or Codex):
 
-1. **MCP Server** — 90+ tools spanning trust scoring, Guard security, Passport identity (including JIT access grants), Vault audit, compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies, ABAC agent attributes, SRE (circuit breakers + SLOs), context governance, cross-model verification, content provenance (EU AI Act Art. 50), and A2A transport keys
+1. **MCP Server** — 102 tools spanning trust scoring, Guard security, Passport identity (including JIT access grants), Vault audit, compliance (OWASP/EU AI Act/NIST/ISO 42001), Cedar policies, ABAC agent attributes, SRE (circuit breakers + SLOs), context governance, cross-model verification, content provenance (EU AI Act Art. 50), and A2A transport keys
 2. **Guard Hooks** — Automatic PII protection for prompts and tool calls
 3. **Guard Proxy** — Transparent MCP interception for any tool server (optional)
 
@@ -55,8 +55,11 @@ If you prefer manual configuration:
 | `VERISWARM_API_URL` | No | API base URL (default: `https://api.veriswarm.ai`) |
 | `VERISWARM_API_KEY` | Yes (or `AGENT_KEY`) | Platform API key for workspace operations |
 | `VERISWARM_AGENT_KEY` | Yes (or `API_KEY`) | Agent-scoped key for self-reporting tools |
+| `GUARD_AGENT_ID` | For activity upload | Agent that Guard hook activity events are attributed to. Without it, events stay in the local buffer and are not uploaded |
+| `GUARD_SECRETS_DETECTION` | No | `1` enables the fail-closed secret tripwire in the Guard hook: known-prefix secrets in MCP tool arguments are redacted, and the call is blocked if redaction fails |
+| `GUARD_PII_EXEMPT_PREFIXES` | No | Comma-separated tool-name prefixes (e.g. `mcp__mystore__`) that skip PII tokenization and the PII warning. Empty by default. The secret tripwire still applies |
 
-## Tools (68 total)
+## Tools (102 total)
 
 > **Auth note:** Tools marked with (session) require `x-account-access-token` and are not available with API key only. All other tools work with `x-api-key`.
 
@@ -118,7 +121,7 @@ If you prefer manual configuration:
 | `get_agent_flags` | Get active moderation flags for an agent |
 | `list_agents` | List workspace agents with search and tier filtering |
 
-### Platform & Workspace (9)
+### Platform & Workspace (10)
 | Tool | Description |
 |---|---|
 | `platform_status` | Check platform health, uptime, and feature flags |
@@ -164,6 +167,67 @@ If you prefer manual configuration:
 |---|---|
 | `get_benchmark_history` | Get benchmark results for an agent across versions |
 | `get_provider_health` | Get LLM provider health status (success rate, latency, cooldown) |
+
+### A2A Protocol (5)
+| Tool | Description |
+|---|---|
+| `list_a2a_catalog` | List the tenant's trust-ranked A2A agent catalog |
+| `get_a2a_agent_card` | Get an A2A agent card for the given agent |
+| `submit_a2a_task` | Submit a task to an agent via the A2A protocol |
+| `get_a2a_task` | Get the status + result of an A2A task |
+| `cancel_a2a_task` | Cancel an in-flight A2A task |
+
+### Human Approvals (5)
+| Tool | Description |
+|---|---|
+| `create_approval` | Submit a new approval request to the operator queue |
+| `list_approvals` | List approval requests for the authenticated tenant |
+| `get_approval` | Get a single approval request by id (`apr_*`) |
+| `approve_approval` | Approve a pending approval request |
+| `reject_approval` | Reject a pending approval request |
+
+### Cortex Workflows (12)
+| Tool | Description |
+|---|---|
+| `list_workflows` | List all Cortex Workflows for the current tenant |
+| `get_workflow` | Get details of a specific workflow including recent executions |
+| `create_workflow` | Create a new Cortex Workflow from a JSON definition |
+| `run_workflow` | Manually trigger a workflow execution |
+| `get_execution` | Get the status and step-by-step results of a workflow execution |
+| `activate_workflow` | Activate a workflow so its triggers (schedule/event/webhook) start firing |
+| `deactivate_workflow` | Deactivate a workflow, stopping all triggers |
+| `list_workflow_templates` | List available workflow templates (both built-in and custom) |
+| `deploy_template` | Deploy a workflow template as a new workflow in your workspace |
+| `workflow_stats` | Get workflow usage statistics: execution counts, success rates, and LLM costs |
+| `cancel_workflow_execution` | Cancel a running or paused workflow execution |
+| `retry_workflow_execution` | Retry a failed workflow execution from where it left off |
+
+### Compliance, Policy & SRE (23)
+| Tool | Description |
+|---|---|
+| `get_owasp_attestation` | Get a per-tenant OWASP Agentic AI Top 10 (2026) coverage report |
+| `list_compliance_frameworks` | List supported compliance frameworks (eu-ai-act, nist-ai-rmf, iso-42001) |
+| `get_compliance_report` | Get a per-tenant compliance report for a specific framework |
+| `list_cedar_policies` | List active Cedar declarative policies for the tenant |
+| `validate_cedar_policy` | Validate Cedar policy syntax without persisting |
+| `test_cedar_policy` | Dry-run a Cedar policy against test input. Returns the decision |
+| `get_sre_dashboard` | Combined SRE dashboard — circuit breakers + SLO + error budget + provider health |
+| `get_circuit_breakers` | Get current state of all LLM provider circuit breakers (closed/open/half-open) |
+| `reset_circuit_breaker` | Manually reset a circuit breaker to closed state (e.g., after fixing a provider outage) |
+| `get_error_budget` | Get error budget status based on tenant SLO targets and recent LLM usage |
+| `get_context_dashboard` | Combined context governance dashboard — topics + quality + gaps |
+| `get_context_gaps` | Detect agents with high failure rates and low knowledge base coverage |
+| `scan_mcp_tools` | Scan MCP tool definitions for security risks (pre-deploy audit) |
+| `scan_ci` | Scan CI workflow YAML + Dockerfiles for secret-exfiltration risk |
+| `verify_response` | Cross-model verification — route a response through multiple LLMs and check consensus |
+| `provision_a2a_keys` | Provision Ed25519 transport keys for an agent. Returns the public key |
+| `label_content` | Generate an Ed25519-signed provenance manifest for AI-generated content |
+| `get_content_provenance` | Public lookup of a provenance manifest by SHA-256 content hash |
+| `get_agent_attributes` | Read the tenant-defined ABAC attributes for an agent |
+| `set_agent_attributes` | Set ABAC attributes for an agent (replaces existing) |
+| `request_jit_grant` | Request a just-in-time access grant for an agent |
+| `revoke_jit_grant` | Revoke an approved JIT grant immediately |
+| `list_jit_grants` | List JIT grants for the tenant, optionally filtered by agent or status |
 
 ## Development
 

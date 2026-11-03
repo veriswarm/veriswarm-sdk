@@ -10,7 +10,7 @@ Usage:
   veriswarm-setup --uninstall        # Remove hooks and MCP config
 
 Installs:
-  1. VeriSwarm MCP Server (67 tools for trust scoring, Guard, Passport, Vault)
+  1. VeriSwarm MCP Server (102 tools for trust scoring, Guard, Passport, Vault, and more)
   2. Guard Proxy config (wraps other MCP servers for transparent PII interception)
   3. Guard hooks (PII protection for prompts and tool calls)
 """
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -100,14 +101,16 @@ def _generate_hooks_config(hook_script: str, api_key: str, agent_id: str = "") -
 
     Two-path architecture:
     - Fast path: bash activity_logger.sh (~25ms) logs ALL tool calls
-    - Slow path: python3 guard_hook.py (~200ms) scans MCP tools for PII
+    - Slow path: guard_hook.py (~200ms) scans MCP tools for PII, run with
+      the interpreter veriswarm-mcp is installed in (sys.executable) so
+      the hook can import the package.
 
     PreToolUse and PostToolUse each get two hook entries. SessionStart gets one.
     UserPromptSubmit is not hooked (too many false positives on code).
     """
     logger_script = _activity_logger_path()
-    pii_command = f"python3 {hook_script}"
-    log_command = f"bash {logger_script}"
+    pii_command = f"{shlex.quote(sys.executable)} {shlex.quote(hook_script)}"
+    log_command = f"bash {shlex.quote(logger_script)}"
 
     return {
         "hooks": {
@@ -172,8 +175,11 @@ def _generate_hooks_config(hook_script: str, api_key: str, agent_id: str = "") -
 
 
 def _generate_mcp_config(api_key: str, agent_key: str = "", api_url: str = "") -> dict:
-    """Generate MCP server configuration."""
-    pkg_dir = _find_package_dir()
+    """Generate MCP server configuration.
+
+    Launches the installed package with the interpreter it is installed in,
+    so the config works from any working directory and inside virtualenvs.
+    """
     env = {}
     if api_url:
         env["VERISWARM_API_URL"] = api_url
@@ -187,9 +193,8 @@ def _generate_mcp_config(api_key: str, agent_key: str = "", api_url: str = "") -
     return {
         "mcpServers": {
             "veriswarm": {
-                "command": "python3",
-                "args": ["-m", "src"],
-                "cwd": str(pkg_dir),
+                "command": sys.executable,
+                "args": ["-m", "veriswarm_mcp"],
                 "env": env,
             }
         }
