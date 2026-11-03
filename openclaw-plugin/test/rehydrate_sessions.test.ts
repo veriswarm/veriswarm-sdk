@@ -1,33 +1,49 @@
+/**
+ * veriswarm_rehydrate session scoping.
+ *
+ * The tool is registered as a host tool factory: the host calls it with the
+ * run's tool context ({ sessionKey, sessionId, ... }) and the returned tool's
+ * execute(toolCallId, params) may only rehydrate that conversation's PII.
+ * PII sessions are created the way the host drives them: before_tool_call
+ * with event { toolName, params } and ctx { sessionKey }.
+ */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { pluginEntry } from "../src/index.js";
 
+type Hook = (e: any, ctx?: any) => Promise<any>;
+
 function makeApi() {
-  const hooks: Record<string, (e: any) => Promise<any>> = {};
-  const tools: Record<string, (params: any) => Promise<any>> = {};
+  const hooks: Record<string, Hook> = {};
+  const factories: Record<string, (ctx: any) => any> = {};
   const api = {
-    registerTool: (def: any) => {
-      tools[def.name] = def.handler;
+    registerTool: (tool: any, opts?: { name?: string }) => {
+      const name = opts?.name ?? tool.name;
+      factories[name] = typeof tool === "function" ? tool : () => tool;
     },
-    registerHook: () => {},
-    on: (name: string, handler: (e: any) => Promise<any>) => {
+    on: (name: string, handler: Hook) => {
       hooks[name] = handler;
     },
-    registerHttpRoute: () => {},
-    registerService: () => {},
   };
-  return { api, hooks, tools };
+  // Resolve a tool the way the host does for a given run context.
+  const toolFor = (name: string, ctx: Record<string, unknown> = {}) => factories[name](ctx);
+  return { api, hooks, toolFor };
 }
 
-const BASE_CONFIG = {
-  apiKey: "vsk_test",
-  apiUrl: "https://api.test.local",
-  piiEnabled: true,
-  policyEnabled: false,
-  injectionScan: false,
-  auditEnabled: false,
-  secretsDetection: false,
-  sessionScan: false,
-};
+let tenant = 0;
+// A distinct apiKey per test gives each test its own PII session state.
+function config() {
+  tenant += 1;
+  return {
+    apiKey: `vsk_test_${tenant}`,
+    apiUrl: "https://api.test.local",
+    piiEnabled: true,
+    policyEnabled: false,
+    injectionScan: false,
+    auditEnabled: false,
+    secretsDetection: false,
+    sessionScan: false,
+  };
+}
 
 function jsonResponse(body: Record<string, any>): Response {
   return new Response(JSON.stringify(body), {
@@ -36,148 +52,147 @@ function jsonResponse(body: Record<string, any>): Response {
   });
 }
 
-describe("veriswarm_rehydrate session scoping", () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn> | undefined;
+const rehydrateCalls: any[] = [];
 
-  afterEach(() => {
-    fetchSpy?.mockRestore();
+// Tokenizes "Alice"/"Bob" into per-person sessions; rehydrate echoes the session.
+function mockApi() {
+  rehydrateCalls.length = 0;
+  return vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = String(input);
+    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    if (url.includes("/pii/tokenize")) {
+      for (const person of ["Alice", "Bob"]) {
+        if (String(body.text).includes(person)) {
+          return jsonResponse({
+            tokens_created: 1,
+            tokenized_text: `Customer [VS:${person.toLowerCase()}]`,
+            session_id: `sid-${person.toLowerCase()}`,
+            token_manifest: [],
+          });
+        }
+      }
+      return jsonResponse({ tokens_created: 0, tokenized_text: body.text, session_id: "" });
+    }
+    if (url.includes("/pii/rehydrate")) {
+      rehydrateCalls.push(body);
+      return jsonResponse({ tokens_resolved: 1, rehydrated_text: `rehydrated via ${body.session_id}` });
+    }
+    return jsonResponse({});
   });
+}
 
-  it("does not brute-force unrelated conversation sessions when no matching key is provided", async () => {
-    const rehydrateCalls: any[] = [];
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (url.includes("/pii/tokenize")) {
-        if (String(body.text).includes("Alice")) {
-          return jsonResponse({
-            tokens_created: 1,
-            tokenized_text: "Customer [VS:alice]",
-            session_id: "sid-alice",
-            token_manifest: [],
-          });
-        }
-        if (String(body.text).includes("Bob")) {
-          return jsonResponse({
-            tokens_created: 1,
-            tokenized_text: "Customer [VS:bob]",
-            session_id: "sid-bob",
-            token_manifest: [],
-          });
-        }
-      }
-      if (url.includes("/pii/rehydrate")) {
-        rehydrateCalls.push(body);
-        return jsonResponse({
-          tokens_resolved: 1,
-          rehydrated_text:
-            body.session_id === "sid-alice" ? "Customer Alice" : "Customer Bob",
-        });
-      }
-      return jsonResponse({});
-    });
+function lookupCustomer(hooks: Record<string, Hook>, name: string, ctx: Record<string, unknown>) {
+  return hooks["before_tool_call"](
+    { toolName: "lookup_customer", params: { query: `Customer ${name}` } },
+    { toolName: "lookup_customer", ...ctx }
+  );
+}
 
-    const { api, hooks, tools } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
+const text = (result: any) => result.content[0].text;
 
-    await hooks["after_tool_call"]({
-      name: "lookup_customer",
-      output: "Customer Alice",
-      conversation_id: "conv-a",
-    });
-    await hooks["after_tool_call"]({
-      name: "lookup_customer",
-      output: "Customer Bob",
-      conversation_id: "conv-b",
-    });
+describe("veriswarm_rehydrate session scoping", () => {
+  afterEach(() => vi.restoreAllMocks());
 
-    const result = await tools["veriswarm_rehydrate"]({
+  it("rehydrates the calling conversation's session", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
+
+    await lookupCustomer(hooks, "Alice", { sessionKey: "conv-a" });
+    const result = await toolFor("veriswarm_rehydrate", { sessionKey: "conv-a" }).execute("call-1", {
       text: "Customer [VS:alice]",
       tool_name: "lookup_customer",
     });
 
-    expect(result).toBe("Customer [VS:alice]");
+    expect(text(result)).toBe("rehydrated via sid-alice");
+    expect(rehydrateCalls).toEqual([{ text: "Customer [VS:alice]", session_id: "sid-alice" }]);
+  });
+
+  it("ignores a model-supplied conversation_id naming another conversation", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
+
+    await lookupCustomer(hooks, "Alice", { sessionKey: "conv-a" });
+    await lookupCustomer(hooks, "Bob", { sessionKey: "conv-b" });
+
+    // Conversation B asks for conversation A's tokens by name.
+    const result = await toolFor("veriswarm_rehydrate", { sessionKey: "conv-b" }).execute("call-2", {
+      text: "Customer [VS:alice]",
+      tool_name: "lookup_customer",
+      conversation_id: "conv-a",
+    });
+
+    expect(rehydrateCalls).toEqual([{ text: "Customer [VS:alice]", session_id: "sid-bob" }]);
+    expect(text(result)).toBe("rehydrated via sid-bob");
+  });
+
+  it("returns the text unchanged when the calling conversation has no session", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
+
+    await lookupCustomer(hooks, "Alice", { sessionKey: "conv-a" });
+    const result = await toolFor("veriswarm_rehydrate", { sessionKey: "conv-c" }).execute("call-3", {
+      text: "Customer [VS:alice]",
+      tool_name: "lookup_customer",
+      conversation_id: "conv-a",
+    });
+
+    expect(text(result)).toBe("Customer [VS:alice]");
     expect(rehydrateCalls).toHaveLength(0);
   });
 
-  it("rehydrates only the session for the provided conversation and tool", async () => {
-    const rehydrateCalls: any[] = [];
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (url.includes("/pii/tokenize")) {
-        return jsonResponse({
-          tokens_created: 1,
-          tokenized_text: "Customer [VS:alice]",
-          session_id: "sid-alice",
-          token_manifest: [],
-        });
-      }
-      if (url.includes("/pii/rehydrate")) {
-        rehydrateCalls.push(body);
-        return jsonResponse({
-          tokens_resolved: 1,
-          rehydrated_text: "Customer Alice",
-        });
-      }
-      return jsonResponse({});
-    });
+  it("keys hooks and the tool on the same host ctx field (sessionId fallback)", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
 
-    const { api, hooks, tools } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-
-    await hooks["after_tool_call"]({
-      name: "lookup_customer",
-      output: "Customer Alice",
-      conversation_id: "conv-a",
-    });
-
-    const result = await tools["veriswarm_rehydrate"]({
+    await lookupCustomer(hooks, "Alice", { sessionId: "uuid-a" });
+    const result = await toolFor("veriswarm_rehydrate", { sessionId: "uuid-a" }).execute("call-4", {
       text: "Customer [VS:alice]",
       tool_name: "lookup_customer",
-      conversation_id: "conv-a",
     });
 
-    expect(result).toBe("Customer Alice");
-    expect(rehydrateCalls).toEqual([
-      { text: "Customer [VS:alice]", session_id: "sid-alice" },
-    ]);
+    expect(text(result)).toBe("rehydrated via sid-alice");
   });
 
-  it("preserves no-conversation deployments by using the no-conversation key only", async () => {
-    fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (url.includes("/pii/tokenize")) {
-        return jsonResponse({
-          tokens_created: 1,
-          tokenized_text: "Customer [VS:alice]",
-          session_id: "sid-no-conv",
-          token_manifest: [],
-        });
-      }
-      if (url.includes("/pii/rehydrate")) {
-        return jsonResponse({
-          tokens_resolved: 1,
-          rehydrated_text: `rehydrated via ${body.session_id}`,
-        });
-      }
-      return jsonResponse({});
-    });
+  it("does not rehydrate when the calling tool context has no conversation identity", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
 
-    const { api, hooks, tools } = makeApi();
-    pluginEntry.register(api as any, BASE_CONFIG);
-
-    await hooks["after_tool_call"]({
-      name: "lookup_customer",
-      output: "Customer Alice",
-    });
-
-    const result = await tools["veriswarm_rehydrate"]({
+    // Neither side has an identity: tokenization still happens, but nothing
+    // is stored in a shared bucket another unidentified caller could read.
+    await lookupCustomer(hooks, "Alice", {});
+    const result = await toolFor("veriswarm_rehydrate", {}).execute("call-5", {
       text: "Customer [VS:alice]",
       tool_name: "lookup_customer",
     });
 
-    expect(result).toBe("rehydrated via sid-no-conv");
+    expect(text(result)).toBe("Customer [VS:alice]");
+    expect(rehydrateCalls).toHaveLength(0);
+  });
+
+  it("rehydrates outbound-message tokens for the session bound on the deliver path", async () => {
+    mockApi();
+    const { api, hooks, toolFor } = makeApi();
+    pluginEntry.register(api as any, config());
+
+    await hooks["message_received"](
+      { from: "telegram:42", content: "hello" },
+      { channelId: "telegram", conversationId: "telegram:42", sessionKey: "sk-42" }
+    );
+    // Deliver path: ctx has no sessionKey.
+    const sent = await hooks["message_sending"](
+      { to: "42", content: "Customer Alice" },
+      { channelId: "telegram", conversationId: "42" }
+    );
+    expect(sent).toEqual({ content: "Customer [VS:alice]" });
+
+    const result = await toolFor("veriswarm_rehydrate", { sessionKey: "sk-42" }).execute("call-6", {
+      text: "Customer [VS:alice]",
+    });
+    expect(text(result)).toBe("rehydrated via sid-alice");
   });
 });

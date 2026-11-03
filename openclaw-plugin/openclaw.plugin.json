@@ -1,0 +1,112 @@
+{
+  "id": "veriswarm",
+  "name": "VeriSwarm Guard",
+  "description": "Trust scoring, PII tokenization, policy enforcement, and audit for OpenClaw agents. Protects against data exposure, prompt injection, and unauthorized tool usage.",
+  "version": "0.1.0",
+  "uiHints": {
+    "apiKey": {
+      "label": "VeriSwarm API key",
+      "placeholder": "vsk_...",
+      "sensitive": true
+    },
+    "agentKey": {
+      "label": "Agent API key",
+      "placeholder": "agta_...",
+      "sensitive": true
+    }
+  },
+  "contracts": {
+    "tools": [
+      "veriswarm_check_trust",
+      "veriswarm_check_decision",
+      "veriswarm_score_history",
+      "veriswarm_rehydrate",
+      "veriswarm_guard_status",
+      "veriswarm_findings",
+      "veriswarm_get_credentials",
+      "veriswarm_verify_credential",
+      "veriswarm_query_ledger",
+      "veriswarm_verify_chain",
+      "veriswarm_status"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "description": "VeriSwarm workspace API key (vsk_...)"
+      },
+      "apiUrl": {
+        "type": "string",
+        "description": "VeriSwarm API URL",
+        "default": "https://api.veriswarm.ai"
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Agent ID for this OpenClaw instance",
+        "default": ""
+      },
+      "agentKey": {
+        "type": "string",
+        "description": "Agent API key (agta_...) for credential issuance and self-reporting",
+        "default": ""
+      },
+      "piiEnabled": {
+        "type": "boolean",
+        "description": "Enable PII tokenization on outbound messages and tool-call params",
+        "default": true
+      },
+      "policyEnabled": {
+        "type": "boolean",
+        "description": "Enable tool policy enforcement",
+        "default": true
+      },
+      "injectionScan": {
+        "type": "boolean",
+        "description": "Enable prompt injection scanning on tool outputs",
+        "default": true
+      },
+      "auditEnabled": {
+        "type": "boolean",
+        "description": "Enable audit logging to VeriSwarm Vault",
+        "default": true
+      },
+      "blockedTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Tools to block",
+        "default": []
+      },
+      "allowedTools": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Only these tools allowed (allowlist mode). Empty = allow all.",
+        "default": []
+      },
+      "secretsDetection": {
+        "type": "boolean",
+        "description": "Block tool calls and cancel outbound messages that contain provider-prefix secrets (values or keys). When off (default), secrets in tool params and outbound messages are redacted locally instead (a call whose top-level parameter name is a secret is still blocked). Either way secrets are never sent to the VeriSwarm API, and secrets in tool results are always redacted locally.",
+        "default": false
+      },
+      "sessionScan": {
+        "type": "boolean",
+        "description": "Enable Session Sentry multi-turn exfiltration detection. Each outbound message is submitted to /v1/suite/guard/scan-session; if the conversation-level risk score triggers a block, delivery of the message is cancelled. An API error also cancels delivery unless failOpen is set. Safe to leave on while the platform flag is dormant \u2014 the server returns {enabled:false, blocked:false}. Default: true.",
+        "default": true
+      },
+      "failOpen": {
+        "type": "boolean",
+        "description": "Let tool calls and messages through without PII tokenization or Session Sentry when the VeriSwarm API is unreachable or returns an unexpected response. Default false: the tool call is blocked or the message delivery cancelled. Local secret redaction and blocking are not relaxed by this flag, with one exception: if a Guard hook crashes unexpectedly while failOpen is set, that tool call, message or tool result passes through unchecked.",
+        "default": false
+      }
+    },
+    "required": [
+      "apiKey"
+    ],
+    "additionalProperties": false
+  }
+}
