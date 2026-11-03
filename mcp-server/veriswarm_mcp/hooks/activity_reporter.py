@@ -102,17 +102,31 @@ def _line_count(path: Path) -> int:
         return 0
 
 
+def _warn(message: str) -> None:
+    print(f"[VeriSwarm Guard] {message}", file=sys.stderr)
+
+
+def _read_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text().splitlines()
+    except OSError:
+        return []
+
+
+def _rewrite_buffer(lines: list[str]) -> None:
+    """Replace the buffer contents atomically."""
+    tmp = BUFFER_FILE.with_name(f"{BUFFER_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    tmp.write_text("".join(line + "\n" for line in lines))
+    tmp.replace(BUFFER_FILE)
+
+
 def buffer_event(event_type: str, metadata: dict | None = None, session_id: str = "") -> int:
     """Append an activity event to the local buffer. Returns buffer line count.
 
-    The buffer holds at most MAX_BUFFER_SIZE events; once full, new events
-    are dropped until a flush drains it.
+    The buffer holds at most MAX_BUFFER_SIZE events; when full, the oldest
+    events are evicted (with a warning) to make room.
     """
     BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    count = _line_count(BUFFER_FILE)
-    if count >= MAX_BUFFER_SIZE:
-        return count
 
     entry = {
         "event_id": uuid.uuid4().hex[:16],
@@ -121,9 +135,19 @@ def buffer_event(event_type: str, metadata: dict | None = None, session_id: str 
         "ts": datetime.now(timezone.utc).isoformat(),
         "meta": metadata or {},
     }
+    line = json.dumps(entry, separators=(",", ":"))
+
+    count = _line_count(BUFFER_FILE)
+    if count >= MAX_BUFFER_SIZE:
+        lines = _read_lines(BUFFER_FILE)
+        keep = lines[len(lines) - (MAX_BUFFER_SIZE - 1):] if MAX_BUFFER_SIZE > 1 else []
+        evicted = len(lines) - len(keep)
+        _rewrite_buffer(keep + [line])
+        _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
+        return len(keep) + 1
 
     with open(BUFFER_FILE, "a") as f:
-        f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        f.write(line + "\n")
 
     return count + 1
 
@@ -192,29 +216,36 @@ def _event_payload(event: dict, agent_id: str) -> dict:
 
 
 def _requeue_events(events: list[dict]) -> None:
-    """Append unsent events back to the shared buffer, keeping the newest
-    events when the total would exceed MAX_BUFFER_SIZE."""
+    """Put unsent events back in the buffer ahead of anything buffered since.
+
+    They are the oldest events, so when the total would exceed
+    MAX_BUFFER_SIZE they are evicted first (with a warning).
+    """
     if not events:
         return
-    room = MAX_BUFFER_SIZE - _line_count(BUFFER_FILE)
-    if room <= 0:
-        return
-    events = events[-room:]
     try:
         BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(BUFFER_FILE, "a") as f:
-            for event in events:
-                f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        current = _read_lines(BUFFER_FILE)
+        lines = [json.dumps(e, separators=(",", ":")) for e in events] + current
+        evicted = max(0, len(lines) - MAX_BUFFER_SIZE)
+        _rewrite_buffer(lines[evicted:])
     except OSError:
-        pass
+        return
+    if evicted:
+        _warn(f"Activity buffer full; evicted {evicted} oldest event(s).")
 
 
-def _is_permanent_rejection(exc: Exception) -> bool:
-    """4xx responses other than 408/429 will fail the same way on retry."""
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return False
-    status = exc.response.status_code
-    return 400 <= status < 500 and status not in (408, 429)
+# Rejections of the event itself: resending the same payload cannot succeed.
+# Auth/routing errors (401/403/404) are configuration problems — those events
+# are kept so they are delivered once the configuration is fixed.
+PAYLOAD_REJECTION_STATUSES = frozenset({400, 413, 422})
+
+
+def _is_payload_rejection(exc: Exception) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response.status_code in PAYLOAD_REJECTION_STATUSES
+    )
 
 
 def _warn_missing_agent_id() -> None:
@@ -256,6 +287,7 @@ def flush_to_api() -> None:
         headers["x-api-key"] = api_key
 
     unsent: list[dict] = []
+    dropped = 0
     for event in events:
         try:
             response = httpx.post(
@@ -266,9 +298,13 @@ def flush_to_api() -> None:
             )
             response.raise_for_status()
         except Exception as exc:
-            if not _is_permanent_rejection(exc):
+            if _is_payload_rejection(exc):
+                dropped += 1
+            else:
                 unsent.append(event)
 
+    if dropped:
+        _warn(f"Activity upload: dropped {dropped} event(s) the API rejected as invalid (HTTP 400/413/422).")
     _requeue_events(unsent)
 
 

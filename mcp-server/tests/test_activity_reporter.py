@@ -170,10 +170,14 @@ def test_payload_never_uses_a_fake_default_agent_id():
 
 
 @pytest.mark.parametrize("status,requeued", [
-    (400, False), (401, False), (403, False), (404, False), (422, False),
+    # Payload-specific rejections: the same event will never be accepted.
+    (400, False), (413, False), (422, False),
+    # Configuration errors (bad key, wrong agent id): keep for after the fix.
+    (401, True), (403, True), (404, True),
+    # Transient.
     (408, True), (429, True), (500, True), (503, True),
 ])
-def test_permanent_client_errors_are_dropped_transient_ones_requeued(monkeypatch, tmp_path, status, requeued):
+def test_only_payload_rejections_are_dropped(monkeypatch, tmp_path, capsys, status, requeued):
     monkeypatch.setenv("VERISWARM_API_KEY", "k")
     monkeypatch.setenv("GUARD_AGENT_ID", "agt_test")
     event = {"event_id": "e1", "event_type": "x", "session_id": "s", "ts": "t", "meta": {}}
@@ -184,9 +188,42 @@ def test_permanent_client_errors_are_dropped_transient_ones_requeued(monkeypatch
 
     remaining = buffer_file.read_text().splitlines() if buffer_file.exists() else []
     assert (len(remaining) == 1) is requeued
+    err = capsys.readouterr().err
+    if not requeued:
+        assert "dropped 1" in err
 
 
-def test_buffer_event_does_not_grow_past_max(monkeypatch, tmp_path):
+def test_dropped_count_is_reported_once_per_flush(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("VERISWARM_API_KEY", "k")
+    monkeypatch.setenv("GUARD_AGENT_ID", "agt_test")
+    events = [{"event_id": f"e{i}", "event_type": "x", "meta": {}} for i in range(3)]
+    _buffer(monkeypatch, tmp_path, events)
+    _capture_posts(monkeypatch, lambda payload: 422 if payload["event_id"] != "e1" else 200)
+
+    activity_reporter.flush_to_api()
+
+    err = capsys.readouterr().err
+    assert err.count("dropped") == 1
+    assert "dropped 2" in err
+
+
+def test_config_error_events_survive_until_config_is_fixed(monkeypatch, tmp_path):
+    monkeypatch.setenv("VERISWARM_API_KEY", "k")
+    monkeypatch.setenv("GUARD_AGENT_ID", "agt_wrong")
+    event = {"event_id": "e1", "event_type": "x", "session_id": "s", "ts": "t", "meta": {}}
+    _buffer(monkeypatch, tmp_path, [event])
+    _capture_posts(monkeypatch, 403)
+    activity_reporter.flush_to_api()
+
+    monkeypatch.setenv("GUARD_AGENT_ID", "agt_right")
+    posted = _capture_posts(monkeypatch, 200)
+    activity_reporter.flush_to_api()
+
+    assert [p["json"]["event_id"] for p in posted] == ["e1"]
+    assert posted[0]["json"]["agent_id"] == "agt_right"
+
+
+def test_buffer_event_evicts_oldest_past_max_and_warns(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(activity_reporter, "MAX_BUFFER_SIZE", 5)
     monkeypatch.setattr(activity_reporter, "maybe_flush", lambda count: None)
     buffer_file = _buffer(monkeypatch, tmp_path, [])
@@ -194,16 +231,20 @@ def test_buffer_event_does_not_grow_past_max(monkeypatch, tmp_path):
     for i in range(12):
         activity_reporter.buffer_event("x", {"i": i})
 
-    assert len(buffer_file.read_text().splitlines()) == 5
+    kept = [json.loads(l)["meta"]["i"] for l in buffer_file.read_text().splitlines()]
+    assert kept == [7, 8, 9, 10, 11]
+    assert "evicted" in capsys.readouterr().err
 
 
-def test_requeue_keeps_only_newest_max_events(monkeypatch, tmp_path):
+def test_requeue_evicts_oldest_past_max_and_warns(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(activity_reporter, "MAX_BUFFER_SIZE", 3)
-    buffer_file = _buffer(monkeypatch, tmp_path, [])
+    buffer_file = _buffer(monkeypatch, tmp_path, [{"n": "new"}])
 
     activity_reporter._requeue_events([{"n": i} for i in range(10)])
 
-    assert [json.loads(l)["n"] for l in buffer_file.read_text().splitlines()] == [7, 8, 9]
+    # Requeued events are older than ones buffered meanwhile; oldest go first.
+    assert [json.loads(l)["n"] for l in buffer_file.read_text().splitlines()] == [8, 9, "new"]
+    assert "evicted 8" in capsys.readouterr().err
 
 
 def test_buffer_event_records_given_session_id(monkeypatch, tmp_path):
