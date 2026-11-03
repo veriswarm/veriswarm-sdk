@@ -1,0 +1,115 @@
+{
+  "_comment": "Shared Web Bot Auth golden vectors. Both the Node and Python SDK test suites load this file; @authority values are what WHATWG URL parsing (Node) produces.",
+  "authority": [
+    {
+      "url": "https://Example.COM/path",
+      "authority": "example.com"
+    },
+    {
+      "url": "https://example.com:443/",
+      "authority": "example.com"
+    },
+    {
+      "url": "https://example.com:8443/x",
+      "authority": "example.com:8443"
+    },
+    {
+      "url": "http://example.com:80/",
+      "authority": "example.com"
+    },
+    {
+      "url": "http://example.com:443/",
+      "authority": "example.com:443"
+    },
+    {
+      "url": "wss://example.com:443/",
+      "authority": "example.com"
+    },
+    {
+      "url": "ws://example.com:80/",
+      "authority": "example.com"
+    },
+    {
+      "url": "wss://example.com:80/",
+      "authority": "example.com:80"
+    },
+    {
+      "url": "ws://example.com:443/",
+      "authority": "example.com:443"
+    },
+    {
+      "url": "https://例え.jp/path",
+      "authority": "xn--r8jz45g.jp"
+    },
+    {
+      "url": "https://MÜNCHEN.de/",
+      "authority": "xn--mnchen-3ya.de"
+    },
+    {
+      "url": "https://straße.de/",
+      "authority": "xn--strae-oqa.de"
+    },
+    {
+      "url": "https://faß.de/",
+      "authority": "xn--fa-hia.de"
+    },
+    {
+      "url": "https://ÖBB.at/",
+      "authority": "xn--bb-eka.at"
+    },
+    {
+      "url": "https://[::1]:8443/",
+      "authority": "[::1]:8443"
+    },
+    {
+      "url": "https://[2001:DB8:0:0:0:0:0:1]/",
+      "authority": "[2001:db8::1]"
+    },
+    {
+      "url": "https://[2001:db8:0:0:1:0:0:1]/",
+      "authority": "[2001:db8::1:0:0:1]"
+    },
+    {
+      "url": "https://[::ffff:192.0.2.1]/",
+      "authority": "[::ffff:c000:201]"
+    },
+    {
+      "url": "https://[0:0:0:0:0:0:0:0]/",
+      "authority": "[::]"
+    },
+    {
+      "url": "https://192.0.2.1:443/",
+      "authority": "192.0.2.1"
+    },
+    {
+      "url": "https://example.com.:8080/",
+      "authority": "example.com.:8080"
+    },
+    {
+      "url": "https://xn--mnchen-3ya.de/",
+      "authority": "xn--mnchen-3ya.de"
+    }
+  ],
+  "signature_base": [
+    {
+      "name": "empty nonce is omitted",
+      "authority": "xn--mnchen-3ya.de",
+      "signature_agent": "https://api.veriswarm.ai",
+      "created": 1,
+      "expires": 301,
+      "keyid": "k1",
+      "nonce": "",
+      "expected": "\"@authority\": xn--mnchen-3ya.de\n\"signature-agent\": \"https://api.veriswarm.ai\"\n\"@signature-params\": (\"@authority\" \"signature-agent\");created=1;expires=301;keyid=\"k1\";tag=\"web-bot-auth\""
+    },
+    {
+      "name": "nonce and IPv6 authority",
+      "authority": "[2001:db8::1]:8443",
+      "signature_agent": "https://api.veriswarm.ai",
+      "created": 1,
+      "expires": 301,
+      "keyid": "k1",
+      "nonce": "n1",
+      "expected": "\"@authority\": [2001:db8::1]:8443\n\"signature-agent\": \"https://api.veriswarm.ai\"\n\"@signature-params\": (\"@authority\" \"signature-agent\");created=1;expires=301;nonce=\"n1\";keyid=\"k1\";tag=\"web-bot-auth\""
+    }
+  ]
+}

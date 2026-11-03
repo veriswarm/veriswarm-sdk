@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import time
+import unicodedata
 from typing import Any
 from urllib.parse import urlparse
 
@@ -35,7 +36,11 @@ DEFAULT_SIGNATURE_AGENT = "https://api.veriswarm.ai"
 DEFAULT_EXPIRES_SECONDS = 300
 SIGNATURE_TAG = "web-bot-auth"
 
-_DEFAULT_PORTS = {"https": 443, "http": 80}
+# WHATWG "special" schemes and their default ports (Node's URL parser drops
+# these when explicit).
+_DEFAULT_PORTS = {"https": 443, "http": 80, "wss": 443, "ws": 80, "ftp": 21}
+# Label separators WHATWG/UTS #46 treat as ".".
+_IDEOGRAPHIC_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
 
 
 class WebBotAuthError(ImportError):
@@ -83,11 +88,49 @@ def _quote_string(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _ipv6_whatwg(ip: ipaddress.IPv6Address) -> str:
+    """Serialize IPv6 the way the WHATWG URL parser does: lowercase hex, no
+    leading zeros, the first longest run of 2+ zero pieces compressed to
+    ``::``, and no dotted-quad tail (``::ffff:192.0.2.1`` → ``::ffff:c000:201``)."""
+    pieces = [int.from_bytes(ip.packed[i : i + 2], "big") for i in range(0, 16, 2)]
+    best_start, best_len, run_start = -1, 1, -1
+    for i, piece in enumerate(pieces + [1]):
+        if piece == 0 and run_start < 0:
+            run_start = i
+        elif piece != 0 and run_start >= 0:
+            if i - run_start > best_len:
+                best_start, best_len = run_start, i - run_start
+            run_start = -1
+    if best_start < 0:
+        return ":".join(f"{p:x}" for p in pieces)
+    head = ":".join(f"{p:x}" for p in pieces[:best_start])
+    tail = ":".join(f"{p:x}" for p in pieces[best_start + best_len :])
+    return f"{head}::{tail}"
+
+
+def _domain_to_ascii(host: str) -> str:
+    """IDNA-encode a hostname like WHATWG URL / UTS #46 non-transitional
+    processing (``ß`` stays ``ß`` → ``xn--strae-oqa``), not Python's
+    IDNA 2003 codec (which maps ``ß`` to ``ss``). Covers the mappings real
+    hostnames hit: compatibility normalization, lowercasing, and the
+    ideographic full stops."""
+    labels = []
+    for label in host.translate(_IDEOGRAPHIC_DOTS).split("."):
+        label = unicodedata.normalize("NFC", unicodedata.normalize("NFKC", label).lower())
+        if label.isascii():
+            labels.append(label)
+        else:
+            labels.append("xn--" + label.encode("punycode").decode("ascii"))
+    return ".".join(labels)
+
+
 def _derive_authority(url: str) -> str:
     """Derive the RFC 9421 `@authority` component from a request URL.
 
-    Lowercased host, with the port included only when it differs from the
-    scheme's default (443 for https, 80 for http).
+    Matches the Node SDK (WHATWG URL) byte-for-byte: IDNA → punycode,
+    bracketed canonical IPv6, lowercase host, and the port only when it is
+    not the scheme's default (https/wss 443, http/ws 80). Golden vectors
+    shared with the Node SDK live in testdata/webbotauth_vectors.json.
     """
     parsed = urlparse(url)
     if not parsed.hostname:
@@ -97,9 +140,9 @@ def _derive_authority(url: str) -> str:
     try:
         ip = ipaddress.ip_address(raw_host)
     except ValueError:
-        host = raw_host.encode("idna").decode("ascii").lower()
+        host = _domain_to_ascii(raw_host)
     else:
-        host = f"[{ip.compressed}]" if ip.version == 6 else ip.compressed
+        host = f"[{_ipv6_whatwg(ip)}]" if ip.version == 6 else ip.compressed
     port = parsed.port
     default_port = _DEFAULT_PORTS.get(parsed.scheme)
     if port is not None and port != default_port:
@@ -125,7 +168,8 @@ def _build_signature_params(
     Param order is fixed: created, expires, [nonce], keyid, tag.
     """
     parts = [f"created={created}", f"expires={expires}"]
-    if nonce is not None:
+    # An empty nonce is omitted, as in the Node SDK.
+    if nonce:
         parts.append(f"nonce={_quote_string(nonce)}")
     parts.append(f"keyid={_quote_string(keyid)}")
     parts.append(f"tag={_quote_string(tag)}")
