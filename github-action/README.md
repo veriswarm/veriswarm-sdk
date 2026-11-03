@@ -41,7 +41,7 @@ jobs:
 | `agent-id` | No | | Agent ID for score/test/decision checks |
 | `mode` | No | `all` | `score`, `test`, `scan`, `decision`, `owasp`, `compliance`, `ci-exfil`, or `all`. An unknown mode fails the run. `score`, `test` and `decision` fail the run if `agent-id` is empty; `all` skips them in that case. |
 | `scan-paths` | No | | Glob for files to scan (e.g., `**/*.py`) |
-| `fail-on-deny` | No | `true` | Fail if trust decision is deny |
+| `fail-on-deny` | No | `true` | Fail if trust decision is deny (`review` passes) |
 | `fail-on-injection` | No | `true` | Fail if injection detected |
 | `fail-on-pii` | No | `true` | Fail if PII is detected in scanned files |
 | `fail-on-low-score` | No | `0` | Min security readiness score (0=disabled) |
@@ -153,13 +153,19 @@ When an enforcement input is set, a check that cannot be evaluated fails the run
 | Check | Enforced when | Fails on |
 |-------|---------------|----------|
 | score | `min-trust-score` > 0 | API error, missing/non-numeric composite, or below minimum |
-| decision | `fail-on-deny` is true (default) | API error, unrecognised decision, or `deny` |
+| decision | `fail-on-deny` is true (default) | API error, unrecognised decision, or `deny` (`review` passes) |
 | test | `fail-on-low-score` > 0 | API error, missing readiness score, or below threshold |
 | owasp | `min-owasp-coverage` > 0 | API error, missing coverage score, or below minimum |
 | scan | `fail-on-injection` / `fail-on-pii` are true (default) | PII found (`fail-on-pii`), injection found (`fail-on-injection`), or, if either is on, any scan request that errored, was rate limited past retries, returned an unexpected shape, or any file that could not be fully scanned |
 | ci-exfil | `fail-on-ci-exfil` is true (default) | API error, malformed response, or `blocked` |
 
 With the enforcement input off, the same problems are logged as warnings only.
+
+**`review` decisions pass the CI gate.** Only `deny` fails the decision check; a `review` decision is
+reported (⚠️ in the job summary, `decision` output set to `review`) and the run continues. This differs from
+the Python runtime adapters, which block a tool call on anything but an explicit `allow`. To stop on
+`review`, give the Action step an `id` (e.g. `id: veriswarm`) and add a later step with
+`if: steps.veriswarm.outputs.decision == 'review'` and `run: exit 1`.
 
 Numeric inputs must be valid numbers; anything else stops the run with a clear error.
 
