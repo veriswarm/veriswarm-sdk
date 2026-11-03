@@ -9,6 +9,42 @@
  */
 import { SecretTripwire, ensureTripwire } from "./secret_tripwire.mjs";
 
+/**
+ * Encode one caller-supplied value as a single URL path segment.
+ * `.`/`..` are rejected outright: encodeURIComponent leaves them untouched
+ * and URL normalization would resolve them, letting an id walk to a
+ * different endpoint. Empty and null/undefined ids are rejected too.
+ */
+function pathSegment(value) {
+  if (value === null || value === undefined) {
+    throw new TypeError("path segment must not be null or undefined");
+  }
+  const segment = String(value);
+  if (segment === "" || segment === "." || segment === "..") {
+    throw new TypeError(`path segment must not be empty, "." or ".." (got ${JSON.stringify(segment)})`);
+  }
+  return encodeURIComponent(segment);
+}
+
+/** Tagged template: every interpolated value becomes one encoded path segment. */
+function apiPath(strings, ...values) {
+  return strings.reduce(
+    (acc, literal, i) => acc + literal + (i < values.length ? pathSegment(values[i]) : ""),
+    "",
+  );
+}
+
+/** Append query params, encoding every value and skipping null/undefined. */
+function withQuery(path, query) {
+  if (!query) return path;
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== null && value !== undefined) params.append(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `${path}?${qs}` : path;
+}
+
 export class VeriSwarmClient {
   /**
    * @param {object} options
@@ -100,37 +136,37 @@ export class VeriSwarmClient {
 
   /** Get public agent profile. */
   async getAgent(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}`);
   }
 
   /** Get an agent's current trust scores. */
   async getAgentScores(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/scores/current`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/scores/current`);
   }
 
   /** Get an agent's score history (last N snapshots). */
   async getAgentScoreHistory(agentId, { limit = 20 } = {}) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/scores/history?limit=${limit}`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/scores/history`, { query: { limit } });
   }
 
   /** Get detailed score breakdown with contributing factors. */
   async getAgentScoreBreakdown(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/scores/breakdown`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/scores/breakdown`);
   }
 
   /** Get active moderation flags for an agent. */
   async getAgentFlags(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/flags`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/flags`);
   }
 
   /** Appeal a moderation flag for review. */
   async appealFlag(agentId, flagId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/flags/${encodeURIComponent(flagId)}/appeal`, { method: "POST" });
+    return this.#request(apiPath`/v1/public/agents/${agentId}/flags/${flagId}/appeal`, { method: "POST" });
   }
 
   /** Get agent capability manifests (public). */
   async getAgentManifests(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/manifests`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/manifests`);
   }
 
   // --- Credentials (Portable JWT) ---
@@ -226,36 +262,36 @@ export class VeriSwarmClient {
 
   /** Get an agent's event timeline. */
   async getAgentTimeline(agentId, { limit = 50 } = {}) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/timeline?limit=${limit}`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/timeline`, { query: { limit } });
   }
 
   // --- Agent API Keys ---
 
   /** List API keys for an agent. */
   async getAgentApiKeys(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/api-keys`);
+    return this.#request(apiPath`/v1/public/agents/${agentId}/api-keys`);
   }
 
   /** Rotate (regenerate) an agent's API key. */
   async rotateAgentApiKey(agentId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/api-keys/rotate`, { method: "POST" });
+    return this.#request(apiPath`/v1/public/agents/${agentId}/api-keys/rotate`, { method: "POST" });
   }
 
   /** Revoke a specific agent API key. */
   async revokeAgentApiKey(agentId, keyId) {
-    return this.#request(`/v1/public/agents/${encodeURIComponent(agentId)}/api-keys/${encodeURIComponent(keyId)}/revoke`, { method: "POST" });
+    return this.#request(apiPath`/v1/public/agents/${agentId}/api-keys/${keyId}/revoke`, { method: "POST" });
   }
 
   // --- Guard PII Sessions ---
 
   /** Get details of a PII tokenization session. */
   async getPiiSession(sessionId) {
-    return this.#request(`/v1/suite/guard/pii/sessions/${encodeURIComponent(sessionId)}`);
+    return this.#request(apiPath`/v1/suite/guard/pii/sessions/${sessionId}`);
   }
 
   /** Revoke a PII tokenization session and all its tokens. */
   async revokePiiSession(sessionId) {
-    return this.#request(`/v1/suite/guard/pii/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/suite/guard/pii/sessions/${sessionId}`, { method: "DELETE" });
   }
 
   // --- Guard Policies ---
@@ -272,37 +308,36 @@ export class VeriSwarmClient {
 
   /** Update a Guard policy rule. */
   async updateGuardPolicy(policyId, updates) {
-    return this.#request(`/v1/suite/guard/policies/${encodeURIComponent(policyId)}`, { method: "PATCH", body: updates });
+    return this.#request(apiPath`/v1/suite/guard/policies/${policyId}`, { method: "PATCH", body: updates });
   }
 
   /** Delete a Guard policy rule. */
   async deleteGuardPolicy(policyId) {
-    return this.#request(`/v1/suite/guard/policies/${encodeURIComponent(policyId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/suite/guard/policies/${policyId}`, { method: "DELETE" });
   }
 
   // --- Guard Kill Switch ---
 
   /** Activate the kill switch for an agent, blocking all trust decisions. */
   async killAgent(agentId, reason) {
-    return this.#request(`/v1/suite/guard/kill/${encodeURIComponent(agentId)}`, { method: "POST", body: { reason } });
+    return this.#request(apiPath`/v1/suite/guard/kill/${agentId}`, { method: "POST", body: { reason } });
   }
 
   /** Deactivate the kill switch for an agent. */
   async unkillAgent(agentId) {
-    return this.#request(`/v1/suite/guard/unkill/${encodeURIComponent(agentId)}`, { method: "POST" });
+    return this.#request(apiPath`/v1/suite/guard/unkill/${agentId}`, { method: "POST" });
   }
 
   // --- Guard Findings ---
 
   /** List Guard security findings, optionally filtered by agent. */
   async listGuardFindings(agentId = null) {
-    const path = agentId ? `/v1/suite/guard/findings?agent_id=${encodeURIComponent(agentId)}` : "/v1/suite/guard/findings";
-    return this.#request(path);
+    return this.#request("/v1/suite/guard/findings", { query: { agent_id: agentId || null } });
   }
 
   /** Update a Guard finding (e.g. resolve, dismiss). */
   async updateGuardFinding(findingId, updates) {
-    return this.#request(`/v1/suite/guard/findings/${encodeURIComponent(findingId)}`, { method: "PATCH", body: updates });
+    return this.#request(apiPath`/v1/suite/guard/findings/${findingId}`, { method: "PATCH", body: updates });
   }
 
   // --- Passport Delegations ---
@@ -319,40 +354,38 @@ export class VeriSwarmClient {
 
   /** Revoke a Passport delegation. */
   async revokeDelegation(delegationId) {
-    return this.#request(`/v1/suite/passport/delegations/${encodeURIComponent(delegationId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/suite/passport/delegations/${delegationId}`, { method: "DELETE" });
   }
 
   // --- Passport Verification ---
 
   /** Mark an agent as identity-verified in Passport. */
   async verifyAgentIdentity(agentId) {
-    return this.#request(`/v1/suite/passport/verify/${encodeURIComponent(agentId)}`, { method: "POST" });
+    return this.#request(apiPath`/v1/suite/passport/verify/${agentId}`, { method: "POST" });
   }
 
   // --- Passport Manifests ---
 
   /** Create or update an agent capability manifest. */
   async createManifest(agentId, manifest) {
-    return this.#request(`/v1/suite/passport/manifests/${encodeURIComponent(agentId)}`, { method: "POST", body: manifest });
+    return this.#request(apiPath`/v1/suite/passport/manifests/${agentId}`, { method: "POST", body: manifest });
   }
 
   /** Get agent capability manifests from Passport. */
   async getManifests(agentId) {
-    return this.#request(`/v1/suite/passport/manifests/${encodeURIComponent(agentId)}`);
+    return this.#request(apiPath`/v1/suite/passport/manifests/${agentId}`);
   }
 
   // --- Vault ---
 
   /** Query the immutable Vault audit ledger. */
   async queryVaultLedger({ agentId = null, limit = 50 } = {}) {
-    let path = `/v1/suite/vault/ledger?limit=${limit}`;
-    if (agentId) path += `&agent_id=${encodeURIComponent(agentId)}`;
-    return this.#request(path);
+    return this.#request("/v1/suite/vault/ledger", { query: { limit, agent_id: agentId || null } });
   }
 
   /** Verify hash-chain integrity of the Vault ledger. */
   async verifyVaultChain({ limit = 100 } = {}) {
-    return this.#request(`/v1/suite/vault/verify?limit=${limit}`);
+    return this.#request("/v1/suite/vault/verify", { query: { limit } });
   }
 
   /** Create a Vault export job. */
@@ -362,7 +395,7 @@ export class VeriSwarmClient {
 
   /** Check the status of a Vault export job. */
   async getVaultExportStatus(jobId) {
-    return this.#request(`/v1/suite/vault/export/${encodeURIComponent(jobId)}`);
+    return this.#request(apiPath`/v1/suite/vault/export/${jobId}`);
   }
 
   // --- Notifications ---
@@ -374,7 +407,7 @@ export class VeriSwarmClient {
 
   /** Mark a single notification as read. */
   async markNotificationRead(notificationId) {
-    return this.#request(`/v1/suite/notifications/${encodeURIComponent(notificationId)}/read`, { method: "POST" });
+    return this.#request(apiPath`/v1/suite/notifications/${notificationId}/read`, { method: "POST" });
   }
 
   /** Mark all notifications as read. */
@@ -430,7 +463,7 @@ export class VeriSwarmClient {
 
   /** Remove a team member from the workspace. */
   async removeTeamMember(userId) {
-    return this.#request(`/v1/public/providers/team/${encodeURIComponent(userId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/public/providers/team/${userId}`, { method: "DELETE" });
   }
 
   // --- Workspaces ---
@@ -442,21 +475,21 @@ export class VeriSwarmClient {
 
   /** Switch the user's active workspace. */
   async switchWorkspace(tenantId) {
-    return this.#request(`/v1/public/accounts/workspaces/${encodeURIComponent(tenantId)}/switch`, { method: "POST" });
+    return this.#request(apiPath`/v1/public/accounts/workspaces/${tenantId}/switch`, { method: "POST" });
   }
 
   // --- Reputation Lookup ---
 
   /** Look up an agent's shared reputation by slug. */
   async reputationLookup(slug) {
-    return this.#request(`/v1/public/reputation/lookup?slug=${encodeURIComponent(slug)}`);
+    return this.#request("/v1/public/reputation/lookup", { query: { slug } });
   }
 
   // --- Trust Badges ---
 
   /** Get the URL for an agent's embeddable trust badge SVG. */
   getBadgeUrl(agentSlug, { style = "compact", theme = "dark" } = {}) {
-    return `${this.baseUrl}/v1/badge/${agentSlug}.svg?style=${style}&theme=${theme}`;
+    return `${this.baseUrl}${withQuery(apiPath`/v1/badge/${agentSlug}.svg`, { style, theme })}`;
   }
 
   // --- Platform Status ---
@@ -470,13 +503,12 @@ export class VeriSwarmClient {
 
   /** List all workflows for the current tenant. */
   async listWorkflows({ isActive = null } = {}) {
-    const params = isActive != null ? `?is_active=${isActive}` : "";
-    return this.#request(`/v1/workflows${params}`);
+    return this.#request("/v1/workflows", { query: { is_active: isActive } });
   }
 
   /** Get a workflow's details and recent executions. */
   async getWorkflow(workflowId) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}`);
+    return this.#request(apiPath`/v1/workflows/${workflowId}`);
   }
 
   /** Create a new workflow from a definition object. */
@@ -489,7 +521,7 @@ export class VeriSwarmClient {
 
   /** Update a workflow's name, description, or definition. */
   async updateWorkflow(workflowId, updates) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}`, {
+    return this.#request(apiPath`/v1/workflows/${workflowId}`, {
       method: "PUT",
       body: updates,
     });
@@ -497,22 +529,22 @@ export class VeriSwarmClient {
 
   /** Delete a workflow. */
   async deleteWorkflow(workflowId) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/workflows/${workflowId}`, { method: "DELETE" });
   }
 
   /** Activate a workflow's triggers. */
   async activateWorkflow(workflowId) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}/activate`, { method: "POST" });
+    return this.#request(apiPath`/v1/workflows/${workflowId}/activate`, { method: "POST" });
   }
 
   /** Deactivate a workflow's triggers. */
   async deactivateWorkflow(workflowId) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}/deactivate`, { method: "POST" });
+    return this.#request(apiPath`/v1/workflows/${workflowId}/deactivate`, { method: "POST" });
   }
 
   /** Manually trigger a workflow execution. */
   async runWorkflow(workflowId, { inputs = {} } = {}) {
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}/run`, {
+    return this.#request(apiPath`/v1/workflows/${workflowId}/run`, {
       method: "POST",
       body: { inputs },
     });
@@ -520,30 +552,29 @@ export class VeriSwarmClient {
 
   /** Get execution details including step-by-step results. */
   async getExecution(executionId) {
-    return this.#request(`/v1/workflows/executions/${encodeURIComponent(executionId)}`);
+    return this.#request(apiPath`/v1/workflows/executions/${executionId}`);
   }
 
   /** List executions for a workflow. */
   async listExecutions(workflowId, { status = null } = {}) {
-    const params = status ? `?status=${status}` : "";
-    return this.#request(`/v1/workflows/${encodeURIComponent(workflowId)}/executions${params}`);
+    return this.#request(apiPath`/v1/workflows/${workflowId}/executions`, { query: { status: status || null } });
   }
 
   /** Cancel a running execution. */
   async cancelExecution(executionId) {
-    return this.#request(`/v1/workflows/executions/${encodeURIComponent(executionId)}/cancel`, { method: "POST" });
+    return this.#request(apiPath`/v1/workflows/executions/${executionId}/cancel`, { method: "POST" });
   }
 
   /** Retry a failed execution. */
   async retryExecution(executionId) {
-    return this.#request(`/v1/workflows/executions/${encodeURIComponent(executionId)}/retry`, { method: "POST" });
+    return this.#request(apiPath`/v1/workflows/executions/${executionId}/retry`, { method: "POST" });
   }
 
   /** Approve, reject, or edit a human review step. */
   async approveStep(executionId, stepId, { action = "approve", editedOutput = null } = {}) {
     const body = { action };
     if (editedOutput) body.edited_output = editedOutput;
-    return this.#request(`/v1/workflows/executions/${encodeURIComponent(executionId)}/steps/${encodeURIComponent(stepId)}/approve`, {
+    return this.#request(apiPath`/v1/workflows/executions/${executionId}/steps/${stepId}/approve`, {
       method: "POST",
       body,
     });
@@ -556,7 +587,7 @@ export class VeriSwarmClient {
 
   /** Deploy a workflow template as a new workflow. */
   async deployTemplate(templateId) {
-    return this.#request(`/v1/workflows/templates/${encodeURIComponent(templateId)}/deploy`, { method: "POST" });
+    return this.#request(apiPath`/v1/workflows/templates/${templateId}/deploy`, { method: "POST" });
   }
 
   // --- Compliance ---
@@ -576,7 +607,7 @@ export class VeriSwarmClient {
    * @param {string} frameworkId - 'eu-ai-act' | 'nist-ai-rmf' | 'iso-42001'
    */
   async getComplianceReport(frameworkId) {
-    return this.#request(`/v1/compliance/${encodeURIComponent(frameworkId)}`);
+    return this.#request(apiPath`/v1/compliance/${frameworkId}`);
   }
 
   // --- Cedar Policies ---
@@ -596,7 +627,7 @@ export class VeriSwarmClient {
 
   /** Get a Cedar policy by id (includes full policy text). */
   async getCedarPolicy(policyId) {
-    return this.#request(`/v1/policies/${encodeURIComponent(policyId)}`);
+    return this.#request(apiPath`/v1/policies/${policyId}`);
   }
 
   /** Update a Cedar policy. Increments version if policy_text changes. */
@@ -606,12 +637,12 @@ export class VeriSwarmClient {
     if (description !== undefined) body.description = description;
     if (policyText !== undefined) body.policy_text = policyText;
     if (isActive !== undefined) body.is_active = isActive;
-    return this.#request(`/v1/policies/${encodeURIComponent(policyId)}`, { method: "PUT", body });
+    return this.#request(apiPath`/v1/policies/${policyId}`, { method: "PUT", body });
   }
 
   /** Soft-delete a Cedar policy. */
   async deleteCedarPolicy(policyId) {
-    return this.#request(`/v1/policies/${encodeURIComponent(policyId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/policies/${policyId}`, { method: "DELETE" });
   }
 
   /** Validate Cedar policy syntax without persisting. */
@@ -658,7 +689,7 @@ export class VeriSwarmClient {
 
   /** Manually reset a circuit breaker to closed state. */
   async resetCircuitBreaker(provider, model) {
-    return this.#request(`/v1/analytics/sre/circuit-breakers/${encodeURIComponent(provider)}/${encodeURIComponent(model)}/reset`, {
+    return this.#request(apiPath`/v1/analytics/sre/circuit-breakers/${provider}/${model}/reset`, {
       method: "POST",
     });
   }
@@ -692,12 +723,12 @@ export class VeriSwarmClient {
 
   /** Combined context governance dashboard — topics + quality + gaps. */
   async getContextDashboard({ days = 30 } = {}) {
-    return this.#request(`/v1/analytics/context/dashboard?days=${days}`);
+    return this.#request("/v1/analytics/context/dashboard", { query: { days } });
   }
 
   /** Event topic distribution and trending categories. */
   async getContextTopics({ days = 30, limit = 20 } = {}) {
-    return this.#request(`/v1/analytics/context/topics?days=${days}&limit=${limit}`);
+    return this.#request("/v1/analytics/context/topics", { query: { days, limit } });
   }
 
   /** Knowledge base coverage, event health, per-agent breakdown. */
@@ -707,7 +738,7 @@ export class VeriSwarmClient {
 
   /** Detect agents with high failure rates and low knowledge base coverage. */
   async getContextGaps({ days = 30 } = {}) {
-    return this.#request(`/v1/analytics/context/gaps?days=${days}`);
+    return this.#request("/v1/analytics/context/gaps", { query: { days } });
   }
 
   // --- Guard Extensions: MCP Scanner + Cross-Model Verification ---
@@ -805,21 +836,19 @@ export class VeriSwarmClient {
    * @param {number}  [opts.limit=100]
    */
   async listApprovals({ state = "pending", agentId = null, limit = 100 } = {}) {
-    const params = new URLSearchParams({ state, limit: String(limit) });
-    if (agentId !== null) params.set("agent_id", agentId);
-    return this.#request(`/v1/approvals?${params.toString()}`);
+    return this.#request("/v1/approvals", { query: { state, limit, agent_id: agentId } });
   }
 
   /** Get a single approval request. */
   async getApproval(approvalId) {
-    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}`);
+    return this.#request(apiPath`/v1/approvals/${approvalId}`);
   }
 
   /** Approve a pending approval request. Requires account session token (operator role). */
   async approveApproval(approvalId, { reason = null } = {}) {
     const body = {};
     if (reason !== null) body.reason = reason;
-    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, {
+    return this.#request(apiPath`/v1/approvals/${approvalId}/approve`, {
       method: "POST",
       body,
     });
@@ -829,7 +858,7 @@ export class VeriSwarmClient {
   async rejectApproval(approvalId, { reason = null } = {}) {
     const body = {};
     if (reason !== null) body.reason = reason;
-    return this.#request(`/v1/approvals/${encodeURIComponent(approvalId)}/reject`, {
+    return this.#request(apiPath`/v1/approvals/${approvalId}/reject`, {
       method: "POST",
       body,
     });
@@ -844,7 +873,7 @@ export class VeriSwarmClient {
 
   /** Get an A2A agent card with the `x-veriswarm-trust` (and optional `x-veriswarm-transport`) extension. */
   async getA2aAgentCard(agentId) {
-    return this.#request(`/v1/a2a/${encodeURIComponent(agentId)}/card`);
+    return this.#request(apiPath`/v1/a2a/${agentId}/card`);
   }
 
   /**
@@ -859,7 +888,7 @@ export class VeriSwarmClient {
   async submitA2aTask(agentId, { requestingAgentId, messages, signature } = {}) {
     const body = { requesting_agent_id: requestingAgentId, messages };
     if (signature) body.signature = signature;
-    return this.#request(`/v1/a2a/${encodeURIComponent(agentId)}/tasks`, {
+    return this.#request(apiPath`/v1/a2a/${agentId}/tasks`, {
       method: "POST",
       body,
     });
@@ -868,14 +897,14 @@ export class VeriSwarmClient {
   /** Get status + result of an A2A task. */
   async getA2aTask(agentId, taskId) {
     return this.#request(
-      `/v1/a2a/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}`,
+      apiPath`/v1/a2a/${agentId}/tasks/${taskId}`,
     );
   }
 
   /** Cancel an in-flight A2A task. No-op if already terminated. */
   async cancelA2aTask(agentId, taskId) {
     return this.#request(
-      `/v1/a2a/${encodeURIComponent(agentId)}/tasks/${encodeURIComponent(taskId)}/cancel`,
+      apiPath`/v1/a2a/${agentId}/tasks/${taskId}/cancel`,
       { method: "POST" },
     );
   }
@@ -884,7 +913,7 @@ export class VeriSwarmClient {
 
   /** Provision Ed25519 transport keys for an agent. Returns the public key. */
   async provisionA2aKeys(agentId) {
-    return this.#request(`/v1/a2a/${encodeURIComponent(agentId)}/keys`, { method: "POST" });
+    return this.#request(apiPath`/v1/a2a/${agentId}/keys`, { method: "POST" });
   }
 
   // --- Content Provenance (EU AI Act Article 50) ---
@@ -903,7 +932,7 @@ export class VeriSwarmClient {
 
   /** Public lookup of a provenance manifest by SHA-256 content hash. */
   async getContentProvenance(contentHash) {
-    return this.#request(`/v1/content/provenance/${encodeURIComponent(contentHash)}`);
+    return this.#request(apiPath`/v1/content/provenance/${contentHash}`);
   }
 
   /**
@@ -923,7 +952,7 @@ export class VeriSwarmClient {
    * These flow into Cedar policies as principal.<key> at decision time.
    */
   async getAgentAttributes(agentId) {
-    return this.#request(`/v1/agents/${encodeURIComponent(agentId)}/attributes`);
+    return this.#request(apiPath`/v1/agents/${agentId}/attributes`);
   }
 
   /**
@@ -931,7 +960,7 @@ export class VeriSwarmClient {
    * (strings, ints, bools, or lists of those). Reserved keys are rejected.
    */
   async setAgentAttributes(agentId, attributes) {
-    return this.#request(`/v1/agents/${encodeURIComponent(agentId)}/attributes`, {
+    return this.#request(apiPath`/v1/agents/${agentId}/attributes`, {
       method: "PUT",
       body: { attributes },
     });
@@ -958,21 +987,21 @@ export class VeriSwarmClient {
 
   /** Approve a pending JIT grant (requires account session token). */
   async approveJitGrant(grantId) {
-    return this.#request(`/v1/passport/jit/${encodeURIComponent(grantId)}/approve`, { method: "POST" });
+    return this.#request(apiPath`/v1/passport/jit/${grantId}/approve`, { method: "POST" });
   }
 
   /** Deny a pending JIT grant. */
   async denyJitGrant(grantId, { reason = null } = {}) {
     const body = {};
     if (reason !== null) body.reason = reason;
-    return this.#request(`/v1/passport/jit/${encodeURIComponent(grantId)}/deny`, { method: "POST", body });
+    return this.#request(apiPath`/v1/passport/jit/${grantId}/deny`, { method: "POST", body });
   }
 
   /** Revoke an approved JIT grant immediately. */
   async revokeJitGrant(grantId, { reason = null } = {}) {
     const body = {};
     if (reason !== null) body.reason = reason;
-    return this.#request(`/v1/passport/jit/${encodeURIComponent(grantId)}/revoke`, { method: "POST", body });
+    return this.#request(apiPath`/v1/passport/jit/${grantId}/revoke`, { method: "POST", body });
   }
 
   /**
@@ -980,7 +1009,7 @@ export class VeriSwarmClient {
    * Only callable once per grant — subsequent calls fail.
    */
   async issueJitToken(grantId) {
-    return this.#request(`/v1/passport/jit/${encodeURIComponent(grantId)}/token`, { method: "POST" });
+    return this.#request(apiPath`/v1/passport/jit/${grantId}/token`, { method: "POST" });
   }
 
   /**
@@ -996,24 +1025,21 @@ export class VeriSwarmClient {
 
   /** List JIT grants for the tenant, optionally filtered by agent or status. */
   async listJitGrants({ agentId = null, status = null, limit = 50 } = {}) {
-    const params = [`limit=${limit}`];
-    if (agentId) params.push(`agent_id=${encodeURIComponent(agentId)}`);
-    if (status) params.push(`status=${status}`);
-    return this.#request(`/v1/passport/jit/grants?${params.join("&")}`);
+    return this.#request("/v1/passport/jit/grants", {
+      query: { limit, agent_id: agentId || null, status: status || null },
+    });
   }
 
   /** Get a single JIT grant by id. */
   async getJitGrant(grantId) {
-    return this.#request(`/v1/passport/jit/grants/${encodeURIComponent(grantId)}`);
+    return this.#request(apiPath`/v1/passport/jit/grants/${grantId}`);
   }
 
   // --- Governance: Anomalies, Discovery, Credential Vault, Compliance Scheduling, Reputation ---
 
   /** List behavioral anomalies detected for the tenant. */
   async listAnomalies({ agentId = null, limit = 50 } = {}) {
-    const params = [`limit=${limit}`];
-    if (agentId) params.push(`agent_id=${encodeURIComponent(agentId)}`);
-    return this.#request(`/v1/governance/anomalies?${params.join("&")}`);
+    return this.#request("/v1/governance/anomalies", { query: { limit, agent_id: agentId || null } });
   }
 
   /** Trigger a shadow-agent discovery scan. */
@@ -1023,15 +1049,12 @@ export class VeriSwarmClient {
 
   /** List discovered shadow agents, optionally filtered by status. */
   async listDiscoveredAgents({ status = null } = {}) {
-    const path = status
-      ? `/v1/governance/discovery?status=${encodeURIComponent(status)}`
-      : "/v1/governance/discovery";
-    return this.#request(path);
+    return this.#request("/v1/governance/discovery", { query: { status: status || null } });
   }
 
   /** Dismiss a discovered shadow agent. */
   async dismissDiscoveredAgent(discoveryId) {
-    return this.#request(`/v1/governance/discovery/${encodeURIComponent(discoveryId)}/dismiss`, { method: "POST" });
+    return this.#request(apiPath`/v1/governance/discovery/${discoveryId}/dismiss`, { method: "POST" });
   }
 
   /** Store an encrypted credential in the governance vault. */
@@ -1064,15 +1087,14 @@ export class VeriSwarmClient {
 
   /** Revoke a stored credential by id. */
   async revokeCredential(credentialId) {
-    return this.#request(`/v1/governance/credentials/${encodeURIComponent(credentialId)}`, { method: "DELETE" });
+    return this.#request(apiPath`/v1/governance/credentials/${credentialId}`, { method: "DELETE" });
   }
 
   /** Get credential checkout audit history. */
   async getCredentialCheckoutHistory({ credentialId = null, agentId = null, limit = 50 } = {}) {
-    const params = [`limit=${limit}`];
-    if (credentialId != null) params.push(`credential_id=${encodeURIComponent(credentialId)}`);
-    if (agentId) params.push(`agent_id=${encodeURIComponent(agentId)}`);
-    return this.#request(`/v1/governance/credentials/history?${params.join("&")}`);
+    return this.#request("/v1/governance/credentials/history", {
+      query: { limit, credential_id: credentialId, agent_id: agentId || null },
+    });
   }
 
   /** Get the scheduled compliance report delivery config. */
@@ -1095,17 +1117,18 @@ export class VeriSwarmClient {
 
   /** Issue a signed Reputation Passport (W3C VC) for an agent. */
   async issueReputationPassport(agentId) {
-    return this.#request(`/v1/governance/passport/${encodeURIComponent(agentId)}`, { method: "POST" });
+    return this.#request(apiPath`/v1/governance/passport/${agentId}`, { method: "POST" });
   }
 
   /** Get decay-weighted cross-provider reputation for an agent. */
   async getAgentReputation(agentId) {
-    return this.#request(`/v1/governance/reputation/${encodeURIComponent(agentId)}`);
+    return this.#request(apiPath`/v1/governance/reputation/${agentId}`);
   }
 
   // --- Internal ---
 
-  async #request(path, { method = "GET", body = null } = {}) {
+  async #request(path, { method = "GET", body = null, query = null } = {}) {
+    const pathWithQuery = withQuery(path, query);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -1122,7 +1145,7 @@ export class VeriSwarmClient {
       // to attacker host and steal the API key. Real APIs don't 302
       // their JSON endpoints; treating a redirect as an error is the
       // safe default. (Audit closure 2026-05-08 CRIT-D-8.)
-      const response = await fetch(`${this.baseUrl}${path}`, {
+      const response = await fetch(`${this.baseUrl}${pathWithQuery}`, {
         method,
         headers,
         body: body == null ? undefined : JSON.stringify(body),

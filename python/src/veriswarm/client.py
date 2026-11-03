@@ -13,11 +13,32 @@ from veriswarm.secret_tripwire import SecretTripwire, ensure_tripwire
 # Path-component encoder. quote(..., safe="") percent-encodes every
 # character that's not in the unreserved set (A-Za-z0-9-_.~), so a
 # value like "../admin" becomes "..%2Fadmin" and cannot escape the
-# intended path segment. Used at every f-string path-interpolation
-# call site. (Audit 2026-05-08 HIGH-SDK-1, HIGH-SDK-3, HIGH-SDK-4.)
+# intended path segment. "." and ".." survive quoting unchanged and are
+# resolved by URL normalization, so they are rejected outright, as are
+# empty/None ids. Used at every f-string path-interpolation call site.
 def _path(value: Any) -> str:
-    """Quote an ID for safe use as a URL path component."""
-    return _q(str(value), safe="")
+    """Quote an ID for safe use as a single URL path segment."""
+    if value is None:
+        raise ValueError("path segment must not be None")
+    segment = str(value)
+    if segment in ("", ".", ".."):
+        raise ValueError(f'path segment must not be empty, "." or ".." (got {segment!r})')
+    return _q(segment, safe="")
+
+
+def _with_query(path: str, query: dict[str, Any] | None) -> str:
+    """Append ``query`` to ``path``, encoding every value and skipping ``None``."""
+    if not query:
+        return path
+    pairs = [(key, _query_value(value)) for key, value in query.items() if value is not None]
+    return f"{path}?{_qs(pairs)}" if pairs else path
+
+
+def _query_value(value: Any) -> str:
+    # Match the Node SDK / server expectations for booleans.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 class _StripAuthRedirectHandler(HTTPRedirectHandler):
@@ -166,7 +187,7 @@ class VeriSwarmClient:
 
     def get_agent_score_history(self, agent_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         """Get an agent's score history (last N snapshots)."""
-        return self._request(f"/v1/public/agents/{_path(agent_id)}/scores/history?limit={limit}")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/scores/history", query={"limit": limit})
 
     def get_agent_score_breakdown(self, agent_id: str) -> dict[str, Any]:
         """Get detailed score breakdown with contributing factors."""
@@ -302,7 +323,7 @@ class VeriSwarmClient:
 
     def get_agent_timeline(self, agent_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Get an agent's event timeline."""
-        return self._get(f"/v1/public/agents/{_path(agent_id)}/timeline?limit={limit}")
+        return self._get(f"/v1/public/agents/{_path(agent_id)}/timeline", query={"limit": limit})
 
     # --- Agent API Keys ---
 
@@ -360,10 +381,7 @@ class VeriSwarmClient:
 
     def list_guard_findings(self, *, agent_id: str | None = None) -> list[dict[str, Any]]:
         """List Guard security findings, optionally filtered by agent."""
-        path = "/v1/suite/guard/findings"
-        if agent_id:
-            path += f"?agent_id={_path(agent_id)}"
-        return self._get(path)
+        return self._get("/v1/suite/guard/findings", query={"agent_id": agent_id or None})
 
     def update_guard_finding(self, finding_id: int, updates: dict[str, Any]) -> dict[str, Any]:
         """Update a Guard finding (e.g. resolve, dismiss)."""
@@ -403,14 +421,13 @@ class VeriSwarmClient:
 
     def query_vault_ledger(self, *, agent_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         """Query the immutable Vault audit ledger."""
-        path = f"/v1/suite/vault/ledger?limit={limit}"
-        if agent_id:
-            path += f"&agent_id={_path(agent_id)}"
-        return self._get(path)
+        return self._get(
+            "/v1/suite/vault/ledger", query={"limit": limit, "agent_id": agent_id or None}
+        )
 
     def verify_vault_chain(self, *, limit: int = 100) -> dict[str, Any]:
         """Verify hash-chain integrity of the Vault ledger."""
-        return self._get(f"/v1/suite/vault/verify?limit={limit}")
+        return self._get("/v1/suite/vault/verify", query={"limit": limit})
 
     def export_vault(self, *, export_type: str = "json") -> dict[str, Any]:
         """Create a Vault export job."""
@@ -490,7 +507,7 @@ class VeriSwarmClient:
 
     def reputation_lookup(self, *, slug: str) -> dict[str, Any]:
         """Look up an agent's shared reputation by slug."""
-        return self._get(f"/v1/public/reputation/lookup?slug={_path(slug)}")
+        return self._get("/v1/public/reputation/lookup", query={"slug": slug})
 
     # --- Badges ---
 
@@ -501,16 +518,14 @@ class VeriSwarmClient:
         theme: str = "dark",
     ) -> str:
         """Get the URL for an agent's embeddable trust badge."""
-        return f"{self.base_url}/v1/badge/{agent_slug}.svg?style={style}&theme={theme}"
+        path = _with_query(f"/v1/badge/{_path(agent_slug)}.svg", {"style": style, "theme": theme})
+        return f"{self.base_url}{path}"
 
     # --- Cortex Workflows ---
 
     def list_workflows(self, *, is_active: bool | None = None) -> dict[str, Any]:
         """List all Cortex Workflows for the current tenant."""
-        params = ""
-        if is_active is not None:
-            params = f"?is_active={'true' if is_active else 'false'}"
-        return self._get(f"/v1/workflows{params}")
+        return self._get("/v1/workflows", query={"is_active": is_active})
 
     def get_workflow(self, workflow_id: str) -> dict[str, Any]:
         """Get a workflow's details and recent executions."""
@@ -582,10 +597,9 @@ class VeriSwarmClient:
         status: str | None = None,
     ) -> dict[str, Any]:
         """List executions for a workflow."""
-        params = ""
-        if status:
-            params = f"?status={status}"
-        return self._get(f"/v1/workflows/{_path(workflow_id)}/executions{params}")
+        return self._get(
+            f"/v1/workflows/{_path(workflow_id)}/executions", query={"status": status or None}
+        )
 
     def cancel_execution(self, execution_id: str) -> dict[str, Any]:
         """Cancel a running execution."""
@@ -608,7 +622,7 @@ class VeriSwarmClient:
         if edited_output:
             body["edited_output"] = edited_output
         return self._post(
-            f"/v1/workflows/executions/{_path(execution_id)}/steps/{step_id}/approve",
+            f"/v1/workflows/executions/{_path(execution_id)}/steps/{_path(step_id)}/approve",
             body=body,
         )
 
@@ -729,7 +743,9 @@ class VeriSwarmClient:
 
     def reset_circuit_breaker(self, provider: str, model: str) -> dict[str, Any]:
         """Manually reset a circuit breaker to closed state."""
-        return self._post(f"/v1/analytics/sre/circuit-breakers/{provider}/{model}/reset")
+        return self._post(
+            f"/v1/analytics/sre/circuit-breakers/{_path(provider)}/{_path(model)}/reset"
+        )
 
     def get_error_budget(self) -> dict[str, Any]:
         """Get error budget status based on SLO targets and recent LLM usage."""
@@ -763,11 +779,11 @@ class VeriSwarmClient:
 
     def get_context_dashboard(self, *, days: int = 30) -> dict[str, Any]:
         """Combined context governance dashboard — topics + quality + gaps."""
-        return self._get(f"/v1/analytics/context/dashboard?days={days}")
+        return self._get("/v1/analytics/context/dashboard", query={"days": days})
 
     def get_context_topics(self, *, days: int = 30, limit: int = 20) -> dict[str, Any]:
         """Event topic distribution and trending categories."""
-        return self._get(f"/v1/analytics/context/topics?days={days}&limit={limit}")
+        return self._get("/v1/analytics/context/topics", query={"days": days, "limit": limit})
 
     def get_context_quality(self) -> dict[str, Any]:
         """Knowledge base coverage, event health, per-agent breakdown."""
@@ -775,7 +791,7 @@ class VeriSwarmClient:
 
     def get_context_gaps(self, *, days: int = 30) -> dict[str, Any]:
         """Detect agents with high failure rates and low knowledge base coverage."""
-        return self._get(f"/v1/analytics/context/gaps?days={days}")
+        return self._get("/v1/analytics/context/gaps", query={"days": days})
 
     # --- Guard Extensions: MCP Scanner + Cross-Model Verification ---
 
@@ -887,11 +903,9 @@ class VeriSwarmClient:
 
         state: one of "pending", "approved", "rejected", "expired", "all".
         """
-        from urllib.parse import urlencode
-        params: dict[str, Any] = {"state": state, "limit": limit}
-        if agent_id is not None:
-            params["agent_id"] = agent_id
-        return self._get(f"/v1/approvals?{urlencode(params)}")
+        return self._get(
+            "/v1/approvals", query={"state": state, "limit": limit, "agent_id": agent_id}
+        )
 
     def get_approval(self, approval_id: str) -> dict[str, Any]:
         """Get a single approval request."""
@@ -1018,7 +1032,7 @@ class VeriSwarmClient:
         No authentication required on the server side — third parties can
         verify AI-generated content labels without a VeriSwarm account.
         """
-        return self._get(f"/v1/content/provenance/{content_hash}")
+        return self._get(f"/v1/content/provenance/{_path(content_hash)}")
 
     def verify_content(
         self,
@@ -1146,12 +1160,10 @@ class VeriSwarmClient:
         limit: int = 50,
     ) -> dict[str, Any]:
         """List JIT grants for the tenant, optionally filtered by agent or status."""
-        params = [f"limit={limit}"]
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        if status:
-            params.append(f"status={status}")
-        return self._get(f"/v1/passport/jit/grants?{'&'.join(params)}")
+        return self._get(
+            "/v1/passport/jit/grants",
+            query={"limit": limit, "agent_id": agent_id or None, "status": status or None},
+        )
 
     def get_jit_grant(self, grant_id: str) -> dict[str, Any]:
         """Get a single JIT grant by id."""
@@ -1161,10 +1173,9 @@ class VeriSwarmClient:
 
     def list_anomalies(self, *, agent_id: str | None = None, limit: int = 50) -> dict[str, Any]:
         """List behavioral anomalies detected for the tenant."""
-        params = [f"limit={limit}"]
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        return self._get(f"/v1/governance/anomalies?{'&'.join(params)}")
+        return self._get(
+            "/v1/governance/anomalies", query={"limit": limit, "agent_id": agent_id or None}
+        )
 
     def run_shadow_discovery(self) -> dict[str, Any]:
         """Trigger a shadow-agent discovery scan."""
@@ -1172,10 +1183,7 @@ class VeriSwarmClient:
 
     def list_discovered_agents(self, *, status: str | None = None) -> dict[str, Any]:
         """List discovered shadow agents, optionally filtered by status."""
-        path = "/v1/governance/discovery"
-        if status:
-            path += f"?status={status}"
-        return self._get(path)
+        return self._get("/v1/governance/discovery", query={"status": status or None})
 
     def dismiss_discovered_agent(self, discovery_id: int) -> dict[str, Any]:
         """Dismiss a discovered shadow agent."""
@@ -1227,12 +1235,10 @@ class VeriSwarmClient:
         limit: int = 50,
     ) -> dict[str, Any]:
         """Get credential checkout audit history."""
-        params = [f"limit={limit}"]
-        if credential_id is not None:
-            params.append(f"credential_id={_path(credential_id)}")
-        if agent_id:
-            params.append(f"agent_id={_path(agent_id)}")
-        return self._get(f"/v1/governance/credentials/history?{'&'.join(params)}")
+        return self._get(
+            "/v1/governance/credentials/history",
+            query={"limit": limit, "credential_id": credential_id, "agent_id": agent_id or None},
+        )
 
     def get_compliance_schedule(self) -> dict[str, Any]:
         """Get the scheduled compliance report delivery config."""
@@ -1265,18 +1271,25 @@ class VeriSwarmClient:
 
     # --- Internal ---
 
-    def _get(self, path: str) -> Any:
+    def _get(self, path: str, *, query: dict[str, Any] | None = None) -> Any:
         """Convenience wrapper for GET requests."""
-        return self._request(path, method="GET")
+        return self._request(path, method="GET", query=query)
 
     def _post(self, path: str, body: Any = None) -> Any:
         """Convenience wrapper for POST requests."""
         return self._request(path, method="POST", body=body)
 
-    def _request(self, path: str, *, method: str = "GET", body: Any = None) -> Any:
+    def _request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: Any = None,
+        query: dict[str, Any] | None = None,
+    ) -> Any:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
         request = Request(
-            f"{self.base_url}{path}",
+            f"{self.base_url}{_with_query(path, query)}",
             data=encoded,
             method=method,
             headers={
