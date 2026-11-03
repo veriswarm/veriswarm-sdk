@@ -119,3 +119,22 @@ def test_package_main_exists_and_lists_every_schema():
 
 def test_agent_profile_schema_is_valid():
     validator("agent_profile.schema.json")
+
+
+# ── shared fixtures (same layout scripts/validate_schemas.py checks in CI) ──
+def _fixture_cases():
+    cases = []
+    for schema in sorted(ROOT.glob("*.json")):
+        if schema.name == "package.json":
+            continue
+        stem = schema.name.removesuffix(".schema.json").removesuffix(".json")
+        for kind in ("valid", "invalid"):
+            for f in sorted((ROOT / "fixtures" / stem / kind).glob("*.json")):
+                cases.append((schema.name, f, kind == "valid"))
+    return cases
+
+
+@pytest.mark.parametrize("schema_name,path,should_pass", _fixture_cases(), ids=lambda v: getattr(v, "name", str(v)))
+def test_fixtures(schema_name, path, should_pass):
+    errors = list(validator(schema_name).iter_errors(json.loads(path.read_text())))
+    assert (errors == []) is should_pass
