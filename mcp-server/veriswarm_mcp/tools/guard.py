@@ -61,7 +61,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def kill_agent(agent_id: str, reason: str) -> str:
         """Activate the kill switch for an agent, immediately blocking all trust decisions.
 
-        Requires session auth (x-account-access-token). Not available with API key only.
+        Works with an API key that a workspace owner or admin has granted the
+        guard.killswitch.write scope (requires server support for that scope),
+        or with an account session (x-account-access-token).
 
         agent_id: the agent to kill-switch
         reason: human-readable reason for the kill switch activation
@@ -81,7 +83,9 @@ def register(server: FastMCP, client: VeriSwarmAPIClient) -> None:
     async def unkill_agent(agent_id: str) -> str:
         """Deactivate the kill switch for an agent, restoring normal trust decision processing.
 
-        Requires session auth (x-account-access-token). Not available with API key only."""
+        Works with an API key that a workspace owner or admin has granted the
+        guard.killswitch.write scope (requires server support for that scope),
+        or with an account session (x-account-access-token)."""
         try:
             agent_id = safe_id(agent_id, "agent_id")
             result = await call_api(client.post, f"/v1/suite/guard/unkill/{agent_id}")
