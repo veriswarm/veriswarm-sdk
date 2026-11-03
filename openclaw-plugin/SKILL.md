@@ -21,7 +21,7 @@ Protect your OpenClaw agent with VeriSwarm's full trust and security suite.
 
 **Automatic (transparent, no agent action needed):**
 - Strips PII (names, emails, phones, SSNs, addresses, credit cards) from messages before they reach the LLM
-- Strips PII from tool outputs before the agent sees them
+- Tokenizes PII in tool-call parameters before the tool runs
 - Scans tool outputs for prompt injection attempts
 - Enforces tool allowlists and blocklists
 - Logs every action to VeriSwarm's tamper-proof audit ledger
@@ -44,7 +44,7 @@ Protect your OpenClaw agent with VeriSwarm's full trust and security suite.
    ```bash
    openclaw plugins install veriswarm
    ```
-4. Guard is now active. PII is automatically stripped from all messages and tool I/O.
+4. Guard is now active. PII is automatically tokenized in outbound messages and tool-call parameters.
 
 ## Configuration
 
@@ -74,7 +74,7 @@ In your OpenClaw config:
 ## Rehydrating PII
 
 When the agent needs to write tokenized data back to a real system:
-1. Tool output arrives with tokens: "Customer [VS:PERSON:a1b2c3] at [VS:EMAIL:d4e5f6]"
+1. Data the agent handles carries tokens: "Customer [VS:PERSON:a1b2c3] at [VS:EMAIL:d4e5f6]"
 2. Agent processes data (LLM never sees real PII)
 3. Agent calls `veriswarm_rehydrate` to restore real values for the write
 4. Every rehydration is logged for audit compliance

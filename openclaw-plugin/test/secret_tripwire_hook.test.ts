@@ -1,19 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { pluginEntry } from "../src/index.js";
 
-// Captures the hooks the plugin registers so we can drive them directly.
+// Captures the hooks the plugin registers so we can drive them with the
+// host's real before_tool_call shapes: event { toolName, params },
+// ctx { sessionKey, toolName }; result { params } or { block, blockReason }.
 function makeApi() {
-  const hooks: Record<string, (e: any) => Promise<any>> = {};
+  const hooks: Record<string, (e: any, ctx?: any) => Promise<any>> = {};
   const api = {
     registerTool: () => {},
-    registerHook: () => {},
-    on: (name: string, handler: (e: any) => Promise<any>) => {
+    on: (name: string, handler: (e: any, ctx?: any) => Promise<any>) => {
       hooks[name] = handler;
     },
-    registerHttpRoute: () => {},
-    registerService: () => {},
   };
   return { api, hooks };
+}
+
+function callTool(hooks: Record<string, (e: any, ctx?: any) => Promise<any>>, toolName: string, params: any) {
+  return hooks["before_tool_call"]({ toolName, params }, { toolName, sessionKey: "session-1" });
 }
 
 const GH_PAT = "ghp_" + "A".repeat(36);
@@ -46,57 +49,65 @@ describe("before_tool_call secret tripwire", () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const res = await hooks["before_tool_call"]({
-      name: "http_post",
-      input: `token=${GH_PAT}`,
-    });
+    const res = await callTool(hooks, "http_post", { body: `token=${GH_PAT}` });
 
-    expect(res.input).toContain("[VS:");
-    expect(res.input).toContain(":offline]");
-    expect(res.input).not.toContain(GH_PAT);
+    expect(res.params.body).toContain("[VS:");
+    expect(res.params.body).toContain(":offline]");
+    expect(res.params.body).not.toContain(GH_PAT);
   });
 
   it("fails closed for secrets nested in structured tool input", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const res = await hooks["before_tool_call"]({
-      name: "http_post",
-      input: {
-        url: "https://example.test",
-        headers: {
-          Authorization: `Bearer ${GH_PAT}`,
-        },
+    const params = {
+      url: "https://example.test",
+      headers: {
+        Authorization: `Bearer ${GH_PAT}`,
       },
-    });
+      tags: ["x", `t=${GH_PAT}`],
+    };
+    const res = await callTool(hooks, "http_post", params);
 
-    expect(res.input.headers.Authorization).toContain("[VS:");
-    expect(res.input.headers.Authorization).toContain(":offline]");
-    expect(JSON.stringify(res.input)).not.toContain(GH_PAT);
+    expect(res.params.url).toBe("https://example.test");
+    expect(res.params.headers.Authorization).toContain("[VS:");
+    expect(res.params.headers.Authorization).toContain(":offline]");
+    expect(JSON.stringify(res.params)).not.toContain(GH_PAT);
+    // The host's params object is not mutated.
+    expect(params.headers.Authorization).toContain(GH_PAT);
   });
 
   it("passes clean input through untouched", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, BASE_CONFIG);
 
-    const res = await hooks["before_tool_call"]({
-      name: "http_post",
-      input: "just a normal message with no secrets",
-    });
+    const res = await callTool(hooks, "http_post", { body: "just a normal message with no secrets" });
 
-    expect(res).toEqual({});
+    expect(res).toBeUndefined();
   });
 
   it("does nothing when secretsDetection is off", async () => {
     const { api, hooks } = makeApi();
     pluginEntry.register(api as any, { ...BASE_CONFIG, secretsDetection: false });
 
-    const res = await hooks["before_tool_call"]({
-      name: "http_post",
-      input: `token=${GH_PAT}`,
-    });
+    const res = await callTool(hooks, "http_post", { body: `token=${GH_PAT}` });
 
-    // Tripwire disabled and PII disabled → input untouched.
-    expect(res).toEqual({});
+    // Tripwire disabled and PII disabled → params untouched.
+    expect(res).toBeUndefined();
+  });
+});
+
+describe("before_tool_call secret tripwire — unnamed tool", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("still redacts when the host omits toolName and no policy list is set", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { api, hooks } = makeApi();
+    pluginEntry.register(api as any, BASE_CONFIG);
+
+    const res = await hooks["before_tool_call"]({ params: { body: `token=${GH_PAT}` } }, {});
+
+    expect(res.params.body).not.toContain(GH_PAT);
   });
 });

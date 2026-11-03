@@ -3,12 +3,13 @@
  *
  * Complete VeriSwarm suite integration for OpenClaw agents:
  *
- * GUARD (automatic, transparent):
- *   - PII tokenization on outbound LLM messages (names, emails, phones, SSNs, addresses, cards)
- *   - PII tokenization on inbound tool results before agent sees them
- *   - Prompt injection scanning on tool outputs
- *   - Policy enforcement on tool calls (allowlist/blocklist)
- *   - Audit logging of all tool calls to VeriSwarm Vault
+ * GUARD (automatic, transparent — OpenClaw plugin hooks):
+ *   - before_tool_call: policy enforcement (allowlist/blocklist), secret
+ *     tripwire, PII tokenization of tool-call params
+ *   - tool_result_persist: prompt-injection banner on tool results
+ *   - after_tool_call: audit logging of tool calls to VeriSwarm Vault
+ *   - message_sending: Session Sentry (cancels delivery on block) and PII
+ *     tokenization of outbound messages
  *
  * GATE (tools the agent can call):
  *   - check_trust: Get current trust scores
@@ -79,11 +80,117 @@ function scanForInjection(text: string): string[] {
 // Build the per-session PII map key from the conversation context.
 // Keying by tool name alone collides across concurrent agent
 // conversations using the same tool — leaking PII tokens *across
-// user sessions* in shared deployments. Pass conversationId from
-// the OpenClaw event context. (Audit 2026-05-08 HIGH-SDK-13.)
+// user sessions* in shared deployments. (Audit 2026-05-08 HIGH-SDK-13.)
 function piiSessionKey(toolName: string, conversationId?: string | null): string {
   const conv = conversationId || "_no_conv";
   return `${conv}:${toolName}`;
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+// Conversation identity. The host passes it on the hook's second argument
+// (`ctx.sessionKey` / `ctx.sessionId`; message hooks also carry
+// `ctx.conversationId`). Event fields are only a fallback for older hosts.
+// sessionKey comes first because it is the one field present on tool hooks,
+// message hooks and tool factories alike, so all of them agree on the key.
+function resolveConversationId(ctx: any, event?: any): string | undefined {
+  return firstNonEmptyString(
+    ctx?.sessionKey,
+    ctx?.sessionId,
+    ctx?.conversationId,
+    event?.sessionKey,
+    event?.conversation_id,
+    event?.conversationId,
+    event?.session_id
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Insert into a size-capped Map. Re-setting a key moves it to the end, so the
+// least-recently-written entry is the one evicted once the cap is reached.
+function setBounded<K, V>(map: Map<K, V>, key: K, value: V, cap: number): void {
+  map.delete(key);
+  if (map.size >= cap) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
+// Rebuild `value` with every string leaf passed through `fn`. Containers are
+// copied only when a leaf changed; the input is never mutated.
+async function mapStringLeaves(
+  value: unknown,
+  fn: (text: string) => Promise<string>,
+  seen = new WeakSet<object>()
+): Promise<{ value: unknown; changed: boolean }> {
+  if (typeof value === "string") {
+    const next = await fn(value);
+    return { value: next, changed: next !== value };
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) {
+    return { value, changed: false };
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const next = [...value];
+    let changed = false;
+    for (let i = 0; i < value.length; i++) {
+      const child = await mapStringLeaves(value[i], fn, seen);
+      if (child.changed) {
+        next[i] = child.value;
+        changed = true;
+      }
+    }
+    return changed ? { value: next, changed } : { value, changed };
+  }
+  const record = value as Record<string, unknown>;
+  const next: Record<string, unknown> = { ...record };
+  let changed = false;
+  for (const [key, child] of Object.entries(record)) {
+    const mapped = await mapStringLeaves(child, fn, seen);
+    if (mapped.changed) {
+      next[key] = mapped.value;
+      changed = true;
+    }
+  }
+  return changed ? { value: next, changed } : { value, changed };
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return String(value);
+  }
+}
+
+// Text the model will see from a tool result: string results as-is, text
+// blocks of host-format results (`{content:[{type:"text",text}]}`), and any
+// other structured value serialized so it is still scanned and measured.
+function serializeToolOutput(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) {
+    return value
+      .map((block) => {
+        if (isRecord(block) && block.type === "text") return String(block.text ?? "");
+        if (isRecord(block) && block.type === "image") return "";
+        return serializeToolOutput(block);
+      })
+      .filter((text) => text.length > 0)
+      .join("\n");
+  }
+  if (isRecord(value) && "content" in value) return serializeToolOutput(value.content);
+  return typeof value === "object" ? safeStringify(value) : String(value);
 }
 
 type SecretGuardMode = "online" | "offline";
@@ -95,97 +202,73 @@ interface SecretGuardOutcome {
   modes: Set<SecretGuardMode>;
 }
 
-function emptySecretGuardOutcome(value: unknown): SecretGuardOutcome {
-  return {
-    value,
-    changed: false,
-    rules: new Set<string>(),
-    modes: new Set<SecretGuardMode>(),
-  };
-}
-
-function mergeSecretGuardOutcome(
-  target: SecretGuardOutcome,
-  child: SecretGuardOutcome
-): void {
-  target.changed ||= child.changed;
-  for (const rule of child.rules) target.rules.add(rule);
-  for (const mode of child.modes) target.modes.add(mode);
-}
-
 async function guardSecretInput(
   input: unknown,
   state: PluginState,
   toolName: string,
-  piiKey: string,
-  seen = new WeakSet<object>()
+  piiKey: string
 ): Promise<SecretGuardOutcome> {
-  if (!state.client || !state.tripwire) return emptySecretGuardOutcome(input);
+  const rules = new Set<string>();
+  const modes = new Set<SecretGuardMode>();
+  const client = state.client;
+  const tripwire = state.tripwire;
+  if (!client || !tripwire) return { value: input, changed: false, rules, modes };
 
-  if (typeof input === "string") {
-    const hits = state.tripwire.scan(input);
-    if (hits.length === 0) return emptySecretGuardOutcome(input);
-
+  const mapped = await mapStringLeaves(input, async (text) => {
+    const hits = tripwire.scan(text);
+    if (hits.length === 0) return text;
+    for (const hit of hits) rules.add(hit.ruleName);
     try {
-      const result = await state.client.tokenizePii(input);
-      let guarded =
-        result.tokens_created > 0 ? result.tokenized_text || input : input;
+      const result = await client.tokenizePii(text, state.piiSessions.get(piiKey));
+      let guarded = result.tokens_created > 0 ? result.tokenized_text || text : text;
       if (result.tokens_created > 0 && result.session_id) {
-        state.piiSessions.set(piiKey, result.session_id);
+        setBounded(state.piiSessions, piiKey, result.session_id, MAX_PII_SESSIONS);
       }
       // The PII tokenizer is not a secret detector; fail closed if a
       // provider-prefix span remains, or if tokenized_text was omitted.
-      if (state.tripwire.scan(guarded).length > 0) {
-        guarded = state.tripwire.redactOffline(guarded);
-      }
-      return {
-        value: guarded,
-        changed: guarded !== input,
-        rules: new Set(hits.map((h) => h.ruleName)),
-        modes: new Set<SecretGuardMode>(["online"]),
-      };
+      if (tripwire.scan(guarded).length > 0) guarded = tripwire.redactOffline(guarded);
+      modes.add("online");
+      return guarded;
     } catch (e) {
       console.warn(
         `[VeriSwarm] Secret tripwire: API unreachable for tool=${toolName}; ` +
           `applying offline redaction. Error: ${(e as Error)?.message ?? e}`
       );
-      return {
-        value: state.tripwire.redactOffline(input),
-        changed: true,
-        rules: new Set(hits.map((h) => h.ruleName)),
-        modes: new Set<SecretGuardMode>(["offline"]),
-      };
+      modes.add("offline");
+      return tripwire.redactOffline(text);
     }
-  }
+  });
+  return { value: mapped.value, changed: mapped.changed, rules, modes };
+}
 
-  if (Array.isArray(input)) {
-    if (seen.has(input)) return emptySecretGuardOutcome(input);
-    seen.add(input);
-    const next = [...input];
-    const outcome = emptySecretGuardOutcome(next);
-    for (let i = 0; i < input.length; i++) {
-      const child = await guardSecretInput(input[i], state, toolName, piiKey, seen);
-      if (child.changed) next[i] = child.value;
-      mergeSecretGuardOutcome(outcome, child);
+// Tokenize PII in every string leaf of the tool params. Fails open (but
+// observably) on API errors, like the other PII paths. (HIGH-SDK-11.)
+async function tokenizeParamsPii(
+  params: unknown,
+  state: PluginState,
+  toolName: string,
+  piiKey: string
+): Promise<{ value: unknown; changed: boolean }> {
+  const client = state.client;
+  if (!client) return { value: params, changed: false };
+  return mapStringLeaves(params, async (text) => {
+    if (text.length < MIN_PII_TEXT_LENGTH) return text;
+    try {
+      const result = await client.tokenizePii(text, state.piiSessions.get(piiKey));
+      if (result.tokens_created > 0 && typeof result.tokenized_text === "string") {
+        if (result.session_id) {
+          setBounded(state.piiSessions, piiKey, result.session_id, MAX_PII_SESSIONS);
+        }
+        return result.tokenized_text;
+      }
+    } catch (e) {
+      console.warn(
+        `[VeriSwarm] PII tokenization (input) failed for tool=${toolName}; ` +
+          `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
+      );
     }
-    return outcome.changed ? outcome : emptySecretGuardOutcome(input);
-  }
-
-  if (input && typeof input === "object") {
-    const record = input as Record<string, unknown>;
-    if (seen.has(record)) return emptySecretGuardOutcome(input);
-    seen.add(record);
-    const next: Record<string, unknown> = { ...record };
-    const outcome = emptySecretGuardOutcome(next);
-    for (const [key, value] of Object.entries(record)) {
-      const child = await guardSecretInput(value, state, toolName, piiKey, seen);
-      if (child.changed) next[key] = child.value;
-      mergeSecretGuardOutcome(outcome, child);
-    }
-    return outcome.changed ? outcome : emptySecretGuardOutcome(input);
-  }
-
-  return emptySecretGuardOutcome(input);
+    return text;
+  });
 }
 
 // ── Plugin State ────────────────────────────────────────────────────────
@@ -201,51 +284,101 @@ interface PluginState {
   allowedTools: Set<string> | null;
   piiSessions: Map<string, string>; // `${conversationId}:${toolName}` -> Guard PII session id
   // Per-conversation outbound-turn counters for Session Sentry.
-  // Key: conversation/session id (or "default" when the event carries none).
+  // Key: conversation/session id (or "default" when the host supplies none).
   // Value: next turn_index to use (pre-increment on each send).
   sessionTurnCounters: Map<string, number>;
   secretsDetection: boolean;
   tripwire: SecretTripwire | null;
 }
 
-// Maximum number of conversation ids tracked in sessionTurnCounters.
-// Map preserves insertion order; when the cap is reached the oldest-inserted
-// entry is evicted (FIFO, not LRU). Stale conversations are the ones most
-// likely to be evicted; the only risk is that a still-live old conversation
-// gets its counter reset to 0. The server stores turn state server-side
-// (keyed by turn_index overwrite), so eviction causes at-worst under-counting
-// in the edge — the fail-safe direction.
+// Caps for the per-conversation maps. Both evict the least-recently-written
+// entry (see setBounded). For turn counters the only risk is that a long-idle
+// conversation restarts at turn 0 — the server keys turn state by turn_index
+// overwrite, so that under-counts (the fail-safe direction). For PII sessions
+// an evicted conversation simply can no longer rehydrate its oldest tokens.
 export const MAX_SESSION_COUNTERS = 10_000;
+export const MAX_PII_SESSIONS = 10_000;
+
+// Shortest text worth sending to the PII tokenizer.
+const MIN_PII_TEXT_LENGTH = 4;
+
+function initialState(): PluginState {
+  return {
+    client: null,
+    piiEnabled: true,
+    policyEnabled: true,
+    injectionScan: true,
+    auditEnabled: true,
+    sessionScan: true,
+    blockedTools: new Set(),
+    allowedTools: null,
+    piiSessions: new Map(),
+    sessionTurnCounters: new Map(),
+    secretsDetection: false,
+    tripwire: null,
+  };
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string" && v.length > 0) : [];
+}
+
+// Policy verdict for a tool call, or null when allowed. A call the host did
+// not name is refused whenever a list is configured: falling back to a
+// placeholder name could match (or miss) a list entry and invert the policy.
+function policyBlock(toolName: string | undefined): { reason: string; message: string } | null {
+  const hasPolicy = state.blockedTools.size > 0 || state.allowedTools !== null;
+  if (!toolName) {
+    return hasPolicy
+      ? {
+          reason: "unidentified_tool",
+          message: "[VeriSwarm Guard] Tool call blocked: the host did not identify the tool.",
+        }
+      : null;
+  }
+  if (state.blockedTools.has(toolName)) {
+    return { reason: "blocklist", message: `[VeriSwarm Guard] Tool '${toolName}' is blocked by policy.` };
+  }
+  if (state.allowedTools && !state.allowedTools.has(toolName)) {
+    return {
+      reason: "not_in_allowlist",
+      message: `[VeriSwarm Guard] Tool '${toolName}' is not in the allowlist.`,
+    };
+  }
+  return null;
+}
+
+const SENTRY_CANCEL_REASON =
+  "Message blocked by VeriSwarm Guard session protection: " +
+  "this conversation has triggered multi-turn data-extraction detection.";
+
+const NOT_CONFIGURED = "VeriSwarm not configured";
+
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
 
 // NOTE: Module-level state is shared within a single OpenClaw gateway process.
 // This is safe for single-agent deployments. For multi-agent OpenClaw instances,
 // each agent should run its own gateway process (separate Docker container).
-const state: PluginState = {
-  client: null,
-  piiEnabled: true,
-  policyEnabled: true,
-  injectionScan: true,
-  auditEnabled: true,
-  sessionScan: true,
-  blockedTools: new Set(),
-  allowedTools: null,
-  piiSessions: new Map(),
-  sessionTurnCounters: new Map(),
-  secretsDetection: false,
-  tripwire: null,
-};
+let state: PluginState = initialState();
+
+// Identity of the tenant whose PII sessions / turn counters `state` holds.
+let stateFingerprint: string | null = null;
+
+function tenantFingerprint(cfg: any): string {
+  return JSON.stringify([cfg?.apiUrl ?? "", cfg?.apiKey ?? "", cfg?.agentId ?? ""]);
+}
 
 // ── Plugin Entry ────────────────────────────────────────────────────────
 
-// OpenClaw plugin entry point. Uses definePluginEntry pattern.
-// At build time this resolves via the openclaw peer dependency.
-// For development without openclaw installed, we use a shim.
+// The subset of the OpenClaw plugin API this plugin uses (see the host's
+// docs/plugins/hooks.md and building-plugins.md). Kept structural so the
+// plugin does not import the host at runtime.
 type PluginApi = {
-  registerTool: (def: any) => void;
-  registerHook: (name: string, handler: any) => void;
-  on: (event: string, handler: any) => void;
-  registerHttpRoute: (def: any) => void;
-  registerService: (def: any) => void;
+  pluginConfig?: unknown;
+  registerTool: (tool: any, opts?: { name?: string; names?: string[]; optional?: boolean }) => void;
+  on: (hookName: string, handler: (event: any, ctx: any) => any, opts?: { priority?: number }) => void;
 };
 
 type PluginEntry = {
@@ -288,7 +421,7 @@ export const pluginEntry: PluginEntry = {
       },
       piiEnabled: {
         type: "boolean",
-        description: "Enable PII tokenization on messages and tool I/O",
+        description: "Enable PII tokenization on outbound messages and tool-call params",
         default: true,
       },
       policyEnabled: {
@@ -331,8 +464,8 @@ export const pluginEntry: PluginEntry = {
         description:
           "Enable Session Sentry multi-turn exfiltration detection. " +
           "Each outbound message is submitted to /v1/suite/guard/scan-session; " +
-          "if the conversation-level risk score triggers a block the message is " +
-          "replaced with a Guard refusal. Fail-open: any API error is logged and " +
+          "if the conversation-level risk score triggers a block, delivery of the " +
+          "message is cancelled. Fail-open: any API error is logged and " +
           "the message is sent unmodified. Safe to leave on while the platform " +
           "flag is dormant — the server returns {enabled:false, blocked:false}. " +
           "Default: true.",
@@ -347,7 +480,21 @@ export const pluginEntry: PluginEntry = {
     // ── Initialize ────────────────────────────────────────────────────
 
     // OpenClaw provides plugin-specific config via api.pluginConfig
-    const cfg: any = (api as any).pluginConfig || config || {};
+    const cfg: any = api.pluginConfig || config || {};
+
+    // Start from clean state on every register: no client, flag or policy
+    // list from a previous config may survive. The host also re-invokes
+    // register in the same process (e.g. for tool discovery), so the
+    // per-conversation maps are carried over only while the tenant identity
+    // is unchanged — otherwise live PII sessions would be dropped mid-run.
+    const previous = state;
+    state = initialState();
+    const fingerprint = tenantFingerprint(cfg);
+    if (fingerprint === stateFingerprint) {
+      state.piiSessions = previous.piiSessions;
+      state.sessionTurnCounters = previous.sessionTurnCounters;
+    }
+    stateFingerprint = fingerprint;
 
     console.log(`[VeriSwarm] Plugin config: apiKey=${cfg.apiKey ? "set" : "missing"}, agentId=${cfg.agentId || "auto"}`);
 
@@ -372,10 +519,6 @@ export const pluginEntry: PluginEntry = {
     state.auditEnabled = cfg.auditEnabled ?? true;
     state.sessionScan = cfg.sessionScan ?? true;
 
-    // Reset per-conversation turn counters on each register call
-    // (covers hot-reload / test re-use of the module-level state).
-    state.sessionTurnCounters = new Map();
-
     state.secretsDetection = cfg.secretsDetection === true;
     if (state.secretsDetection) {
       // Build immediately from the vendored manifest so the tripwire is
@@ -383,24 +526,25 @@ export const pluginEntry: PluginEntry = {
       // Then refresh from the API in the background; if that fetch fails
       // we keep the vendored baseline. (register is synchronous, so we
       // must not await the network here.)
+      const client = state.client;
+      const registeredState = state;
       state.tripwire = new SecretTripwire(loadVendoredManifest());
       ensureTripwire({
-        fetchManifest: async () => state.client!.getSecretRules(),
+        fetchManifest: async () => client.getSecretRules(),
       })
         .then((tw) => {
-          state.tripwire = tw;
+          registeredState.tripwire = tw;
         })
         .catch(() => {
           /* keep vendored baseline — offline is fine */
         });
     }
 
-    if (cfg.blockedTools?.length) {
-      state.blockedTools = new Set(cfg.blockedTools);
-    }
-    if (cfg.allowedTools?.length) {
-      state.allowedTools = new Set(cfg.allowedTools);
-    }
+    // Always assigned (even when empty) so a previous config's lists never
+    // survive a re-register. An empty allowlist means "allow all".
+    state.blockedTools = new Set(stringList(cfg.blockedTools));
+    const allowed = stringList(cfg.allowedTools);
+    state.allowedTools = allowed.length > 0 ? new Set(allowed) : null;
 
     console.log(
       `[VeriSwarm] Guard active — PII: ${state.piiEnabled}, Policy: ${state.policyEnabled}, ` +
@@ -410,234 +554,158 @@ export const pluginEntry: PluginEntry = {
 
     // ── HOOKS: Transparent Protection ─────────────────────────────────
 
-    // Hook: Before tool call — policy check + PII tokenize inputs
-    api.on("before_tool_call", async (event: any) => {
-      if (!state.client) return {};
-      const toolName = event.tool?.name || event.name || "unknown";
+    // Hook: before_tool_call — policy check, secret tripwire, PII tokenize params.
+    // Host event: { toolName, params, toolCallId?, runId? }; ctx carries
+    // sessionKey/sessionId. Host result: { block, blockReason } or { params }.
+    api.on("before_tool_call", async (event: any, ctx: any) => {
+      if (!state.client) return;
+      const toolName = firstNonEmptyString(event?.toolName, ctx?.toolName);
 
-      // Policy check
       if (state.policyEnabled) {
-        if (state.blockedTools.has(toolName)) {
-          await logEvent("tool.blocked", { tool_name: toolName, reason: "blocklist" });
-          return { block: true, message: `[VeriSwarm Guard] Tool '${toolName}' is blocked by policy.` };
-        }
-        if (state.allowedTools && !state.allowedTools.has(toolName)) {
-          await logEvent("tool.blocked", { tool_name: toolName, reason: "not_in_allowlist" });
-          return { block: true, message: `[VeriSwarm Guard] Tool '${toolName}' is not in the allowlist.` };
+        const verdict = policyBlock(toolName);
+        if (verdict) {
+          // Fire-and-forget: the block must not wait on (or fail with) audit I/O.
+          void logEvent("tool.blocked", {
+            tool_name: toolName ?? null,
+            reason: verdict.reason,
+          }).catch(() => {});
+          return { block: true, blockReason: verdict.message };
         }
       }
+
+      const params = event?.params;
+      if (!isRecord(params)) return;
+      // An unnamed call still gets its params scanned (under a placeholder
+      // key) rather than skipping the secret tripwire.
+      const scanName = toolName ?? "_unidentified";
+      const key = piiSessionKey(scanName, resolveConversationId(ctx, event));
+      let nextParams: unknown = params;
+      let changed = false;
 
       // Secret tripwire — runs ahead of PII tokenization. Catches obvious
       // provider-prefix secrets (API keys, tokens) in the agent's native
       // outbound path. On a hit we escalate to authoritative tokenization
       // when online, and fail closed to local non-recoverable redaction
       // when offline or when the API leaves any known-prefix span intact.
-      if (
-        state.secretsDetection &&
-        state.tripwire &&
-        event.input !== undefined &&
-        event.input !== null
-      ) {
-        const convId = event.conversation_id || event.conversationId || event.session_id;
-        const key = piiSessionKey(toolName, convId);
-        const guarded = await guardSecretInput(event.input, state, toolName, key);
+      if (state.secretsDetection && state.tripwire) {
+        const guarded = await guardSecretInput(nextParams, state, scanName, key);
         if (guarded.changed) {
-          await logEvent("secret.tripwire", {
-            tool_name: toolName,
+          void logEvent("secret.tripwire", {
+            tool_name: toolName ?? null,
             rules: Array.from(guarded.rules),
             mode: guarded.modes.has("offline") ? "offline" : "online",
           }).catch(() => {});
-          return { input: guarded.value };
+          nextParams = guarded.value;
+          changed = true;
         }
       }
 
-      // PII tokenize tool input
-      if (state.piiEnabled && event.input && typeof event.input === "string") {
-        const convId = event.conversation_id || event.conversationId || event.session_id;
-        const key = piiSessionKey(toolName, convId);
-        try {
-          const result = await state.client.tokenizePii(event.input);
-          if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
-            return { input: result.tokenized_text };
-          }
-        } catch (e) {
-          // Fail open — but observable, not silent. The customer's
-          // log aggregator can alert on this.
-          // (Audit 2026-05-08 HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (input) failed for tool=${toolName}; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
+      if (state.piiEnabled) {
+        const tokenized = await tokenizeParamsPii(nextParams, state, scanName, key);
+        if (tokenized.changed) {
+          nextParams = tokenized.value;
+          changed = true;
         }
       }
 
-      return {};
+      return changed ? { params: nextParams as Record<string, unknown> } : undefined;
     });
 
-    // Hook: After tool call — PII tokenize output + injection scan
-    api.on("after_tool_call", async (event: any) => {
-      if (!state.client) return {};
-      const toolName = event.tool?.name || event.name || "unknown";
-      let output = event.output || event.result || "";
-
-      if (typeof output !== "string") return {};
-
-      // PII tokenize output
-      if (state.piiEnabled && output.length > 3) {
-        const convId = event.conversation_id || event.conversationId || event.session_id;
-        const key = piiSessionKey(toolName, convId);
-        try {
-          const sessionId = state.piiSessions.get(key);
-          const result = await state.client.tokenizePii(output, sessionId);
-          if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
-            output = result.tokenized_text;
-          }
-        } catch (e) {
-          // Fail open — but observable. (HIGH-SDK-11.)
-          console.warn(
-            `[VeriSwarm] PII tokenization (output) failed for tool=${toolName}; ` +
-            `passing through unredacted. Error: ${(e as Error)?.message ?? e}`
-          );
-        }
-      }
-
-      // Injection scan
-      if (state.injectionScan) {
-        const detected = scanForInjection(output);
-        if (detected.length > 0) {
-          await logEvent("injection.detected", {
-            tool_name: toolName,
-            patterns: detected,
-          });
-          output =
-            `[VeriSwarm Guard: Potential prompt injection detected. ` +
-            `Patterns: ${detected.join(", ")}]\n\n${output}`;
-        }
-      }
-
-      // Audit
-      if (state.auditEnabled) {
-        await logEvent("tool.call.success", {
-          tool_name: toolName,
-          output_length: output.length,
-        });
-      }
-
-      return { output };
+    // Hook: after_tool_call — audit only. The host runs this fire-and-forget
+    // and ignores its return value, so it cannot change what the model sees.
+    api.on("after_tool_call", async (event: any, ctx: any) => {
+      if (!state.client || !state.auditEnabled) return;
+      const output = serializeToolOutput(event?.result);
+      await logEvent("tool.call.success", {
+        tool_name: firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null,
+        output_length: output.length,
+        is_error: Boolean(event?.error),
+      });
     });
 
-    // Hook: Before message sending — PII tokenize outbound to LLM + Session Sentry
-    //
-    // The message_sending event fires for each outbound agent message. OpenClaw
-    // exposes the content as event.content or event.text. The conversation
-    // identity is carried in event.conversation_id / event.conversationId /
-    // event.session_id (in priority order). If none of these are present we fall
-    // back to the literal key "default" and note the limitation below.
-    //
-    // Content mutation: the hook returns { content: newText } to replace the
-    // outbound message, matching exactly how the PII tokenization branch works
-    // above. For a block we substitute a fixed refusal string rather than the
-    // tokenized text — same return shape, different content.
-    api.on("message_sending", async (event: any) => {
-      if (!state.client) return {};
-      const content = event.content || event.text || "";
-      if (typeof content !== "string") return {};
+    // Hook: tool_result_persist — the host's result-rewriting hook. It is
+    // SYNCHRONOUS (a returned Promise is ignored by the host), so only local
+    // checks run here: the injection-pattern banner. Async API work such as
+    // PII tokenization of tool output cannot run in this hook.
+    api.on("tool_result_persist", (event: any, ctx: any) => {
+      if (!state.client || !state.injectionScan) return;
+      const message = event?.message;
+      if (!isRecord(message)) return;
+      const detected = scanForInjection(serializeToolOutput(message));
+      if (detected.length === 0) return;
 
-      // ── Derive session identity ─────────────────────────────────────
-      // OpenClaw provides conversation_id / conversationId / session_id depending
-      // on version. We use the first truthy value. If none is present the entire
-      // agent's message stream is bucketed under "default"; this means the turn
-      // counter is shared across all conversations handled by this gateway
-      // process, which is a known limitation when OpenClaw does not expose a
-      // conversation id. Deployments where multiple simultaneous conversations
-      // are served by a single process should upgrade to an OpenClaw version that
-      // exposes conversation_id on the message_sending event.
-      const rawConvId: string =
-        event.conversation_id ||
-        event.conversationId ||
-        event.session_id ||
-        "default";
+      void logEvent("injection.detected", {
+        tool_name: firstNonEmptyString(event?.toolName, ctx?.toolName) ?? null,
+        patterns: detected,
+      }).catch(() => {});
+      const banner = {
+        type: "text",
+        text:
+          `[VeriSwarm Guard: Potential prompt injection detected. ` +
+          `Patterns: ${detected.join(", ")}]`,
+      };
+      const content = Array.isArray(message.content)
+        ? [banner, ...message.content]
+        : [banner, { type: "text", text: serializeToolOutput(message.content) }];
+      return { message: { ...message, content } };
+    });
 
-      // Truncate/hash to ≤64 chars. UUIDs and short IDs fit natively.
-      // For longer ids (e.g. base64 thread blobs) we take a 64-char prefix —
-      // this preserves monotonicity without adding a crypto dependency.
-      // If perfect uniqueness across very long ids matters, callers can pre-hash
-      // before passing to OpenClaw; we document this in the README.
+    // Hook: message_sending — Session Sentry + PII tokenize outbound content.
+    // Host event: { to, content, ... }; ctx carries sessionKey/conversationId.
+    // Host result: { content } to rewrite, { cancel, cancelReason } to stop
+    // delivery (cancel is terminal; replacement content is not).
+    api.on("message_sending", async (event: any, ctx: any) => {
+      if (!state.client) return;
+      const content = typeof event?.content === "string" ? event.content : "";
+      if (!content) return;
+
+      // When the host supplies no conversation identity, all messages from
+      // this gateway process share the "default" bucket — a known limitation.
+      const rawConvId = resolveConversationId(ctx, event) ?? "default";
+
+      // Truncate to ≤64 chars. UUIDs and short IDs fit natively; longer ids
+      // keep a 64-char prefix (monotonic, no crypto dependency).
       const sessionId: string =
         rawConvId.length <= 64 ? rawConvId : rawConvId.slice(0, 64);
 
       // ── Per-conversation turn counter ───────────────────────────────
-      // Each call to message_sending for a given session_id increments the
-      // counter so the API can detect multi-turn patterns. We read, use, then
-      // write-back the incremented value (turn_index is the index of THIS turn).
+      // turn_index is the index of THIS turn; store the next one.
       const turnIndex = state.sessionTurnCounters.get(sessionId) ?? 0;
-      // FIFO eviction: if this is a new key and the map is at the cap, delete
-      // the oldest-inserted entry before inserting. Map preserves insertion
-      // order, so .keys().next().value is always the oldest key.
-      if (!state.sessionTurnCounters.has(sessionId) &&
-          state.sessionTurnCounters.size >= MAX_SESSION_COUNTERS) {
-        const oldest = state.sessionTurnCounters.keys().next().value;
-        if (oldest !== undefined) state.sessionTurnCounters.delete(oldest);
-      }
-      state.sessionTurnCounters.set(sessionId, turnIndex + 1);
+      setBounded(state.sessionTurnCounters, sessionId, turnIndex + 1, MAX_SESSION_COUNTERS);
 
       // ── Session Sentry scan (FAIL-OPEN) ─────────────────────────────
       // Must never block the message on any failure. Any exception or non-200
-      // is caught and logged at debug level so it is observable without being
-      // noisy in production. The dormant server returns {enabled:false,
+      // is caught and logged. The dormant server returns {enabled:false,
       // blocked:false} which passes through immediately.
-      let scannedContent = content;
-      if (state.sessionScan && content.length > 0) {
+      if (state.sessionScan) {
         try {
           const scanResult = await state.client.scanSessionTurn({
             session_id: sessionId,
             turn_index: turnIndex,
-            // Only the outbound (agent) side of the message is visible here.
-            // user_text is left empty because the message_sending hook fires on
-            // the agent's outbound turn; the user's inbound text is not exposed
-            // by this hook event. If OpenClaw adds a prior-user-message field to
-            // the event in future, wire it here.
+            // Only the outbound (agent) side is visible to message_sending.
             agent_text: content,
             user_text: "",
-            // system_prompt: not surfaced in the message_sending event or plugin
-            // config — left empty. If config.systemPrompt is added in future,
-            // read it from cfg and pass it through here.
             system_prompt: "",
-            // agent_id is the identity this plugin registered under.
             agent_id: agentId,
           });
 
           if (scanResult.blocked === true) {
-            // Replace the outbound content with the Guard refusal string.
-            // This is the same { content } return shape used by PII tokenization,
-            // consistent with how the secret tripwire replaces { input } in
-            // before_tool_call. The session has triggered multi-turn exfiltration
-            // detection — we do NOT log an error; we log an audit event and
-            // return the refusal.
-            //
             // Fire-and-forget: do NOT await inside the try-block. A synchronous
-            // throw from logEvent (e.g. future refactor breaks its internals)
-            // would propagate to the outer catch and FAIL-OPEN past a legitimate
-            // block. The .catch(() => {}) mirrors logEvent's own internal catch —
-            // audit loss is acceptable; allowing a blocked message is not.
+            // throw from logEvent would reach the outer catch and FAIL-OPEN past
+            // a legitimate block. Audit loss is acceptable; a leaked message is not.
             void logEvent("session.sentry.blocked", {
               session_id: sessionId,
               turn_index: turnIndex,
               session_score: scanResult.session_score,
               highest_severity: scanResult.highest_severity,
             }).catch(() => {});
-            return {
-              content:
-                "Message blocked by VeriSwarm Guard session protection: " +
-                "this conversation has triggered multi-turn data-extraction detection.",
-            };
+            // Only `cancel: true` short-circuits delivery in the host;
+            // rewritten content would still be sent.
+            return { cancel: true, cancelReason: SENTRY_CANCEL_REASON };
           }
         } catch (e) {
           // FAIL-OPEN: any network error, timeout, or unexpected response must
-          // not interrupt message delivery. Log at warn level (same as the PII
-          // branches above) so the customer's log aggregator can alert on it.
+          // not interrupt message delivery, but stays observable.
           console.warn(
             `[VeriSwarm] Session Sentry scan failed for session=${sessionId} ` +
             `turn=${turnIndex}; sending unmodified. Error: ${(e as Error)?.message ?? e}`
@@ -645,13 +713,13 @@ export const pluginEntry: PluginEntry = {
         }
       }
 
-      // ── PII tokenization (existing) ─────────────────────────────────
-      if (state.piiEnabled && scannedContent.length >= 4) {
+      // ── PII tokenization ────────────────────────────────────────────
+      if (state.piiEnabled && content.length >= MIN_PII_TEXT_LENGTH) {
         const key = piiSessionKey("__message__", rawConvId);
         try {
-          const result = await state.client.tokenizePii(scannedContent);
+          const result = await state.client.tokenizePii(content);
           if (result.tokens_created > 0) {
-            state.piiSessions.set(key, result.session_id);
+            setBounded(state.piiSessions, key, result.session_id, MAX_PII_SESSIONS);
             return { content: result.tokenized_text };
           }
         } catch (e) {
@@ -663,34 +731,53 @@ export const pluginEntry: PluginEntry = {
         }
       }
 
-      return {};
+      return;
     });
+
+    // ── TOOLS ─────────────────────────────────────────────────────────
+    // Host tool contract: `execute(toolCallId, params)` returning
+    // `{ content: [{ type: "text", text }] }`. Every name registered here
+    // must also be listed in openclaw.plugin.json `contracts.tools`.
+
+    const registerApiTool = (
+      name: string,
+      description: string,
+      parameters: Record<string, unknown>,
+      run: (client: VeriSwarmClient, params: any) => Promise<unknown>
+    ) => {
+      api.registerTool({
+        name,
+        description,
+        parameters,
+        async execute(_toolCallId: string, params: any) {
+          const client = state.client;
+          if (!client) return textResult(NOT_CONFIGURED);
+          try {
+            return textResult(JSON.stringify(await run(client, params ?? {}), null, 2));
+          } catch (e: any) {
+            return textResult(`Error: ${e?.message ?? e}`);
+          }
+        },
+      });
+    };
+
+    const NO_PARAMS = { type: "object", properties: {} };
 
     // ── TOOLS: Gate (Trust Scoring) ───────────────────────────────────
 
-    api.registerTool({
-      name: "veriswarm_check_trust",
-      description:
-        "Get your current VeriSwarm trust scores — identity confidence, " +
+    registerApiTool(
+      "veriswarm_check_trust",
+      "Get your current VeriSwarm trust scores — identity confidence, " +
         "risk level, reliability, autonomy, and policy tier.",
-      parameters: {},
-      handler: async () => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const scores = await state.client.checkTrust();
-          return JSON.stringify(scores, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      NO_PARAMS,
+      (client) => client.checkTrust()
+    );
 
-    api.registerTool({
-      name: "veriswarm_check_decision",
-      description:
-        "Ask VeriSwarm whether an action should be allowed, reviewed, or denied " +
+    registerApiTool(
+      "veriswarm_check_decision",
+      "Ask VeriSwarm whether an action should be allowed, reviewed, or denied " +
         "based on your current trust scores and policy tier.",
-      parameters: {
+      {
         type: "object",
         properties: {
           action_type: {
@@ -704,162 +791,119 @@ export const pluginEntry: PluginEntry = {
         },
         required: ["action_type"],
       },
-      handler: async (params: any) => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const result = await state.client.checkDecision(
-            params.action_type,
-            params.resource_type
-          );
-          return JSON.stringify(result, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      (client, params) => client.checkDecision(params.action_type, params.resource_type)
+    );
 
-    api.registerTool({
-      name: "veriswarm_score_history",
-      description: "View how your trust scores have changed over time.",
-      parameters: {
+    registerApiTool(
+      "veriswarm_score_history",
+      "View how your trust scores have changed over time.",
+      {
         type: "object",
         properties: {
           limit: { type: "number", description: "Number of snapshots to return (default 10)" },
         },
       },
-      handler: async (params: any) => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const history = await state.client.getScoreHistory(params.limit || 10);
-          return JSON.stringify(history, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      (client, params) => client.getScoreHistory(params.limit || 10)
+    );
 
     // ── TOOLS: Guard (PII + Security) ────────────────────────────────
 
-    api.registerTool({
-      name: "veriswarm_rehydrate",
-      description:
-        "Restore original PII values from VeriSwarm Guard tokens. " +
-        "Use when you need to write tokenized data back to a database, email, " +
-        "CRM, or other real system. Guard will restore the original values securely.",
-      parameters: {
-        type: "object",
-        properties: {
-          text: {
-            type: "string",
-            description: "Text containing [VS:...] tokens to restore",
+    // Registered as a factory so the tool is bound to the calling
+    // conversation from the host's tool context. The model cannot choose
+    // which conversation's PII session to rehydrate: any model-supplied
+    // conversation id is ignored.
+    api.registerTool(
+      (toolCtx: any) => ({
+        name: "veriswarm_rehydrate",
+        description:
+          "Restore original PII values from VeriSwarm Guard tokens. " +
+          "Use when you need to write tokenized data back to a database, email, " +
+          "CRM, or other real system. Guard will restore the original values securely.",
+        parameters: {
+          type: "object",
+          properties: {
+            text: {
+              type: "string",
+              description: "Text containing [VS:...] tokens to restore",
+            },
+            tool_name: {
+              type: "string",
+              description: "The tool whose output contained the tokens (helps find the right session)",
+            },
           },
-          tool_name: {
-            type: "string",
-            description: "The tool whose output contained the tokens (helps find the right session)",
-          },
-          conversation_id: {
-            type: "string",
-            description:
-              "Conversation/session id associated with the tokens. Required when OpenClaw provides conversation ids.",
-          },
+          required: ["text"],
         },
-        required: ["text"],
-      },
-      handler: async (params: any) => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const toolName =
-            typeof params.tool_name === "string" && params.tool_name
-              ? params.tool_name
-              : "__message__";
-          const conversationId =
-            typeof params.conversation_id === "string" && params.conversation_id
-              ? params.conversation_id
-              : undefined;
+        async execute(_toolCallId: string, params: any) {
+          const client = state.client;
+          if (!client) return textResult(NOT_CONFIGURED);
+          const text = typeof params?.text === "string" ? params.text : "";
+          const toolName = firstNonEmptyString(params?.tool_name) ?? "__message__";
           const sessionId = state.piiSessions.get(
-            piiSessionKey(toolName, conversationId)
+            piiSessionKey(toolName, resolveConversationId(toolCtx))
           );
-
-          if (!sessionId) return params.text; // No matching session in this conversation/tool scope.
-
-          const result = await state.client.rehydratePii(params.text, sessionId);
-          return result.rehydrated_text;
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+          // No PII session for this tool in the calling conversation.
+          if (!sessionId) return textResult(text);
+          try {
+            const result = await client.rehydratePii(text, sessionId);
+            return textResult(result.rehydrated_text);
+          } catch (e: any) {
+            return textResult(`Error: ${e?.message ?? e}`);
+          }
+        },
+      }),
+      { name: "veriswarm_rehydrate" }
+    );
 
     api.registerTool({
       name: "veriswarm_guard_status",
       description: "Check VeriSwarm Guard protection status and active policies.",
-      parameters: {},
-      handler: async () => {
-        return JSON.stringify(
-          {
-            guard: "active",
-            protections: {
-              pii_tokenization: state.piiEnabled,
-              policy_enforcement: state.policyEnabled,
-              injection_scanning: state.injectionScan,
-              audit_logging: state.auditEnabled,
+      parameters: NO_PARAMS,
+      async execute() {
+        return textResult(
+          JSON.stringify(
+            {
+              guard: "active",
+              protections: {
+                pii_tokenization: state.piiEnabled,
+                policy_enforcement: state.policyEnabled,
+                injection_scanning: state.injectionScan,
+                audit_logging: state.auditEnabled,
+              },
+              policy: {
+                blocked_tools: state.blockedTools.size ? [...state.blockedTools] : null,
+                allowed_tools: state.allowedTools ? [...state.allowedTools] : null,
+              },
+              active_pii_sessions: state.piiSessions.size,
             },
-            policy: {
-              blocked_tools: state.blockedTools.size
-                ? [...state.blockedTools]
-                : null,
-              allowed_tools: state.allowedTools
-                ? [...state.allowedTools]
-                : null,
-            },
-            active_pii_sessions: state.piiSessions.size,
-          },
-          null,
-          2
+            null,
+            2
+          )
         );
       },
     });
 
-    api.registerTool({
-      name: "veriswarm_findings",
-      description: "View Guard security findings — credential leaks, PII detections, unsafe patterns.",
-      parameters: {},
-      handler: async () => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const findings = await state.client.getFindings();
-          return JSON.stringify(findings, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+    registerApiTool(
+      "veriswarm_findings",
+      "View Guard security findings — credential leaks, PII detections, unsafe patterns.",
+      NO_PARAMS,
+      (client) => client.getFindings()
+    );
 
     // ── TOOLS: Passport (Identity) ───────────────────────────────────
 
-    api.registerTool({
-      name: "veriswarm_get_credentials",
-      description:
-        "Issue a portable trust credential (signed JWT) for this agent. " +
+    registerApiTool(
+      "veriswarm_get_credentials",
+      "Issue a portable trust credential (signed JWT) for this agent. " +
         "The credential can be presented to other platforms as proof of trust.",
-      parameters: {},
-      handler: async () => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const cred = await state.client.getCredentials();
-          return JSON.stringify(cred, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      NO_PARAMS,
+      (client) => client.getCredentials()
+    );
 
-    api.registerTool({
-      name: "veriswarm_verify_credential",
-      description:
-        "Verify another agent's VeriSwarm trust credential. " +
+    registerApiTool(
+      "veriswarm_verify_credential",
+      "Verify another agent's VeriSwarm trust credential. " +
         "Checks the signature, expiration, and trust scores embedded in the JWT.",
-      parameters: {
+      {
         type: "object",
         properties: {
           credential_token: {
@@ -869,78 +913,41 @@ export const pluginEntry: PluginEntry = {
         },
         required: ["credential_token"],
       },
-      handler: async (params: any) => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const result = await state.client.verifyCredential(params.credential_token);
-          return JSON.stringify(result, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      (client, params) => client.verifyCredential(params.credential_token)
+    );
 
     // ── TOOLS: Vault (Audit) ─────────────────────────────────────────
 
-    api.registerTool({
-      name: "veriswarm_query_ledger",
-      description:
-        "Search the VeriSwarm Vault audit ledger — a tamper-proof record of " +
+    registerApiTool(
+      "veriswarm_query_ledger",
+      "Search the VeriSwarm Vault audit ledger — a tamper-proof record of " +
         "all agent actions, trust decisions, and Guard events.",
-      parameters: {
+      {
         type: "object",
         properties: {
           limit: { type: "number", description: "Number of entries (default 20)" },
           agent_id: { type: "string", description: "Filter by agent ID" },
         },
       },
-      handler: async (params: any) => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const ledger = await state.client.queryLedger(
-            params.limit || 20,
-            params.agent_id
-          );
-          return JSON.stringify(ledger, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      (client, params) => client.queryLedger(params.limit || 20, params.agent_id)
+    );
 
-    api.registerTool({
-      name: "veriswarm_verify_chain",
-      description:
-        "Verify the cryptographic hash chain integrity of the VeriSwarm Vault. " +
+    registerApiTool(
+      "veriswarm_verify_chain",
+      "Verify the cryptographic hash chain integrity of the VeriSwarm Vault. " +
         "Confirms that no audit records have been tampered with.",
-      parameters: {},
-      handler: async () => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const result = await state.client.verifyChain();
-          return JSON.stringify(result, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+      NO_PARAMS,
+      (client) => client.verifyChain()
+    );
 
     // ── TOOLS: Platform ──────────────────────────────────────────────
 
-    api.registerTool({
-      name: "veriswarm_status",
-      description: "Check VeriSwarm platform health, uptime, and feature flags.",
-      parameters: {},
-      handler: async () => {
-        if (!state.client) return "VeriSwarm not configured";
-        try {
-          const status = await state.client.getStatus();
-          return JSON.stringify(status, null, 2);
-        } catch (e: any) {
-          return `Error: ${e.message}`;
-        }
-      },
-    });
+    registerApiTool(
+      "veriswarm_status",
+      "Check VeriSwarm platform health, uptime, and feature flags.",
+      NO_PARAMS,
+      (client) => client.getStatus()
+    );
 
     // ── Report plugin startup ────────────────────────────────────────
 
@@ -952,7 +959,7 @@ export const pluginEntry: PluginEntry = {
     }).catch(() => {});
 
     console.log(
-      `[VeriSwarm] Plugin registered — 11 tools, 3 hooks (incl. Session Sentry). Agent: ${agentId}`
+      `[VeriSwarm] Plugin registered — 11 tools, 4 hooks (incl. Session Sentry). Agent: ${agentId}`
     );
   },
 };
