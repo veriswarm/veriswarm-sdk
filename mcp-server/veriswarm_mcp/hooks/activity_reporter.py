@@ -45,29 +45,38 @@ FLUSH_THRESHOLD = 50
 MAX_BUFFER_SIZE = 500
 
 
-def _load_config() -> tuple[str, str, str, str]:
-    """Load API URL, API key, agent ID, and agent key from env or ~/.veriswarm/env."""
-    api_url = os.environ.get("VERISWARM_API_URL", "")
-    api_key = os.environ.get("VERISWARM_API_KEY", "")
-    agent_id = os.environ.get("GUARD_AGENT_ID", "")
-    agent_key = os.environ.get("VERISWARM_AGENT_KEY", "")
+_CONFIG_KEYS = ("VERISWARM_API_URL", "VERISWARM_API_KEY", "GUARD_AGENT_ID", "VERISWARM_AGENT_KEY")
 
-    if not api_key or not agent_key:
-        env_file = Path.home() / ".veriswarm" / "env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, _, value = line.partition("=")
-                    k, v = key.strip(), value.strip()
-                    if k == "VERISWARM_API_KEY" and not api_key:
-                        api_key = v
-                    elif k == "VERISWARM_API_URL":
-                        api_url = v
-                    elif k == "GUARD_AGENT_ID":
-                        agent_id = v
-                    elif k == "VERISWARM_AGENT_KEY":
-                        agent_key = v
+# Created after the first "no agent id" warning so later flushes (each in a
+# fresh hook process) stay quiet.
+NO_AGENT_ID_MARKER = ".no-agent-id-warned"
+
+
+def _read_env_file() -> dict[str, str]:
+    env_file = Path.home() / ".veriswarm" / "env"
+    values: dict[str, str] = {}
+    try:
+        text = env_file.read_text()
+    except OSError:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _load_config() -> tuple[str, str, str, str]:
+    """Load API URL, API key, agent ID, and agent key.
+
+    Each setting comes from its environment variable when set, otherwise
+    from ~/.veriswarm/env.
+    """
+    file_values = _read_env_file()
+    cfg = {k: os.environ.get(k) or file_values.get(k, "") for k in _CONFIG_KEYS}
+    api_url, api_key = cfg["VERISWARM_API_URL"], cfg["VERISWARM_API_KEY"]
+    agent_id, agent_key = cfg["GUARD_AGENT_ID"], cfg["VERISWARM_AGENT_KEY"]
 
     try:
         api_url = validate_api_url(
@@ -80,19 +89,35 @@ def _load_config() -> tuple[str, str, str, str]:
     return api_url, api_key, agent_id, agent_key
 
 
-def _session_id() -> str:
-    """Stable session ID from Claude Code or fallback to parent PID."""
-    return os.environ.get("CLAUDE_SESSION_ID", "local-" + str(os.getppid()))
+def _fallback_session_id() -> str:
+    """Used only when the hook payload carried no session_id."""
+    return "local-" + str(os.getppid())
 
 
-def buffer_event(event_type: str, metadata: dict | None = None) -> int:
-    """Append an activity event to the local buffer. Returns buffer line count."""
+def _line_count(path: Path) -> int:
+    try:
+        with open(path) as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return 0
+
+
+def buffer_event(event_type: str, metadata: dict | None = None, session_id: str = "") -> int:
+    """Append an activity event to the local buffer. Returns buffer line count.
+
+    The buffer holds at most MAX_BUFFER_SIZE events; once full, new events
+    are dropped until a flush drains it.
+    """
     BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    count = _line_count(BUFFER_FILE)
+    if count >= MAX_BUFFER_SIZE:
+        return count
 
     entry = {
         "event_id": uuid.uuid4().hex[:16],
         "event_type": event_type,
-        "session_id": _session_id(),
+        "session_id": session_id or _fallback_session_id(),
         "ts": datetime.now(timezone.utc).isoformat(),
         "meta": metadata or {},
     }
@@ -100,13 +125,7 @@ def buffer_event(event_type: str, metadata: dict | None = None) -> int:
     with open(BUFFER_FILE, "a") as f:
         f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
-    try:
-        with open(BUFFER_FILE) as f:
-            count = sum(1 for _ in f)
-    except OSError:
-        count = 0
-
-    return count
+    return count + 1
 
 
 def _read_and_clear_buffer() -> list[dict]:
@@ -161,7 +180,7 @@ def _event_payload(event: dict, agent_id: str) -> dict:
 
     return {
         "event_id": str(event.get("event_id") or uuid.uuid4().hex[:16]),
-        "agent_id": agent_id or "claude-code-session",
+        "agent_id": agent_id,
         "source_type": "guard_hook",
         "event_type": str(event_type),
         "occurred_at": str(event.get("ts") or datetime.now(timezone.utc).isoformat()),
@@ -173,9 +192,14 @@ def _event_payload(event: dict, agent_id: str) -> dict:
 
 
 def _requeue_events(events: list[dict]) -> None:
-    """Append unsent events back to the shared buffer."""
+    """Append unsent events back to the shared buffer, keeping the newest
+    events when the total would exceed MAX_BUFFER_SIZE."""
     if not events:
         return
+    room = MAX_BUFFER_SIZE - _line_count(BUFFER_FILE)
+    if room <= 0:
+        return
+    events = events[-room:]
     try:
         BUFFER_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(BUFFER_FILE, "a") as f:
@@ -185,10 +209,39 @@ def _requeue_events(events: list[dict]) -> None:
         pass
 
 
+def _is_permanent_rejection(exc: Exception) -> bool:
+    """4xx responses other than 408/429 will fail the same way on retry."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    status = exc.response.status_code
+    return 400 <= status < 500 and status not in (408, 429)
+
+
+def _warn_missing_agent_id() -> None:
+    marker = BUFFER_FILE.parent / NO_AGENT_ID_MARKER
+    if marker.exists():
+        return
+    print(
+        "[VeriSwarm Guard] Activity upload skipped: no GUARD_AGENT_ID configured. "
+        "Set it in the environment or ~/.veriswarm/env (veriswarm-setup --agent-id).",
+        file=sys.stderr,
+    )
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+    except OSError:
+        pass
+
+
 def flush_to_api() -> None:
     """Send all buffered events to VeriSwarm. Called in a forked child process."""
     api_url, api_key, agent_id, agent_key = _load_config()
     if not api_key and not agent_key:
+        return
+    if not agent_id:
+        # Events must be attributed to a real agent; keep them buffered
+        # (bounded by MAX_BUFFER_SIZE) until one is configured.
+        _warn_missing_agent_id()
         return
 
     events = _read_and_clear_buffer()
@@ -212,8 +265,9 @@ def flush_to_api() -> None:
                 timeout=5.0,
             )
             response.raise_for_status()
-        except Exception:
-            unsent.append(event)
+        except Exception as exc:
+            if not _is_permanent_rejection(exc):
+                unsent.append(event)
 
     _requeue_events(unsent)
 
@@ -235,18 +289,20 @@ def maybe_flush(buffer_count: int) -> None:
         pass
 
 
-def log_session_start(cwd: str = "", **kwargs) -> None:
+def log_session_start(cwd: str = "", session_id: str = "", **kwargs) -> None:
     """Log a session start event."""
     meta = {"cwd": cwd}
     meta.update(kwargs)
-    count = buffer_event("agent.session.started", meta)
+    count = buffer_event("agent.session.started", meta, session_id=session_id)
     maybe_flush(count)
 
 
-def log_pii_detected(pii_types: list[str], count: int, context: str = "") -> None:
+def log_pii_detected(
+    pii_types: list[str], count: int, context: str = "", session_id: str = ""
+) -> None:
     """Log a PII detection event (types only, never values)."""
     meta = {"pii_types": pii_types, "pii_count": count, "context": context}
-    c = buffer_event("guard.pii.detected", meta)
+    c = buffer_event("guard.pii.detected", meta, session_id=session_id)
     maybe_flush(c)
 
 
