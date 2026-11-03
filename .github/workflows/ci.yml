@@ -26,6 +26,22 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
+  python-sdk-py38:
+    # Oldest Python the package declares (requires-python >= 3.8).
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.8'
+      - name: Install package with test extras
+        run: pip install -e '.[webbotauth]' pytest
+      - name: Run tests
+        run: python -m pytest -q
+
   node-sdk:
     runs-on: ubuntu-latest
     defaults:
@@ -123,7 +139,14 @@ jobs:
         run: pip install jsonschema pytest
       - name: Validate JSON schemas
         run: python scripts/validate_schemas.py
+      - name: Test JSON schemas against API-shaped payloads
+        run: python -m pytest -q schemas/tests/test_schemas.py
       - name: Test release guard script
         run: python -m pytest -q scripts/test_check_release_version.py
       - name: Check vendored secret manifests for drift
         run: node scripts/check_secret_manifest.mjs
+      - name: Lint workflows (actionlint)
+        run: >-
+          docker run --rm -v "$PWD:/repo" --workdir /repo
+          rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          -color
