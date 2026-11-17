@@ -718,9 +718,10 @@ def _fail_closed(raw: str) -> None:
     proceed unchanged). Block or withhold according to the event."""
     event = _current_event or {}
     hook_event = event.get("hook_event_name")
+    tool_name = str(event.get("tool_name") or "")
     if hook_event == "UserPromptSubmit":
         _block_prompt(PROMPT_CHECK_FAILED)
-    if hook_event == "PostToolUse" and str(event.get("tool_name") or "").startswith(MCP_PREFIX):
+    if hook_event == "PostToolUse" and tool_name.startswith(MCP_PREFIX):
         _withhold_post_tool_output(event, "the Guard check failed")
     try:
         secret = _has_secret(raw)
@@ -728,6 +729,12 @@ def _fail_closed(raw: str) -> None:
         secret = True
     if secret:
         _block("internal error while checking for secrets")
+    if hook_event == "PreToolUse" and tool_name.startswith(MCP_PREFIX) and not PII_FAIL_OPEN:
+        _block(
+            "the Guard check of this tool call's arguments failed before PII scanning completed. "
+            "Retry, check the VeriSwarm hook logs, or set GUARD_PII_FAIL_OPEN=1 to allow "
+            "unscanned tool calls."
+        )
     sys.exit(0)
 
 
