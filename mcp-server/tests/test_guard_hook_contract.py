@@ -193,6 +193,22 @@ def test_unexpected_crash_with_secret_blocks(monkeypatch, capsys):
     assert code == 2
 
 
+def test_unexpected_pre_tool_crash_blocks_pii_only_input(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(gh, "_guard_strings", _boom)
+
+    code = _run_main(gh, monkeypatch, _event("PreToolUse", tool_input={"body": "email a@b.com"}))
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out.strip() == ""
+    assert "a@b.com" not in captured.err
+
+
 # ── Overall deadline ─────────────────────────────────────────────────
 
 def test_total_api_time_is_bounded_by_the_hook_deadline(monkeypatch, capsys):
