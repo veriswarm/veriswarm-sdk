@@ -237,6 +237,21 @@ def test_post_tool_use_replaces_output_with_tokenized_values(monkeypatch, capsys
     assert "PII" in hso["additionalContext"]
 
 
+def test_post_tool_use_tokenizes_pii_in_output_keys(monkeypatch, capsys):
+    gh = _reload_hook(monkeypatch)
+    monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
+    response = {"users": {"a@b.com": {"role": "admin"}}}
+
+    code = _run_main(gh, monkeypatch, _event("PostToolUse", tool_response=response))
+
+    assert code == 0
+    hso = _output(capsys)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PostToolUse"
+    assert hso["updatedToolOutput"] == {"users": {"[VS:EMAIL:abc123]": {"role": "admin"}}}
+    assert "a@b.com" not in json.dumps(hso)
+    assert "PII" in hso["additionalContext"]
+
+
 def test_post_tool_use_without_pii_leaves_output_alone(monkeypatch, capsys):
     gh = _reload_hook(monkeypatch)
     monkeypatch.setattr(gh, "_tokenize_strict", _fake_pii_tokenizer)
