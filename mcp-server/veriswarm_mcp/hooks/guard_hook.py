@@ -632,7 +632,7 @@ def _protect_tool_output(event: dict) -> None:
             return cache[text]
 
         try:
-            updated, pii_changed = _guard_strings(updated, tokenize_value, keys=False)
+            updated, pii_changed = _guard_strings(updated, tokenize_value)
             changed = changed or pii_changed
         except Exception:
             _post_tool_output(
